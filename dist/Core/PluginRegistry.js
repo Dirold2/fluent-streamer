@@ -26,6 +26,12 @@ class PluginRegistry {
         return this.registry.has(name);
     }
     /**
+     * Returns the factory for a registered plugin, or undefined if not found.
+     */
+    get(name) {
+        return this.registry.get(name);
+    }
+    /**
      * Creates an instance of a registered plugin.
      * @param name - Plugin name
      * @param options - Plugin options
@@ -35,7 +41,7 @@ class PluginRegistry {
     create(name, options) {
         const factory = this.registry.get(name);
         if (!factory)
-            throw new Error(`Audio plugin not found: ${name}`);
+            throw new Error(`Plugin not found: ${name}`);
         return factory(options);
     }
     /**

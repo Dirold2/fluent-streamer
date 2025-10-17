@@ -8,15 +8,8 @@ export interface AudioPluginOptions {
  * It may also expose a small control API for runtime adjustments.
  */
 export interface AudioPlugin {
+    /** Optional diagnostic name for logs and introspection */
+    name?: string;
     /** Create the transform implementing the plugin DSP */
-    createTransform(options: Required<AudioPluginOptions>): Transform;
-}
-/**
- * Simple gain plugin example: multiplies samples by a factor.
- */
-export declare class GainPlugin implements AudioPlugin {
-    private gain;
-    constructor(gain: number);
-    setGain(g: number): void;
     createTransform(options: Required<AudioPluginOptions>): Transform;
 }

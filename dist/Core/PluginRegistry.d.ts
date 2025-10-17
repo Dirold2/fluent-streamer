@@ -21,6 +21,10 @@ export declare class PluginRegistry {
      */
     has(name: string): boolean;
     /**
+     * Returns the factory for a registered plugin, or undefined if not found.
+     */
+    get(name: string): PluginFactory | undefined;
+    /**
      * Creates an instance of a registered plugin.
      * @param name - Plugin name
      * @param options - Plugin options

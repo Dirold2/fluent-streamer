@@ -44,6 +44,8 @@ export interface SimpleFFmpegOptions {
     loggerTag?: string;
     /** Optional abort signal to terminate the process */
     abortSignal?: AbortSignal;
+    /** Suppress warning for output pipeline "premature close" (treat as benign). */
+    suppressPrematureCloseWarning?: boolean;
 }
 /**
  * Represents the current progress state of an ffmpeg process, as parsed

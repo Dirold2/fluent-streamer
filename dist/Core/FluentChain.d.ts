@@ -1,4 +1,4 @@
-import { Transform, Writable } from "stream";
+import { Transform, Writable, Readable } from "stream";
 import { AudioPluginOptions } from "./Filters.js";
 import PluginRegistry from "./PluginRegistry.js";
 /**
@@ -22,7 +22,7 @@ export declare class FluentChain {
     /**
      * Pipe a source stream into the chain and then to a destination.
      */
-    pipeTo(destination: Writable): void;
+    pipe(source: Readable, destination: Writable): void;
     /**
      * Get a single Transform stream representing the whole chain.
      */

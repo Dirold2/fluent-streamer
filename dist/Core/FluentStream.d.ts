@@ -34,6 +34,7 @@
 import { EventEmitter } from "eventemitter3";
 import { type Readable, Transform } from "stream";
 import { type AudioPlugin, type AudioPluginOptions } from "./Filters.js";
+import PluginRegistry from "./PluginRegistry.js";
 import { type SimpleFFmpegOptions, type FFmpegRunResult } from "../Types/index.js";
 /**
  * @class SimpleFFmpeg
@@ -48,12 +49,26 @@ import { type SimpleFFmpegOptions, type FFmpegRunResult } from "../Types/index.j
  * const { output, done } = ff.run();
  */
 export declare class FluentStream extends EventEmitter {
+    private static _globalRegistry;
+    /** Get or create the global plugin registry singleton */
+    private static get globalRegistry();
+    /** Register a plugin globally (preferred API surface) */
+    static registerPlugin(name: string, factory: (options: Required<AudioPluginOptions>) => AudioPlugin): void;
+    /** Check if a plugin is registered globally */
+    static hasPlugin(name: string): boolean;
+    /** Clear global plugins (intended for tests) */
+    static clearPlugins(): void;
     private args;
     private inputStreams;
     private inputFiles;
     private readonly options;
     private pendingFifos;
-    private audioTransformConfig?;
+    audioTransformConfig?: {
+        transform: Transform;
+        sampleRate: number;
+        channels: number;
+        buildEncoder: (enc: FluentStream) => void;
+    };
     private audioPluginConfig?;
     /**
      * Create a new FluentStream builder.
@@ -217,6 +232,24 @@ export declare class FluentStream extends EventEmitter {
      * @returns {FluentStream}
      */
     withAudioPlugin(plugin: AudioPlugin, buildEncoder: (enc: FluentStream) => void, opts?: AudioPluginOptions): FluentStream;
+    /**
+     * Build and attach a chain of audio plugins via registry.
+     * Creates a composed Transform and delegates to withAudioTransform.
+     */
+    withAudioPlugins(registry: PluginRegistry, ...pluginConfigs: Array<string | {
+        name: string;
+        options?: Partial<AudioPluginOptions>;
+    }>): FluentStream;
+    /**
+     * Preferable helper: use globally registered plugins by name.
+     * Equivalent to withAudioPlugins(FluentStream.globalRegistry, ...configs)
+     */
+    usePlugins(...pluginConfigs: Array<string | {
+        name: string;
+        options?: Partial<AudioPluginOptions>;
+    }>): FluentStream;
+    /** Shortcut for a single plugin by name with optional options */
+    usePlugin(name: string, options?: Partial<AudioPluginOptions>): FluentStream;
     /**
      * Execute the FFmpeg command. All processor events are re-emitted.
      * @param {{ffplay?: boolean, [key: string]: any}} [opts]

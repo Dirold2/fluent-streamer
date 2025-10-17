@@ -40,6 +40,7 @@ const fs_1 = require("fs");
 const child_process_1 = require("child_process");
 const path_1 = require("path");
 const os_1 = tslib_1.__importDefault(require("os"));
+const PluginRegistry_js_1 = tslib_1.__importDefault(require("./PluginRegistry.js"));
 const Processor_js_1 = tslib_1.__importDefault(require("./Processor.js"));
 /**
  * @class SimpleFFmpeg
@@ -54,6 +55,26 @@ const Processor_js_1 = tslib_1.__importDefault(require("./Processor.js"));
  * const { output, done } = ff.run();
  */
 class FluentStream extends eventemitter3_1.EventEmitter {
+    // =============== Global Plugin Registry (static) ===============
+    static _globalRegistry = null;
+    /** Get or create the global plugin registry singleton */
+    static get globalRegistry() {
+        if (!this._globalRegistry)
+            this._globalRegistry = new PluginRegistry_js_1.default();
+        return this._globalRegistry;
+    }
+    /** Register a plugin globally (preferred API surface) */
+    static registerPlugin(name, factory) {
+        this.globalRegistry.register(name, factory);
+    }
+    /** Check if a plugin is registered globally */
+    static hasPlugin(name) {
+        return this.globalRegistry.has(name);
+    }
+    /** Clear global plugins (intended for tests) */
+    static clearPlugins() {
+        this._globalRegistry = new PluginRegistry_js_1.default();
+    }
     args = [];
     inputStreams = [];
     inputFiles = [];
@@ -364,6 +385,27 @@ class FluentStream extends eventemitter3_1.EventEmitter {
             buildEncoder,
         };
         return this;
+    }
+    /**
+     * Build and attach a chain of audio plugins via registry.
+     * Creates a composed Transform and delegates to withAudioTransform.
+     */
+    withAudioPlugins(registry, ...pluginConfigs) {
+        const chain = registry.chain(...pluginConfigs);
+        const transform = chain.getTransform();
+        // Use defaults from registry.chain() (48000/2). Allow encoder to be configured afterwards by caller.
+        return this.withAudioTransform(transform, (enc) => enc, { sampleRate: 48000, channels: 2 });
+    }
+    /**
+     * Preferable helper: use globally registered plugins by name.
+     * Equivalent to withAudioPlugins(FluentStream.globalRegistry, ...configs)
+     */
+    usePlugins(...pluginConfigs) {
+        return this.withAudioPlugins(FluentStream.globalRegistry, ...pluginConfigs);
+    }
+    /** Shortcut for a single plugin by name with optional options */
+    usePlugin(name, options) {
+        return this.usePlugins({ name, options });
     }
     /**
      * Execute the FFmpeg command. All processor events are re-emitted.
