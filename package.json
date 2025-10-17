@@ -8,7 +8,6 @@
     "ffmpeg",
     "typescript",
     "fluent",
-    "ffmpeg",
     "video",
     "audio",
     "streaming"
@@ -17,7 +16,6 @@
   "license": "MIT",
   "scripts": {
     "build": "tsc",
-    "prepare": "npm run build",
     "lint": "eslint . --ext .ts",
     "format": "prettier --write \"src/**/*.ts\"",
     "test": "vitest run",
