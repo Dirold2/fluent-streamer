@@ -4,8 +4,8 @@
  */
 import { EventEmitter } from "eventemitter3";
 import { type Readable, Transform } from "stream";
-import { type AudioPlugin, type AudioPluginOptions } from "./Filters";
-import { type SimpleFFmpegOptions, type FFmpegRunResult } from "src/Types";
+import { type AudioPlugin, type AudioPluginOptions } from "./Filters.js";
+import { type SimpleFFmpegOptions, type FFmpegRunResult } from "src/Types/index.js";
 export interface FFmpegProgress {
     frame?: number;
     fps?: number;
@@ -114,7 +114,10 @@ export declare class FluentStream extends EventEmitter {
      * Execute using the low-level Processor. Subscribes to Processor events
      * and re-emits them from the wrapper instance.
      */
-    run(): FFmpegRunResult;
+    run(opts?: {
+        ffplay?: boolean;
+        [key: string]: any;
+    }): FFmpegRunResult;
     /** Get a copy of the constructed args. */
     getArgs(): string[];
     /** Get full command string preview. */

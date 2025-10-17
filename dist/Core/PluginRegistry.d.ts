@@ -1,5 +1,5 @@
-import { AudioPluginOptions, AudioPlugin } from "./Filters";
-import { FluentChain } from "./FluentChain";
+import { AudioPluginOptions, AudioPlugin } from "./Filters.js";
+import { FluentChain } from "./FluentChain.js";
 type PluginFactory = (options: Required<AudioPluginOptions>) => AudioPlugin;
 /**
  * Registry for audio plugins.

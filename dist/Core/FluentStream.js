@@ -11,7 +11,7 @@ const fs_1 = require("fs");
 const child_process_1 = require("child_process");
 const path_1 = require("path");
 const os_1 = tslib_1.__importDefault(require("os"));
-const Processor_1 = tslib_1.__importDefault(require("./Processor"));
+const Processor_js_1 = tslib_1.__importDefault(require("./Processor.js"));
 /**
  * SimpleFFmpeg provides a convenient, chainable interface for constructing
  * FFmpeg commands. It delegates execution to the low-level Processor.
@@ -226,11 +226,17 @@ class FluentStream extends eventemitter3_1.EventEmitter {
      * Execute using the low-level Processor. Subscribes to Processor events
      * and re-emits them from the wrapper instance.
      */
-    run() {
+    run(opts = {}) {
         // Ensure any declared FIFOs exist synchronously before spawning ffmpeg
         for (const fifoPath of this.pendingFifos) {
             this.ensureFifoSync(fifoPath);
         }
+        // Получаем опции для ffplay: либо из opts, либо из this.options as fallback
+        const useFfplay = opts.ffplay !== undefined
+            ? opts.ffplay
+            : this.options.useFfplay !== undefined
+                ? this.options.useFfplay
+                : false;
         // If plugin is provided, construct transform from plugin
         if (this.audioPluginConfig && !this.audioTransformConfig) {
             const t = this.audioPluginConfig.plugin.createTransform(this.audioPluginConfig.options);
@@ -238,13 +244,13 @@ class FluentStream extends eventemitter3_1.EventEmitter {
             return this.withAudioTransform(t, this.audioPluginConfig.buildEncoder, {
                 sampleRate,
                 channels,
-            }).run();
+            }).run(opts); // пробрасываем новые опции
         }
         // If JS audio transform is enabled, run decode -> transform -> encode chain
         if (this.audioTransformConfig) {
             const { transform, sampleRate, channels, buildEncoder } = this.audioTransformConfig;
             // Build decoder args (inputs -> PCM s16le pipe)
-            const decoder = new Processor_1.default({
+            const decoder = new Processor_js_1.default({
                 ffmpegPath: this.options.ffmpegPath,
                 failFast: this.options.failFast,
                 extraGlobalArgs: this.options.extraGlobalArgs,
@@ -276,7 +282,7 @@ class FluentStream extends eventemitter3_1.EventEmitter {
             });
             buildEncoder(encoderBuilder);
             const encoderArgsTail = encoderBuilder.getArgs();
-            const encoder = new Processor_1.default({
+            const encoder = new Processor_js_1.default({
                 ffmpegPath: this.options.ffmpegPath,
                 failFast: this.options.failFast,
                 extraGlobalArgs: this.options.extraGlobalArgs,
@@ -315,9 +321,41 @@ class FluentStream extends eventemitter3_1.EventEmitter {
             encoder.on("terminated", (s) => this.emit("terminated", s));
             // Ensure decoder completion propagates if encoder finishes first
             decodeDone.catch((e) => this.emit("error", e));
+            // Если установлен useFfplay, подаем вывод в ffplay
+            if (useFfplay) {
+                const { spawn } = require("child_process");
+                const ffplay = spawn("ffplay", [
+                    "-f",
+                    "s16le",
+                    "-ar",
+                    String(sampleRate),
+                    "-ac",
+                    String(channels),
+                    "-nodisp",
+                    "-autoexit",
+                    "pipe:0",
+                ]);
+                output.pipe(ffplay.stdin);
+                ffplay.stderr.on("data", (data) => this.emit("ffplay-stderr", data.toString()));
+                ffplay.on("close", (code, signal) => this.emit("ffplay-close", { code, signal }));
+                // done resolves when encoder done + ffplay exited
+                const ffplayDonePromise = new Promise((resolve, reject) => {
+                    ffplay.on("exit", (code) => {
+                        if (code === 0)
+                            resolve();
+                        else
+                            reject(new Error(`ffplay exited with code ${code}`));
+                    });
+                    ffplay.on("error", (err) => reject(err));
+                });
+                return {
+                    output,
+                    done: Promise.all([done, ffplayDonePromise]).then(() => { }),
+                };
+            }
             return { output, done };
         }
-        const processor = new Processor_1.default({
+        const processor = new Processor_js_1.default({
             ffmpegPath: this.options.ffmpegPath,
             failFast: this.options.failFast,
             extraGlobalArgs: this.options.extraGlobalArgs,

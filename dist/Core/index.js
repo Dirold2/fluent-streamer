@@ -4,12 +4,12 @@ exports.FluentChain = exports.PluginRegistry = exports.FluentStream = exports.Pr
 /**
  * Core public API: low-level `Processor` and fluent `SimpleFFmpeg` wrapper.
  */
-var Processor_1 = require("./Processor");
-Object.defineProperty(exports, "Processor", { enumerable: true, get: function () { return Processor_1.Processor; } });
-var FluentStream_1 = require("./FluentStream");
-Object.defineProperty(exports, "FluentStream", { enumerable: true, get: function () { return FluentStream_1.FluentStream; } });
-var PluginRegistry_1 = require("./PluginRegistry");
-Object.defineProperty(exports, "PluginRegistry", { enumerable: true, get: function () { return PluginRegistry_1.PluginRegistry; } });
-var FluentChain_1 = require("./FluentChain");
-Object.defineProperty(exports, "FluentChain", { enumerable: true, get: function () { return FluentChain_1.FluentChain; } });
+var Processor_js_1 = require("./Processor.js");
+Object.defineProperty(exports, "Processor", { enumerable: true, get: function () { return Processor_js_1.Processor; } });
+var FluentStream_js_1 = require("./FluentStream.js");
+Object.defineProperty(exports, "FluentStream", { enumerable: true, get: function () { return FluentStream_js_1.FluentStream; } });
+var PluginRegistry_js_1 = require("./PluginRegistry.js");
+Object.defineProperty(exports, "PluginRegistry", { enumerable: true, get: function () { return PluginRegistry_js_1.PluginRegistry; } });
+var FluentChain_js_1 = require("./FluentChain.js");
+Object.defineProperty(exports, "FluentChain", { enumerable: true, get: function () { return FluentChain_js_1.FluentChain; } });
 //# sourceMappingURL=index.js.map

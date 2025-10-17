@@ -1,7 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PluginRegistry = void 0;
-const FluentChain_1 = require("./FluentChain");
+const FluentChain_js_1 = require("./FluentChain.js");
 /**
  * Registry for audio plugins.
  *
@@ -48,7 +48,7 @@ class PluginRegistry {
         // Normalize plugin configs
         const configs = pluginConfigs.map((p) => typeof p === "string" ? { name: p, options: {} } : p);
         const defaultOptions = { sampleRate: 48000, channels: 2 };
-        return new FluentChain_1.FluentChain(this, configs, defaultOptions);
+        return new FluentChain_js_1.FluentChain(this, configs, defaultOptions);
     }
 }
 exports.PluginRegistry = PluginRegistry;
