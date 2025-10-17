@@ -14,7 +14,7 @@
  */
 import { EventEmitter } from "eventemitter3";
 import { type Readable } from "stream";
-import { type SimpleFFmpegOptions, type FFmpegRunResult } from "src/Types/index.js";
+import { type SimpleFFmpegOptions, type FFmpegRunResult } from "../Types/index.js";
 /**
  * @typedef {object} ProcessorOptions
  * @augments SimpleFFmpegOptions
