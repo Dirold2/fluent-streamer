@@ -1,5 +1,5 @@
 import { Transform, PassThrough, Writable, Readable } from "stream";
-import { AudioPluginOptions } from "./Filters.js";
+import { AudioPlugin, AudioPluginOptions } from "./Filters.js";
 import PluginRegistry from "./PluginRegistry.js";
 
 /**
@@ -9,6 +9,7 @@ import PluginRegistry from "./PluginRegistry.js";
  */
 export class FluentChain {
   private transforms: Transform[] = [];
+  private controllers: AudioPlugin[] = [];
 
   constructor(
     private registry: PluginRegistry,
@@ -25,17 +26,20 @@ export class FluentChain {
    * Build Transform streams from plugin names and options.
    */
   private buildChain(): void {
-    this.transforms = this.pluginConfigs.map(({ name, options }) => {
+    this.transforms = [];
+    this.controllers = [];
+    for (const { name, options } of this.pluginConfigs) {
       if (!this.registry.has(name))
         throw new Error(`Plugin not found: ${name}`);
       const mergedOptions: Required<AudioPluginOptions> = {
         ...this.defaultOptions,
         ...options,
       };
-      return this.registry
-        .create(name, mergedOptions)
-        .createTransform(mergedOptions);
-    });
+      const plugin = this.registry.create(name, mergedOptions);
+      const transform = plugin.createTransform(mergedOptions);
+      this.controllers.push(plugin);
+      this.transforms.push(transform);
+    }
   }
 
   /**
@@ -112,5 +116,12 @@ export class FluentChain {
     outputProxy.on('error', forwardError);
 
     return combined;
+  }
+
+  /**
+   * Return controller instances (plugin objects) to allow hot parameter updates
+   */
+  getControllers(): AudioPlugin[] {
+    return [...this.controllers];
   }
 }

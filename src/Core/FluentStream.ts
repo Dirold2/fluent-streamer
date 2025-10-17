@@ -474,6 +474,8 @@ export class FluentStream extends EventEmitter {
   ): FluentStream {
     const chain: FluentChain = registry.chain(...pluginConfigs);
     const transform = chain.getTransform();
+    // capture controllers for hot updates
+    (this as any)._pluginControllers = chain.getControllers();
 
     // Use defaults from registry.chain() (48000/2). Allow encoder to be configured afterwards by caller.
     return this.withAudioTransform(
@@ -498,6 +500,11 @@ export class FluentStream extends EventEmitter {
   /** Shortcut for a single plugin by name with optional options */
   usePlugin(name: string, options?: Partial<AudioPluginOptions>): FluentStream {
     return this.usePlugins({ name, options });
+  }
+
+  /** Get controller instances of the last configured plugin chain (if any) */
+  getPluginControllers(): AudioPlugin[] {
+    return ((this as any)._pluginControllers ?? []) as AudioPlugin[];
   }
 
   /**
