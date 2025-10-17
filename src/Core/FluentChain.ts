@@ -1,6 +1,6 @@
 import { Transform, PassThrough, Writable } from "stream";
-import { AudioPluginOptions } from "./Filters";
-import PluginRegistry from "./PluginRegistry";
+import { AudioPluginOptions } from "./Filters.js";
+import PluginRegistry from "./PluginRegistry.js";
 
 
 /**

@@ -8,9 +8,9 @@ import { existsSync, lstatSync, mkdirSync } from "fs";
 import { spawnSync } from "child_process";
 import { dirname } from "path";
 import os from "os";
-import { type AudioPlugin, type AudioPluginOptions } from "./Filters";
-import Processor from "./Processor";
-import { type SimpleFFmpegOptions, type FFmpegRunResult } from "src/Types";
+import { type AudioPlugin, type AudioPluginOptions } from "./Filters.js";
+import Processor from "./Processor.js";
+import { type SimpleFFmpegOptions, type FFmpegRunResult } from "src/Types/index.js";
 
 export interface FFmpegProgress {
   frame?: number;
@@ -268,11 +268,20 @@ export class FluentStream extends EventEmitter {
    * Execute using the low-level Processor. Subscribes to Processor events
    * and re-emits them from the wrapper instance.
    */
-  run(): FFmpegRunResult {
+  run(opts: { ffplay?: boolean; [key: string]: any } = {}): FFmpegRunResult {
     // Ensure any declared FIFOs exist synchronously before spawning ffmpeg
     for (const fifoPath of this.pendingFifos) {
       this.ensureFifoSync(fifoPath);
     }
+
+    // Получаем опции для ffplay: либо из opts, либо из this.options as fallback
+    const useFfplay =
+      opts.ffplay !== undefined
+        ? opts.ffplay
+        : (this.options as any).useFfplay !== undefined
+        ? (this.options as any).useFfplay
+        : false;
+
     // If plugin is provided, construct transform from plugin
     if (this.audioPluginConfig && !this.audioTransformConfig) {
       const t = this.audioPluginConfig.plugin.createTransform(
@@ -282,7 +291,7 @@ export class FluentStream extends EventEmitter {
       return this.withAudioTransform(t, this.audioPluginConfig.buildEncoder, {
         sampleRate,
         channels,
-      }).run();
+      }).run(opts); // пробрасываем новые опции
     }
 
     // If JS audio transform is enabled, run decode -> transform -> encode chain
@@ -380,6 +389,41 @@ export class FluentStream extends EventEmitter {
 
       // Ensure decoder completion propagates if encoder finishes first
       decodeDone.catch((e) => this.emit("error", e as any));
+
+      // Если установлен useFfplay, подаем вывод в ffplay
+      if (useFfplay) {
+        const { spawn } = require("child_process");
+        const ffplay = spawn("ffplay", [
+          "-f",
+          "s16le",
+          "-ar",
+          String(sampleRate),
+          "-ac",
+          String(channels),
+          "-nodisp",
+          "-autoexit",
+          "pipe:0",
+        ]);
+        output.pipe(ffplay.stdin);
+        ffplay.stderr.on("data", (data: Buffer) =>
+          this.emit("ffplay-stderr", data.toString())
+        );
+        ffplay.on("close", (code: number, signal: string) =>
+          this.emit("ffplay-close", { code, signal })
+        );
+        // done resolves when encoder done + ffplay exited
+        const ffplayDonePromise = new Promise<void>((resolve, reject) => {
+          ffplay.on("exit", (code: number) => {
+            if (code === 0) resolve();
+            else reject(new Error(`ffplay exited with code ${code}`));
+          });
+          ffplay.on("error", (err: Error) => reject(err));
+        });
+        return {
+          output,
+          done: Promise.all([done, ffplayDonePromise]).then(() => {}),
+        };
+      }
 
       return { output, done };
     }
