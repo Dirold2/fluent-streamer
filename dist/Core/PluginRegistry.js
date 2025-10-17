@@ -47,7 +47,10 @@ class PluginRegistry {
             throw new Error("No plugin names provided");
         // Normalize plugin configs
         const configs = pluginConfigs.map((p) => typeof p === "string" ? { name: p, options: {} } : p);
-        const defaultOptions = { sampleRate: 48000, channels: 2 };
+        const defaultOptions = {
+            sampleRate: 48000,
+            channels: 2,
+        };
         return new FluentChain_js_1.FluentChain(this, configs, defaultOptions);
     }
 }

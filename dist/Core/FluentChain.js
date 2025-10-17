@@ -25,8 +25,13 @@ class FluentChain {
         this.transforms = this.pluginConfigs.map(({ name, options }) => {
             if (!this.registry.has(name))
                 throw new Error(`Plugin not found: ${name}`);
-            const mergedOptions = { ...this.defaultOptions, ...options };
-            return this.registry.create(name, mergedOptions).createTransform(mergedOptions);
+            const mergedOptions = {
+                ...this.defaultOptions,
+                ...options,
+            };
+            return this.registry
+                .create(name, mergedOptions)
+                .createTransform(mergedOptions);
         });
     }
     /**

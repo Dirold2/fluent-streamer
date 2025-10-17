@@ -183,7 +183,11 @@ class Processor extends eventemitter3_1.EventEmitter {
         this.process.once("spawn", () => {
             this.emit("spawn", { pid: this.process?.pid ?? null });
         });
-        return { output: this.outputStream, done: this.donePromise, stop: () => this.kill() };
+        return {
+            output: this.outputStream,
+            done: this.donePromise,
+            stop: () => this.kill(),
+        };
     }
     /**
      * Forcefully terminate the ffmpeg process.
