@@ -15,14 +15,6 @@
   ],
   "author": "dirold2",
   "license": "MIT",
-  "scripts": {
-    "build": "tsc",
-    "prepare": "npm run build",
-    "lint": "eslint . --ext .ts",
-    "format": "prettier --write \"src/**/*.ts\"",
-    "test": "vitest run",
-    "test:watch": "vitest"
-  },
   "dependencies": {
     "eventemitter3": "^5.0.1",
     "execa": "^9.6.0",
