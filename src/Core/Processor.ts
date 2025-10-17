@@ -20,7 +20,7 @@ import {
   type FFmpegRunResult,
   type Logger,
   type FFmpegProgress,
-} from "src/Types/index.js";
+} from "../Types/index.js";
 
 // Added ERR_STREAM_PREMATURE_CLOSE code so we can ignore this error in stream pipeline handling
 const TERMINATION_ERROR_PATTERNS = [

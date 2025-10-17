@@ -53,31 +53,59 @@ export interface SimpleFFmpegOptions {
 }
 
 /**
- * Represents the progress of an ffmpeg process.
+ * Represents the current progress state of an ffmpeg process, as parsed
+ * from key-value updates from ffmpeg's progress output.
+ *
+ * All fields are optional and may be missing depending on ffmpeg's output.
  */
 export interface FFmpegProgress {
+  /** Number of frames processed so far */
   frame?: number;
+  /** Current processing frames per second */
   fps?: number;
+  /** Current output bitrate (e.g., "1700kbits/s") */
   bitrate?: string;
+  /** Total size of output file so far, in bytes */
   totalSize?: number;
+  /** Output time in microseconds */
   outTimeUs?: number;
+  /** Output timestamp as a time string (e.g., "00:01:30.05") */
   outTime?: string;
+  /** Number of duplicate frames detected */
   dupFrames?: number;
+  /** Number of dropped frames */
   dropFrames?: number;
+  /** Current processing speed (e.g., 1 = real time) */
   speed?: number;
+  /** Progress marker string ("continue", "end") */
   progress?: string;
 }
 
 /**
- * Statistics about an ffmpeg process execution.
+ * Represents statistics about an ffmpeg process execution.
+ *
+ * @property {Date} startTime - The timestamp when the ffmpeg process started.
+ * @property {Date} [endTime] - The timestamp when the ffmpeg process ended (optional).
+ * @property {number} [duration] - The total duration of the ffmpeg process in milliseconds (optional).
+ * @property {number} [exitCode] - The exit code returned by the ffmpeg process (optional).
+ * @property {string} [signal] - The signal that caused the ffmpeg process to terminate, if any (optional).
+ * @property {number} stderrLines - The number of lines output to stderr.
+ * @property {number} bytesProcessed - The number of bytes processed during execution.
  */
 export interface FFmpegStats {
+  /** The timestamp when the ffmpeg process started. */
   startTime: Date;
+  /** The timestamp when the ffmpeg process ended (optional). */
   endTime?: Date;
+  /** The total duration of the ffmpeg process in milliseconds (optional). */
   duration?: number;
+  /** The exit code returned by the ffmpeg process (optional). */
   exitCode?: number;
+  /** The signal that caused the ffmpeg process to terminate, if any (optional). */
   signal?: string;
+  /** The number of lines output to stderr. */
   stderrLines: number;
+  /** The number of bytes processed during execution. */
   bytesProcessed: number;
 }
 
