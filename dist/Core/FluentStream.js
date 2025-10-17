@@ -62,7 +62,8 @@ class FluentStream extends eventemitter3_1.EventEmitter {
     /**
      * Create a new FluentStream builder.
      *
-     * @param options - default configuration for created Processor
+     * @param {SimpleFFmpegOptions} [options] - Default configuration for the created Processor.
+     *
      * @example
      * const ff = new FluentStream({ enableProgressTracking: true });
      */
@@ -85,22 +86,18 @@ class FluentStream extends eventemitter3_1.EventEmitter {
     }
     // ================= Fluent API =================
     /**
-     * Insert global options (appear before any inputs), e.g. "-hide_banner".
-     * @param {...string} opts - one or more global arguments for ffmpeg.
-     * @returns {FluentStream}
-     * @example
-     * ff.globalOptions('-hide_banner');
+     * Adds global ffmpeg options to the arguments.
+     * @param {...string} opts - The global options to set (e.g. "-hide_banner").
+     * @returns {FluentStream} This instance for chaining.
      */
     globalOptions(...opts) {
         this.args.unshift(...opts);
         return this;
     }
     /**
-     * Insert options that must precede the last input (e.g. "-f lavfi").
-     * @param {...string} opts
-     * @returns {FluentStream}
-     * @example
-     * ff.inputOptions('-f', 'lavfi');
+     * Adds input-specific ffmpeg options.
+     * @param {...string} opts - The options to add before the most recent "-i".
+     * @returns {FluentStream} This instance for chaining.
      */
     inputOptions(...opts) {
         const lastInputIndex = this.args.lastIndexOf("-i");
@@ -113,12 +110,9 @@ class FluentStream extends eventemitter3_1.EventEmitter {
         return this;
     }
     /**
-     * Add an input source (filepath or stream). Streams are piped via stdin.
-     * @param {string|Readable} input - file path or readable stream
-     * @returns {FluentStream}
-     * @example
-     * ff.input('input.mp3')
-     *   .input(someStream);
+     * Adds an input (file path or stream) to the ffmpeg command.
+     * @param {string|Readable} input - Path or stream to use as input.
+     * @returns {FluentStream} This instance for chaining.
      */
     input(input) {
         if (typeof input === "string") {
@@ -133,12 +127,9 @@ class FluentStream extends eventemitter3_1.EventEmitter {
         return this;
     }
     /**
-     * Add a named pipe (FIFO) as an input. FIFO is created at run() if missing.
-     *
-     * @param {string} fifoPath
-     * @returns {FluentStream}
-     * @example
-     * ff.inputFifo('/tmp/somefifo');
+     * Adds a FIFO (named pipe) as an input.
+     * @param {string} fifoPath - Path to the FIFO.
+     * @returns {FluentStream} This instance for chaining.
      */
     inputFifo(fifoPath) {
         this.pendingFifos.push(fifoPath);
@@ -146,14 +137,11 @@ class FluentStream extends eventemitter3_1.EventEmitter {
         return this;
     }
     /**
-     * Prepare a FIFO path and register it as the next input automatically.
-     * @param {object} [options] - options for FIFO creation
-     * @param {string} [options.dir] - directory to create FIFO in
-     * @param {string} [options.prefix] - prefix for FIFO filename
-     * @returns {string} absolute FIFO path
-     * @example
-     * const fifoPath = ff.prepareNextTrackFifo();
-     * // Write to fifoPath asynchronously.
+     * Prepares and adds a unique FIFO input for a new track, returning its path.
+     * @param {Object} [options]
+     * @param {string} [options.dir] - Directory for the FIFO.
+     * @param {string} [options.prefix] - Prefix for the FIFO filename.
+     * @returns {string} The FIFO path.
      */
     prepareNextTrackFifo(options) {
         const dir = options?.dir ?? os_1.default.tmpdir();
@@ -164,182 +152,147 @@ class FluentStream extends eventemitter3_1.EventEmitter {
         return path;
     }
     /**
-     * Specify output target (file path, or ffmpeg stream target string).
-     * @param {string} output
-     * @returns {FluentStream}
-     * @example
-     * ff.output('output.mp3')
+     * Sets the output file or pipe for the ffmpeg command.
+     * @param {string} output - Path or ffmpeg output spec (e.g. "pipe:1").
+     * @returns {FluentStream} This instance for chaining.
      */
     output(output) {
         this.args.push(output);
         return this;
     }
     /**
-     * Add output options (appended before output).
-     * @param {...string} opts
-     * @returns {FluentStream}
-     * @example
-     * ff.outputOptions('-b:a', '128k');
+     * Adds extra options to the end of ffmpeg command (output side).
+     * @param {...string} opts - The options to add after outputs.
+     * @returns {FluentStream} This instance for chaining.
      */
     outputOptions(...opts) {
         this.args.push(...opts);
         return this;
     }
     /**
-     * Set video codec.
-     * @param {string} codec
-     * @returns {FluentStream}
-     * @example
-     * ff.videoCodec('libx264');
+     * Sets the video codec.
+     * @param {string} codec - The video codec name.
+     * @returns {FluentStream} This instance for chaining.
      */
     videoCodec(codec) {
         this.args.push("-c:v", codec);
         return this;
     }
     /**
-     * Set audio codec.
-     * @param {string} codec
-     * @returns {FluentStream}
-     * @example
-     * ff.audioCodec('aac');
+     * Sets the audio codec.
+     * @param {string} codec - The audio codec name.
+     * @returns {FluentStream} This instance for chaining.
      */
     audioCodec(codec) {
         this.args.push("-c:a", codec);
         return this;
     }
     /**
-     * Set video bitrate.
-     * @param {string} bitrate
-     * @returns {FluentStream}
-     * @example
-     * ff.videoBitrate('1M');
+     * Sets the video bitrate.
+     * @param {string} bitrate - Video bitrate value (e.g. "1000k").
+     * @returns {FluentStream} This instance for chaining.
      */
     videoBitrate(bitrate) {
         this.args.push("-b:v", bitrate);
         return this;
     }
     /**
-     * Set audio bitrate.
-     * @param {string} bitrate
-     * @returns {FluentStream}
-     * @example
-     * ff.audioBitrate('128k');
+     * Sets the audio bitrate.
+     * @param {string} bitrate - Audio bitrate value (e.g. "192k").
+     * @returns {FluentStream} This instance for chaining.
      */
     audioBitrate(bitrate) {
         this.args.push("-b:a", bitrate);
         return this;
     }
     /**
-     * Set output video size.
-     * @param {string} size
-     * @returns {FluentStream}
-     * @example
-     * ff.size('640x480');
+     * Sets the target video size.
+     * @param {string} size - The target size, e.g. "640x480".
+     * @returns {FluentStream} This instance for chaining.
      */
     size(size) {
         this.args.push("-s", size);
         return this;
     }
     /**
-     * Set output frames per second.
-     * @param {number} fps
-     * @returns {FluentStream}
-     * @example
-     * ff.fps(24);
+     * Sets the output video fps.
+     * @param {number} fps - Frames per second.
+     * @returns {FluentStream} This instance for chaining.
      */
     fps(fps) {
         this.args.push("-r", fps.toString());
         return this;
     }
     /**
-     * Limit duration.
-     * @param {string|number} duration - seconds or ffmpeg time string
-     * @returns {FluentStream}
-     * @example
-     * ff.duration(10);
+     * Sets the output duration.
+     * @param {string|number} duration - Output duration (seconds or ffmpeg duration string).
+     * @returns {FluentStream} This instance for chaining.
      */
     duration(duration) {
         this.args.push("-t", duration.toString());
         return this;
     }
     /**
-     * Seek input.
-     * @param {string|number} time - seconds or ffmpeg time string
-     * @returns {FluentStream}
-     * @example
-     * ff.seek(2.5);
+     * Sets the start time offset for input.
+     * @param {string|number} time - Time offset (seconds or ffmpeg timestamp string).
+     * @returns {FluentStream} This instance for chaining.
      */
     seek(time) {
         this.args.push("-ss", time.toString());
         return this;
     }
     /**
-     * Set container/output format.
-     * @param {string} format - e.g. 'mp3'
-     * @returns {FluentStream}
-     * @example
-     * ff.format('wav');
+     * Sets the output format.
+     * @param {string} format - Output format, e.g. "mp4" or "mp3".
+     * @returns {FluentStream} This instance for chaining.
      */
     format(format) {
         this.args.push("-f", format);
         return this;
     }
     /**
-     * Force overwrite output.
-     * @returns {FluentStream}
-     * @example
-     * ff.overwrite();
+     * Enables overwrite of output files.
+     * @returns {FluentStream} This instance for chaining.
      */
     overwrite() {
         this.args.push("-y");
         return this;
     }
     /**
-     * Forbid overwrite output.
-     * @returns {FluentStream}
-     * @example
-     * ff.noOverwrite();
+     * Disables overwrite of output files (fail if exists).
+     * @returns {FluentStream} This instance for chaining.
      */
     noOverwrite() {
         this.args.push("-n");
         return this;
     }
     /**
-     * Add a custom complex filter string.
-     * @param {string} filterGraph
-     * @returns {FluentStream}
-     * @example
-     * ff.complexFilter('[0:a][1:a]acrossfade=d=5:c1=tri:c2=tri[aout]');
+     * Sets a complex filter for ffmpeg.
+     * @param {string} filterGraph - Filter graph string.
+     * @returns {FluentStream} This instance for chaining.
      */
     complexFilter(filterGraph) {
         this.args.push("-filter_complex", filterGraph);
         return this;
     }
     /**
-     * Map a specific stream label to output (e.g., '[aout]' or '[vout]').
-     * @param {string} label
-     * @returns {FluentStream}
-     * @example
-     * ff.map('[aout]');
+     * Adds a -map argument.
+     * @param {string} label - The ffmpeg stream selector.
+     * @returns {FluentStream} This instance for chaining.
      */
     map(label) {
         this.args.push("-map", label);
         return this;
     }
     /**
-     * Audio crossfade helper using FFmpeg acrossfade filter.
-     * Crossfades audio from inputA to inputB for duration seconds.
-     * Note: requires at least two inputs. By default uses [0:a] and [1:a].
-     *
-     * @param {number} durationSeconds
-     * @param {object} [options]
-     * @param {number} [options.inputA] - Index of first input (default: 0)
-     * @param {number} [options.inputB] - Index of second input (default: 1)
-     * @param {string} [options.curve1] - Fade curve type for inputA (default: "tri")
-     * @param {string} [options.curve2] - Fade curve type for inputB (default: "tri")
-     * @returns {FluentStream}
-     * @example
-     * ff.crossfadeAudio(4);
+     * Adds an audio crossfade filter between two inputs.
+     * @param {number} durationSeconds - Duration of the crossfade in seconds.
+     * @param {Object} [options] - Additional crossfade options.
+     * @param {number} [options.inputA=0] - Index of the first audio input.
+     * @param {number} [options.inputB=1] - Index of the second audio input.
+     * @param {string} [options.curve1='tri'] - First curve type.
+     * @param {string} [options.curve2='tri'] - Second curve type.
+     * @returns {FluentStream} This instance for chaining.
      */
     crossfadeAudio(durationSeconds, options) {
         const inputA = options?.inputA ?? 0;
@@ -351,19 +304,14 @@ class FluentStream extends eventemitter3_1.EventEmitter {
         return this;
     }
     /**
-     * Enable JS audio processing between decode and encode stages.
-     * You provide a Transform (e.g., your AudioProcessor) and a builder to configure the encoder stage.
-     * The decoder stage is generated automatically to produce PCM s16le at the given rate/channels.
+     * Attach a JS audio transform (a Transform stream) to process PCM data between decode and encode.
      *
-     * @param {Transform} transform - Node.js Transform stream
-     * @param {(enc:FluentStream)=>void} buildEncoder - function to configure output/encoding
-     * @param {object} [opts]
-     * @param {number} [opts.sampleRate=48000]
-     * @param {number} [opts.channels=2]
-     * @returns {FluentStream}
-     * @example
-     * // Pipe decoded PCM through custom processor:
-     * ff.withAudioTransform(myAudioTransform, enc => enc.audioCodec('aac').output('file.aac'));
+     * @param {Transform} transform - The Node.js Transform stream to apply to decoded PCM audio.
+     * @param {function(FluentStream):void} buildEncoder - Callback to configure encoding/output (receives a FluentStream).
+     * @param {Object} [opts] - Audio transform options.
+     * @param {number} [opts.sampleRate=48000] - Sample rate for PCM.
+     * @param {number} [opts.channels=2] - Channel count for PCM.
+     * @returns {FluentStream} This instance for chaining.
      */
     withAudioTransform(transform, buildEncoder, opts) {
         this.audioTransformConfig = {
@@ -375,12 +323,12 @@ class FluentStream extends eventemitter3_1.EventEmitter {
         return this;
     }
     /**
-     * Plug-in style audio processing.
-     * The plugin returns a Transform; we wire it as withAudioTransform.
-     * @param {AudioPlugin} plugin
-     * @param {(enc:FluentStream)=>void} buildEncoder
-     * @param {AudioPluginOptions} [opts]
-     * @returns {FluentStream}
+     * Attaches a custom AudioPlugin as a JS transform, and wires up the encoder step.
+     *
+     * @param {AudioPlugin} plugin - The plugin object (must implement createTransform).
+     * @param {function(FluentStream):void} buildEncoder - Encoder customization callback.
+     * @param {AudioPluginOptions} [opts] - Audio options.
+     * @returns {FluentStream} This instance for chaining.
      */
     withAudioPlugin(plugin, buildEncoder, opts) {
         this.audioPluginConfig = {
@@ -395,27 +343,18 @@ class FluentStream extends eventemitter3_1.EventEmitter {
     }
     // ================= Execute via Processor =================
     /**
-     * Execute using the low-level Processor. Subscribes to Processor events
-     * and re-emits them from the wrapper instance.
+     * Execute with the underlying Processor. All processor events are re-emitted.
      *
-     * @param {object} [opts]
-     * @param {boolean} [opts.ffplay] - pipe output to ffplay for previewing
-     * @returns {FFmpegRunResult}
-     * @example
-     * const { output, done } = ff.run();
+     * @param {Object} [opts] - Optional. If opts.ffplay is true, will attempt to play the output via ffplay.
+     * @returns {FFmpegRunResult} The result object containing the output stream, a done promise, and a stop method.
      */
     run(opts = {}) {
         // Ensure any declared FIFOs exist synchronously before spawning ffmpeg
         for (const fifoPath of this.pendingFifos) {
             this.ensureFifoSync(fifoPath);
         }
-        // Получаем опции для ffplay: либо из opts, либо из this.options as fallback
-        const useFfplay = opts.ffplay !== undefined
-            ? opts.ffplay
-            : this.options.useFfplay !== undefined
-                ? this.options.useFfplay
-                : false;
-        // If plugin is provided, construct transform from plugin
+        // To stop all sub-processes
+        const allProcs = [];
         if (this.audioPluginConfig && !this.audioTransformConfig) {
             const t = this.audioPluginConfig.plugin.createTransform(this.audioPluginConfig.options);
             const { sampleRate, channels } = this.audioPluginConfig.options;
@@ -424,10 +363,8 @@ class FluentStream extends eventemitter3_1.EventEmitter {
                 channels,
             }).run(opts);
         }
-        // If JS audio transform is enabled, run decode -> transform -> encode chain
         if (this.audioTransformConfig) {
             const { transform, sampleRate, channels, buildEncoder } = this.audioTransformConfig;
-            // Build decoder args (inputs -> PCM s16le pipe)
             const decoder = new Processor_js_1.default({
                 ffmpegPath: this.options.ffmpegPath,
                 failFast: this.options.failFast,
@@ -436,21 +373,18 @@ class FluentStream extends eventemitter3_1.EventEmitter {
                 logger: this.options.logger,
             });
             const decoderArgs = [];
-            // inputs from files/fifos
             for (const f of this.inputFiles)
                 decoderArgs.push("-i", f);
             for (const f of this.pendingFifos)
                 decoderArgs.push("-i", f);
-            // support single stream input
             if (this.inputStreams.length > 0)
                 decoderArgs.push("-i", "pipe:0");
-            // decode to PCM s16le
             decoderArgs.push("-vn", "-ac", String(channels), "-ar", String(sampleRate), "-f", "s16le", "-acodec", "pcm_s16le", "pipe:1");
             if (this.inputStreams.length > 0)
                 decoder.setInputStreams([this.inputStreams[0]]);
             decoder.setArgs(decoderArgs);
-            const { output: decodedPcm, done: decodeDone } = decoder.run();
-            // Build encoder args via provided builder
+            const { output: decodedPcm, done: decodeDone, stop: stopDecoder } = decoder.run();
+            // ENCODER builder. DO NOT COPY inputStreams from main (avoids duplicate -i pipe:0)
             const encoderBuilder = new FluentStream({
                 ffmpegPath: this.options.ffmpegPath,
                 failFast: this.options.failFast,
@@ -459,6 +393,7 @@ class FluentStream extends eventemitter3_1.EventEmitter {
                 logger: this.options.logger,
             });
             buildEncoder(encoderBuilder);
+            encoderBuilder.inputStreams = [];
             const encoderArgsTail = encoderBuilder.getArgs();
             const encoder = new Processor_js_1.default({
                 ffmpegPath: this.options.ffmpegPath,
@@ -467,7 +402,6 @@ class FluentStream extends eventemitter3_1.EventEmitter {
                 enableProgressTracking: this.options.enableProgressTracking,
                 logger: this.options.logger,
             });
-            // input is PCM from transform
             const encoderArgs = [
                 "-f",
                 "s16le",
@@ -483,24 +417,22 @@ class FluentStream extends eventemitter3_1.EventEmitter {
             encoder.setInputStreams([
                 { stream: transform, index: 0 },
             ]);
-            // Wire: decoder -> transform -> encoder
+            const { output, done, stop: stopEncoder } = encoder.run();
             decodedPcm.pipe(transform);
-            // Bubble events
+            allProcs.push({ stop: stopDecoder });
+            allProcs.push({ stop: stopEncoder });
             decoder.on("start", (cmd) => this.emit("start", cmd));
             decoder.on("spawn", (d) => this.emit("spawn", d));
             decoder.on("progress", (p) => this.emit("progress", p));
             decoder.on("error", (e) => this.emit("error", e));
             decoder.on("terminated", (s) => this.emit("terminated", s));
-            const { output, done } = encoder.run();
             encoder.on("start", (cmd) => this.emit("start", cmd));
             encoder.on("spawn", (d) => this.emit("spawn", d));
             encoder.on("progress", (p) => this.emit("progress", p));
             encoder.on("error", (e) => this.emit("error", e));
             encoder.on("terminated", (s) => this.emit("terminated", s));
-            // Ensure decoder completion propagates if encoder finishes first
             decodeDone.catch((e) => this.emit("error", e));
-            // Если установлен useFfplay, подаем вывод в ffplay
-            if (useFfplay) {
+            if (opts.ffplay) {
                 const { spawn } = require("child_process");
                 const ffplay = spawn("ffplay", [
                     "-f",
@@ -516,7 +448,6 @@ class FluentStream extends eventemitter3_1.EventEmitter {
                 output.pipe(ffplay.stdin);
                 ffplay.stderr.on("data", (data) => this.emit("ffplay-stderr", data.toString()));
                 ffplay.on("close", (code, signal) => this.emit("ffplay-close", { code, signal }));
-                // done resolves when encoder done + ffplay exited
                 const ffplayDonePromise = new Promise((resolve, reject) => {
                     ffplay.on("exit", (code) => {
                         if (code === 0)
@@ -526,12 +457,27 @@ class FluentStream extends eventemitter3_1.EventEmitter {
                     });
                     ffplay.on("error", (err) => reject(err));
                 });
+                allProcs.push({
+                    stop: () => {
+                        try {
+                            ffplay.kill("SIGINT");
+                        }
+                        catch { }
+                    },
+                });
                 return {
                     output,
                     done: Promise.all([done, ffplayDonePromise]).then(() => { }),
+                    stop: () => { for (const p of allProcs)
+                        p.stop(); },
                 };
             }
-            return { output, done };
+            return {
+                output,
+                done,
+                stop: () => { for (const p of allProcs)
+                    p.stop(); },
+            };
         }
         const processor = new Processor_js_1.default({
             ffmpegPath: this.options.ffmpegPath,
@@ -540,7 +486,6 @@ class FluentStream extends eventemitter3_1.EventEmitter {
             enableProgressTracking: this.options.enableProgressTracking,
             logger: this.options.logger,
         });
-        // Bubble up events
         processor.on("spawn", (data) => this.emit("spawn", data));
         processor.on("start", (cmd) => this.emit("start", cmd));
         processor.on("progress", (p) => this.emit("progress", p));
@@ -550,39 +495,41 @@ class FluentStream extends eventemitter3_1.EventEmitter {
         processor.setArgs(this.args);
         if (this.inputStreams.length > 0)
             processor.setInputStreams(this.inputStreams);
-        return processor.run();
+        const { output, done, stop } = processor.run();
+        return {
+            output,
+            done,
+            stop: stop,
+        };
     }
     // ================= Utilities =================
     /**
-     * Get a copy of the constructed ffmpeg argument list.
-     * @returns {string[]}
-     * @example
-     * const args = ff.getArgs();
+     * Returns a copy of the constructed ffmpeg args array.
+     * @returns {string[]} Arguments list.
      */
     getArgs() {
         return [...this.args];
     }
     /**
-     * Get full ffmpeg command string preview (not guaranteed to be shell-escaped).
-     * @returns {string}
-     * @example
-     * ff.toString() // 'ffmpeg ...'
+     * Returns the ffmpeg command as a string for debugging.
+     * @returns {string} The ffmpeg command.
      */
     toString() {
         return `${this.options.ffmpegPath} ${this.args.join(" ")}`;
     }
     /**
-     * Get current input streams.
-     * @returns {Array<{stream:Readable, index:number}>}
+     * Returns the currently-attached input streams (for pipe).
+     * @returns {Array<{stream: Readable, index: number}>} List of input streams.
      */
     getInputStreams() {
         return this.inputStreams;
     }
     /**
-     * Synchronously ensure FIFO exists at filePath (creates it if missing).
+     * Synchronously ensures a FIFO exists at the given filePath (creates it if missing).
      * Throws on error.
      * @private
-     * @param {string} filePath
+     * @param {string} filePath - Path to FIFO to check and/or create.
+     * @throws {Error} If creation fails or the path exists but is not a FIFO.
      */
     ensureFifoSync(filePath) {
         try {

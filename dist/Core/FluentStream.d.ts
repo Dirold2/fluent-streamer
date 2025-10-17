@@ -56,191 +56,144 @@ export declare class FluentStream extends EventEmitter {
     /**
      * Create a new FluentStream builder.
      *
-     * @param options - default configuration for created Processor
+     * @param {SimpleFFmpegOptions} [options] - Default configuration for the created Processor.
+     *
      * @example
      * const ff = new FluentStream({ enableProgressTracking: true });
      */
     constructor(options?: SimpleFFmpegOptions);
     /**
-     * Insert global options (appear before any inputs), e.g. "-hide_banner".
-     * @param {...string} opts - one or more global arguments for ffmpeg.
-     * @returns {FluentStream}
-     * @example
-     * ff.globalOptions('-hide_banner');
+     * Adds global ffmpeg options to the arguments.
+     * @param {...string} opts - The global options to set (e.g. "-hide_banner").
+     * @returns {FluentStream} This instance for chaining.
      */
     globalOptions(...opts: string[]): FluentStream;
     /**
-     * Insert options that must precede the last input (e.g. "-f lavfi").
-     * @param {...string} opts
-     * @returns {FluentStream}
-     * @example
-     * ff.inputOptions('-f', 'lavfi');
+     * Adds input-specific ffmpeg options.
+     * @param {...string} opts - The options to add before the most recent "-i".
+     * @returns {FluentStream} This instance for chaining.
      */
     inputOptions(...opts: string[]): FluentStream;
     /**
-     * Add an input source (filepath or stream). Streams are piped via stdin.
-     * @param {string|Readable} input - file path or readable stream
-     * @returns {FluentStream}
-     * @example
-     * ff.input('input.mp3')
-     *   .input(someStream);
+     * Adds an input (file path or stream) to the ffmpeg command.
+     * @param {string|Readable} input - Path or stream to use as input.
+     * @returns {FluentStream} This instance for chaining.
      */
     input(input: string | Readable): FluentStream;
     /**
-     * Add a named pipe (FIFO) as an input. FIFO is created at run() if missing.
-     *
-     * @param {string} fifoPath
-     * @returns {FluentStream}
-     * @example
-     * ff.inputFifo('/tmp/somefifo');
+     * Adds a FIFO (named pipe) as an input.
+     * @param {string} fifoPath - Path to the FIFO.
+     * @returns {FluentStream} This instance for chaining.
      */
     inputFifo(fifoPath: string): FluentStream;
     /**
-     * Prepare a FIFO path and register it as the next input automatically.
-     * @param {object} [options] - options for FIFO creation
-     * @param {string} [options.dir] - directory to create FIFO in
-     * @param {string} [options.prefix] - prefix for FIFO filename
-     * @returns {string} absolute FIFO path
-     * @example
-     * const fifoPath = ff.prepareNextTrackFifo();
-     * // Write to fifoPath asynchronously.
+     * Prepares and adds a unique FIFO input for a new track, returning its path.
+     * @param {Object} [options]
+     * @param {string} [options.dir] - Directory for the FIFO.
+     * @param {string} [options.prefix] - Prefix for the FIFO filename.
+     * @returns {string} The FIFO path.
      */
     prepareNextTrackFifo(options?: {
         dir?: string;
         prefix?: string;
     }): string;
     /**
-     * Specify output target (file path, or ffmpeg stream target string).
-     * @param {string} output
-     * @returns {FluentStream}
-     * @example
-     * ff.output('output.mp3')
+     * Sets the output file or pipe for the ffmpeg command.
+     * @param {string} output - Path or ffmpeg output spec (e.g. "pipe:1").
+     * @returns {FluentStream} This instance for chaining.
      */
     output(output: string): FluentStream;
     /**
-     * Add output options (appended before output).
-     * @param {...string} opts
-     * @returns {FluentStream}
-     * @example
-     * ff.outputOptions('-b:a', '128k');
+     * Adds extra options to the end of ffmpeg command (output side).
+     * @param {...string} opts - The options to add after outputs.
+     * @returns {FluentStream} This instance for chaining.
      */
     outputOptions(...opts: string[]): FluentStream;
     /**
-     * Set video codec.
-     * @param {string} codec
-     * @returns {FluentStream}
-     * @example
-     * ff.videoCodec('libx264');
+     * Sets the video codec.
+     * @param {string} codec - The video codec name.
+     * @returns {FluentStream} This instance for chaining.
      */
     videoCodec(codec: string): FluentStream;
     /**
-     * Set audio codec.
-     * @param {string} codec
-     * @returns {FluentStream}
-     * @example
-     * ff.audioCodec('aac');
+     * Sets the audio codec.
+     * @param {string} codec - The audio codec name.
+     * @returns {FluentStream} This instance for chaining.
      */
     audioCodec(codec: string): FluentStream;
     /**
-     * Set video bitrate.
-     * @param {string} bitrate
-     * @returns {FluentStream}
-     * @example
-     * ff.videoBitrate('1M');
+     * Sets the video bitrate.
+     * @param {string} bitrate - Video bitrate value (e.g. "1000k").
+     * @returns {FluentStream} This instance for chaining.
      */
     videoBitrate(bitrate: string): FluentStream;
     /**
-     * Set audio bitrate.
-     * @param {string} bitrate
-     * @returns {FluentStream}
-     * @example
-     * ff.audioBitrate('128k');
+     * Sets the audio bitrate.
+     * @param {string} bitrate - Audio bitrate value (e.g. "192k").
+     * @returns {FluentStream} This instance for chaining.
      */
     audioBitrate(bitrate: string): FluentStream;
     /**
-     * Set output video size.
-     * @param {string} size
-     * @returns {FluentStream}
-     * @example
-     * ff.size('640x480');
+     * Sets the target video size.
+     * @param {string} size - The target size, e.g. "640x480".
+     * @returns {FluentStream} This instance for chaining.
      */
     size(size: string): FluentStream;
     /**
-     * Set output frames per second.
-     * @param {number} fps
-     * @returns {FluentStream}
-     * @example
-     * ff.fps(24);
+     * Sets the output video fps.
+     * @param {number} fps - Frames per second.
+     * @returns {FluentStream} This instance for chaining.
      */
     fps(fps: number): FluentStream;
     /**
-     * Limit duration.
-     * @param {string|number} duration - seconds or ffmpeg time string
-     * @returns {FluentStream}
-     * @example
-     * ff.duration(10);
+     * Sets the output duration.
+     * @param {string|number} duration - Output duration (seconds or ffmpeg duration string).
+     * @returns {FluentStream} This instance for chaining.
      */
     duration(duration: string | number): FluentStream;
     /**
-     * Seek input.
-     * @param {string|number} time - seconds or ffmpeg time string
-     * @returns {FluentStream}
-     * @example
-     * ff.seek(2.5);
+     * Sets the start time offset for input.
+     * @param {string|number} time - Time offset (seconds or ffmpeg timestamp string).
+     * @returns {FluentStream} This instance for chaining.
      */
     seek(time: string | number): FluentStream;
     /**
-     * Set container/output format.
-     * @param {string} format - e.g. 'mp3'
-     * @returns {FluentStream}
-     * @example
-     * ff.format('wav');
+     * Sets the output format.
+     * @param {string} format - Output format, e.g. "mp4" or "mp3".
+     * @returns {FluentStream} This instance for chaining.
      */
     format(format: string): FluentStream;
     /**
-     * Force overwrite output.
-     * @returns {FluentStream}
-     * @example
-     * ff.overwrite();
+     * Enables overwrite of output files.
+     * @returns {FluentStream} This instance for chaining.
      */
     overwrite(): FluentStream;
     /**
-     * Forbid overwrite output.
-     * @returns {FluentStream}
-     * @example
-     * ff.noOverwrite();
+     * Disables overwrite of output files (fail if exists).
+     * @returns {FluentStream} This instance for chaining.
      */
     noOverwrite(): FluentStream;
     /**
-     * Add a custom complex filter string.
-     * @param {string} filterGraph
-     * @returns {FluentStream}
-     * @example
-     * ff.complexFilter('[0:a][1:a]acrossfade=d=5:c1=tri:c2=tri[aout]');
+     * Sets a complex filter for ffmpeg.
+     * @param {string} filterGraph - Filter graph string.
+     * @returns {FluentStream} This instance for chaining.
      */
     complexFilter(filterGraph: string): FluentStream;
     /**
-     * Map a specific stream label to output (e.g., '[aout]' or '[vout]').
-     * @param {string} label
-     * @returns {FluentStream}
-     * @example
-     * ff.map('[aout]');
+     * Adds a -map argument.
+     * @param {string} label - The ffmpeg stream selector.
+     * @returns {FluentStream} This instance for chaining.
      */
     map(label: string): FluentStream;
     /**
-     * Audio crossfade helper using FFmpeg acrossfade filter.
-     * Crossfades audio from inputA to inputB for duration seconds.
-     * Note: requires at least two inputs. By default uses [0:a] and [1:a].
-     *
-     * @param {number} durationSeconds
-     * @param {object} [options]
-     * @param {number} [options.inputA] - Index of first input (default: 0)
-     * @param {number} [options.inputB] - Index of second input (default: 1)
-     * @param {string} [options.curve1] - Fade curve type for inputA (default: "tri")
-     * @param {string} [options.curve2] - Fade curve type for inputB (default: "tri")
-     * @returns {FluentStream}
-     * @example
-     * ff.crossfadeAudio(4);
+     * Adds an audio crossfade filter between two inputs.
+     * @param {number} durationSeconds - Duration of the crossfade in seconds.
+     * @param {Object} [options] - Additional crossfade options.
+     * @param {number} [options.inputA=0] - Index of the first audio input.
+     * @param {number} [options.inputB=1] - Index of the second audio input.
+     * @param {string} [options.curve1='tri'] - First curve type.
+     * @param {string} [options.curve2='tri'] - Second curve type.
+     * @returns {FluentStream} This instance for chaining.
      */
     crossfadeAudio(durationSeconds: number, options?: {
         inputA?: number;
@@ -249,74 +202,62 @@ export declare class FluentStream extends EventEmitter {
         curve2?: string;
     }): FluentStream;
     /**
-     * Enable JS audio processing between decode and encode stages.
-     * You provide a Transform (e.g., your AudioProcessor) and a builder to configure the encoder stage.
-     * The decoder stage is generated automatically to produce PCM s16le at the given rate/channels.
+     * Attach a JS audio transform (a Transform stream) to process PCM data between decode and encode.
      *
-     * @param {Transform} transform - Node.js Transform stream
-     * @param {(enc:FluentStream)=>void} buildEncoder - function to configure output/encoding
-     * @param {object} [opts]
-     * @param {number} [opts.sampleRate=48000]
-     * @param {number} [opts.channels=2]
-     * @returns {FluentStream}
-     * @example
-     * // Pipe decoded PCM through custom processor:
-     * ff.withAudioTransform(myAudioTransform, enc => enc.audioCodec('aac').output('file.aac'));
+     * @param {Transform} transform - The Node.js Transform stream to apply to decoded PCM audio.
+     * @param {function(FluentStream):void} buildEncoder - Callback to configure encoding/output (receives a FluentStream).
+     * @param {Object} [opts] - Audio transform options.
+     * @param {number} [opts.sampleRate=48000] - Sample rate for PCM.
+     * @param {number} [opts.channels=2] - Channel count for PCM.
+     * @returns {FluentStream} This instance for chaining.
      */
     withAudioTransform(transform: Transform, buildEncoder: (enc: FluentStream) => void, opts?: {
         sampleRate?: number;
         channels?: number;
     }): FluentStream;
     /**
-     * Plug-in style audio processing.
-     * The plugin returns a Transform; we wire it as withAudioTransform.
-     * @param {AudioPlugin} plugin
-     * @param {(enc:FluentStream)=>void} buildEncoder
-     * @param {AudioPluginOptions} [opts]
-     * @returns {FluentStream}
+     * Attaches a custom AudioPlugin as a JS transform, and wires up the encoder step.
+     *
+     * @param {AudioPlugin} plugin - The plugin object (must implement createTransform).
+     * @param {function(FluentStream):void} buildEncoder - Encoder customization callback.
+     * @param {AudioPluginOptions} [opts] - Audio options.
+     * @returns {FluentStream} This instance for chaining.
      */
     withAudioPlugin(plugin: AudioPlugin, buildEncoder: (enc: FluentStream) => void, opts?: AudioPluginOptions): FluentStream;
     /**
-     * Execute using the low-level Processor. Subscribes to Processor events
-     * and re-emits them from the wrapper instance.
+     * Execute with the underlying Processor. All processor events are re-emitted.
      *
-     * @param {object} [opts]
-     * @param {boolean} [opts.ffplay] - pipe output to ffplay for previewing
-     * @returns {FFmpegRunResult}
-     * @example
-     * const { output, done } = ff.run();
+     * @param {Object} [opts] - Optional. If opts.ffplay is true, will attempt to play the output via ffplay.
+     * @returns {FFmpegRunResult} The result object containing the output stream, a done promise, and a stop method.
      */
     run(opts?: {
         ffplay?: boolean;
         [key: string]: any;
     }): FFmpegRunResult;
     /**
-     * Get a copy of the constructed ffmpeg argument list.
-     * @returns {string[]}
-     * @example
-     * const args = ff.getArgs();
+     * Returns a copy of the constructed ffmpeg args array.
+     * @returns {string[]} Arguments list.
      */
     getArgs(): string[];
     /**
-     * Get full ffmpeg command string preview (not guaranteed to be shell-escaped).
-     * @returns {string}
-     * @example
-     * ff.toString() // 'ffmpeg ...'
+     * Returns the ffmpeg command as a string for debugging.
+     * @returns {string} The ffmpeg command.
      */
     toString(): string;
     /**
-     * Get current input streams.
-     * @returns {Array<{stream:Readable, index:number}>}
+     * Returns the currently-attached input streams (for pipe).
+     * @returns {Array<{stream: Readable, index: number}>} List of input streams.
      */
     getInputStreams(): Array<{
         stream: Readable;
         index: number;
     }>;
     /**
-     * Synchronously ensure FIFO exists at filePath (creates it if missing).
+     * Synchronously ensures a FIFO exists at the given filePath (creates it if missing).
      * Throws on error.
      * @private
-     * @param {string} filePath
+     * @param {string} filePath - Path to FIFO to check and/or create.
+     * @throws {Error} If creation fails or the path exists but is not a FIFO.
      */
     private ensureFifoSync;
 }

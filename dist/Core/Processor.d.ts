@@ -229,14 +229,5 @@ export declare class Processor extends EventEmitter {
      * @returns {Partial<FFmpegProgress> | null}
      */
     private parseProgress;
-    /**
-     * Determines if an error should be considered "ignorable" for our pipeline/stream error handling.
-     * This includes EPIPE and also 'ERR_STREAM_PREMATURE_CLOSE' code and their message variants.
-     *
-     * @private
-     * @param {any} error - The error object (stream/process error).
-     * @returns {boolean} True if the error is considered safe to ignore.
-     */
-    private isIgnorableError;
 }
 export default Processor;

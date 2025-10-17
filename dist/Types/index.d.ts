@@ -108,6 +108,8 @@ export interface FFmpegRunResult {
     output: PassThrough;
     /** Promise that resolves when ffmpeg finishes */
     done: Promise<void>;
+    /** Function to stop the ffmpeg process */
+    stop: () => void;
 }
 /**
  * Options for ffmpeg jobs that can take a string or stream as input.
