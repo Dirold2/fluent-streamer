@@ -4,7 +4,7 @@
  * This class is responsible for spawning the FFmpeg process, wiring stdin/stdout/stderr,
  * handling timeouts and termination, and emitting lifecycle/progress events.
  * It does not implement a fluent API and does not depend on the fluent wrapper.
- * 
+ *
  * @fires Processor#start
  * @fires Processor#spawn
  * @fires Processor#progress
@@ -172,7 +172,7 @@ export class Processor extends EventEmitter {
   /**
    * Launches the FFmpeg subprocess with the preset arguments and streams.
    * Also wires up output/pipeline, progress tracking and events.
-   * 
+   *
    * @throws {Error} If already running.
    * @returns {FFmpegRunResult} FFmpeg output and process done promise.
    * @fires Processor#start
@@ -216,7 +216,11 @@ export class Processor extends EventEmitter {
       this.emit("spawn", { pid: this.process?.pid ?? null });
     });
 
-    return { output: this.outputStream, done: this.donePromise, stop: () => this.kill() };
+    return {
+      output: this.outputStream,
+      done: this.donePromise,
+      stop: () => this.kill(),
+    };
   }
 
   /**
@@ -232,7 +236,10 @@ export class Processor extends EventEmitter {
         this.process.kill(signal);
       } catch (error) {
         this.config.logger.error?.(`Kill error: ${error}`);
-        this.emit("error", error instanceof Error ? error : new Error(String(error)));
+        this.emit(
+          "error",
+          error instanceof Error ? error : new Error(String(error)),
+        );
         this.finish(error instanceof Error ? error : new Error(String(error)));
       }
     }
@@ -519,7 +526,10 @@ export class Processor extends EventEmitter {
       this.process?.stderr?.destroy();
     } catch (error) {
       this.config.logger.error?.(`Cleanup error: ${error}`);
-      this.emit("error", error instanceof Error ? error : new Error(String(error)));
+      this.emit(
+        "error",
+        error instanceof Error ? error : new Error(String(error)),
+      );
       this.finish(error instanceof Error ? error : new Error(String(error)));
     }
   }

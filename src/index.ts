@@ -10,4 +10,9 @@ export { VolumeFaderPlugin } from "./plugins/volume";
 
 export type { AudioPlugin, AudioPluginOptions } from "./Core";
 
-export { type SimpleFFmpegOptions, type FFmpegRunResult, type Logger, type FFmpegProgress } from "./Types";
+export {
+  type SimpleFFmpegOptions,
+  type FFmpegRunResult,
+  type Logger,
+  type FFmpegProgress,
+} from "./Types";
