@@ -1,0 +1,39 @@
+{
+  "name": "fluent-streamer",
+  "version": "0.1.0",
+  "description": "Fluent FFmpeg wrapper with timeout and progress tracking.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "keywords": [
+    "ffmpeg",
+    "typescript",
+    "fluent",
+    "ffmpeg",
+    "video",
+    "audio",
+    "streaming"
+  ],
+  "author": "dirold2",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "eventemitter3": "^5.0.1",
+    "execa": "^9.6.0",
+    "undici": "^7.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.8.1",
+    "eslint": "^9.37.0",
+    "dotenv": "^16.4.5",
+    "vitest": "^3.2.4",
+    "typescript": "^5.9.3",
+    "prettier": "^3.6.2"
+  }
+}
