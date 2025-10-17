@@ -4,6 +4,13 @@
  * This class is responsible for spawning the FFmpeg process, wiring stdin/stdout/stderr,
  * handling timeouts and termination, and emitting lifecycle/progress events.
  * It does not implement a fluent API and does not depend on the fluent wrapper.
+ * 
+ * @fires Processor#start
+ * @fires Processor#spawn
+ * @fires Processor#progress
+ * @fires Processor#end
+ * @fires Processor#error
+ * @fires Processor#terminated
  */
 import { EventEmitter } from "eventemitter3";
 import { type Readable, PassThrough, pipeline } from "stream";
@@ -15,6 +22,7 @@ import {
   type FFmpegProgress,
 } from "src/Types";
 
+// Added ERR_STREAM_PREMATURE_CLOSE code so we can ignore this error in stream pipeline handling
 const TERMINATION_ERROR_PATTERNS = [
   "sigkill",
   "sigterm",
@@ -31,46 +39,111 @@ const TERMINATION_ERROR_PATTERNS = [
   "epipe",
 ] as const;
 
+const TERMINATION_ERROR_CODES = ["ERR_STREAM_PREMATURE_CLOSE"];
+
 /**
- * Options for the low-level Processor. Inherits common FFmpeg options.
+ * @typedef {object} ProcessorOptions
+ * @augments SimpleFFmpegOptions
  */
 export interface ProcessorOptions extends SimpleFFmpegOptions {}
 
 /**
- * Executes FFmpeg with provided arguments and optional input stream(s).
- *
- * Events:
- * - start: (cmd: string) emitted right before process spawn with full command string
- * - progress: (progress: Record<string, unknown>) parsed -progress key/value updates
- * - end: () emitted on successful completion (or recoverable termination)
- * - terminated: (signal: string) emitted if finished due to termination or recoverable exit
- * - error: (error: Error) emitted on process/pipeline errors or non-zero fatal exit
+ * The FFmpeg process runner, responsible for running, controlling, and emitting events for an FFmpeg subprocess.
+ * @class
+ * @extends EventEmitter
  */
 export class Processor extends EventEmitter {
+  /**
+   * Underlying FFmpeg process, or null if not started yet.
+   * @private
+   * @type {Subprocess | null}
+   */
   private process: Subprocess | null = null;
+
+  /**
+   * Output stream from ffmpeg.
+   * @private
+   * @type {PassThrough | null}
+   */
   private outputStream: PassThrough | null = null;
+
+  /**
+   * Input streams for ffmpeg with associated indices.
+   * @private
+   * @type {Array<{ stream: Readable; index: number }>}
+   */
   private inputStreams: Array<{ stream: Readable; index: number }> = [];
+
+  /**
+   * Captured stderr buffer.
+   * @private
+   * @type {string}
+   */
   private stderrBuffer = "";
+
+  /**
+   * Is the process terminating.
+   * @private
+   * @type {boolean}
+   */
   private isTerminating = false;
+
+  /**
+   * Has the process finished.
+   * @private
+   * @type {boolean}
+   */
   private finished = false;
+
+  /**
+   * Process timeout timer.
+   * @private
+   * @type {NodeJS.Timeout | undefined}
+   */
   private timeoutHandle?: NodeJS.Timeout;
 
+  /**
+   * Internal resolve for done promise.
+   * @private
+   */
   private doneResolve!: () => void;
+  /**
+   * Internal reject for done promise.
+   * @private
+   */
   private doneReject!: (err: Error) => void;
+  /**
+   * Done promise, resolves or rejects when process ends.
+   * @private
+   * @readonly
+   */
   private readonly donePromise: Promise<void>;
 
+  /**
+   * Complete static configuration.
+   * @private
+   * @readonly
+   */
   private readonly config: Required<Omit<ProcessorOptions, "abortSignal">> & {
     abortSignal?: AbortSignal;
     logger: Logger;
   };
 
+  /**
+   * PID of FFmpeg process. May be null if process has not started.
+   * @readonly
+   */
   public readonly pid: number | null = null;
 
+  /**
+   * Arguments for ffmpeg.
+   * @private
+   */
   private args: string[] = [];
 
   /**
-   * Create a new Processor.
-   * @param options - process-level configuration and logging
+   * Creates a new Processor instance.
+   * @param {ProcessorOptions} [options] - FFmpeg process and runner options.
    */
   constructor(options: ProcessorOptions = {}) {
     super();
@@ -96,8 +169,9 @@ export class Processor extends EventEmitter {
   }
 
   /**
-   * Replace the full argument list passed to FFmpeg (excluding the binary path).
-   * @param args - array of arguments (e.g. ["-i", "in.mp4", "-f", "mp4", "pipe:1"])
+   * Set the FFmpeg argument list.
+   * @param {string[]} args
+   * @returns {this}
    */
   setArgs(args: string[]): this {
     this.args = [...args];
@@ -105,8 +179,9 @@ export class Processor extends EventEmitter {
   }
 
   /**
-   * Set input streams to be piped to FFmpeg stdin (first stream supported).
-   * @param streams - list of readable streams and their indices
+   * Set the input streams for ffmpeg (for stdin piping).
+   * @param {Array<{ stream: Readable, index: number }>} streams
+   * @returns {this}
    */
   setInputStreams(streams: Array<{ stream: Readable; index: number }>): this {
     this.inputStreams = streams;
@@ -114,15 +189,24 @@ export class Processor extends EventEmitter {
   }
 
   /**
-   * Spawn the FFmpeg process and connect streams.
-   * @returns output PassThrough stream and completion promise
-   * @throws if called more than once per instance
+   * Launches the FFmpeg subprocess with the preset arguments and streams.
+   * Also wires up output/pipeline, progress tracking and events.
+   * 
+   * @throws {Error} If already running.
+   * @returns {FFmpegRunResult} FFmpeg output and process done promise.
+   * @fires Processor#start
+   * @fires Processor#spawn
    */
   run(): FFmpegRunResult {
     if (this.process) throw new Error("FFmpeg process is already running");
 
     this.outputStream = new PassThrough();
     const fullCmd = `${this.config.ffmpegPath} ${this.args.join(" ")}`;
+    /**
+     * Emitted with the full command-line string when the process is about to start.
+     * @event Processor#start
+     * @type {string}
+     */
     this.emit("start", fullCmd);
     this.config.logger.debug?.(`Starting: ${fullCmd}`);
 
@@ -142,6 +226,11 @@ export class Processor extends EventEmitter {
     this.setupProcessEvents();
 
     // Re-emit spawn so callers can reliably get PID
+    /**
+     * Emitted when the underlying process has spawned, with an object containing the PID.
+     * @event Processor#spawn
+     * @type {{ pid: number | null }}
+     */
     this.process.once("spawn", () => {
       this.emit("spawn", { pid: this.process?.pid ?? null });
     });
@@ -150,8 +239,9 @@ export class Processor extends EventEmitter {
   }
 
   /**
-   * Request process termination.
-   * @param signal - signal to send (default: SIGTERM)
+   * Forcefully terminate the ffmpeg process.
+   * @param {NodeJS.Signals} [signal="SIGTERM"] Signal to send to child process.
+   * @returns {void}
    */
   kill(signal: NodeJS.Signals = "SIGTERM"): void {
     if (this.process && !this.isTerminating) {
@@ -165,20 +255,37 @@ export class Processor extends EventEmitter {
     }
   }
 
-  /** Get full command as a string. */
+  /**
+   * Returns the full CLI command as a string.
+   * @returns {string}
+   */
   toString(): string {
     return `${this.config.ffmpegPath} ${this.args.join(" ")}`;
   }
-  /** Get a copy of current args. */
+
+  /**
+   * Get a copy of the current ffmpeg argument array.
+   * @returns {string[]}
+   */
   getArgs(): string[] {
     return [...this.args];
   }
-  /** Promise resolved/rejected on process completion. */
+
+  /**
+   * Promise that resolves on process end, or rejects on error.
+   * @readonly
+   * @returns {Promise<void>}
+   */
   get done(): Promise<void> {
     return this.donePromise;
   }
 
-  /** Access underlying stdout (available after run()). */
+  /**
+   * The ffmpeg subprocess stdout stream.
+   * @readonly
+   * @throws {Error} If process not yet started or stream is missing.
+   * @returns {Readable}
+   */
   get stdout(): Readable {
     if (!this.process?.stdout)
       throw new Error("FFmpeg process not started or stdout unavailable");
@@ -186,6 +293,11 @@ export class Processor extends EventEmitter {
   }
 
   // ====================== Private ======================
+
+  /**
+   * Attach abortSignal handling, if provided in options.
+   * @private
+   */
   private setupAbortSignal(): void {
     if (!this.config.abortSignal) return;
     if (this.config.abortSignal.aborted) {
@@ -199,6 +311,10 @@ export class Processor extends EventEmitter {
     }
   }
 
+  /**
+   * Apply global/initial ffmpeg args from config.
+   * @private
+   */
   private applyInitialArgs(): void {
     if (this.config.extraGlobalArgs.length > 0)
       this.args.push(...this.config.extraGlobalArgs);
@@ -207,6 +323,10 @@ export class Processor extends EventEmitter {
       this.args.push("-progress", "pipe:2");
   }
 
+  /**
+   * Setup a timeout trigger if configured.
+   * @private
+   */
   private setupTimeout(): void {
     if (this.config.timeout && this.config.timeout > 0) {
       this.timeoutHandle = setTimeout(() => {
@@ -218,6 +338,10 @@ export class Processor extends EventEmitter {
     }
   }
 
+  /**
+   * Connect input stream(s) to ffmpeg stdin.
+   * @private
+   */
   private setupInputStreams(): void {
     if (this.inputStreams.length === 0 || !this.process?.stdin) return;
     const first = this.inputStreams[0];
@@ -242,13 +366,19 @@ export class Processor extends EventEmitter {
     });
 
     pipeline(first.stream, this.process.stdin, (err) => {
+      // Only emit pipeline errors if they are NOT ignorable (e.g. not "ERR_STREAM_PREMATURE_CLOSE" or similar)
       if (err && !this.isIgnorableError(err)) {
         this.config.logger.error?.(`Pipeline failed: ${err.message}`);
         this.emit("error", err);
       }
+      // If the error is ignorable (such as premature close), swallow silently.
     });
   }
 
+  /**
+   * Setup output (stdout) and stderr event wiring to forward/pipe.
+   * @private
+   */
   private setupOutputStreams(): void {
     if (!this.process || !this.outputStream) return;
     this.process.stdout?.on("error", (e) =>
@@ -260,10 +390,12 @@ export class Processor extends EventEmitter {
 
     if (this.process.stdout) {
       pipeline(this.process.stdout, this.outputStream, (err) => {
+        // Only emit pipeline errors if they are NOT ignorable (e.g. not "ERR_STREAM_PREMATURE_CLOSE" or similar)
         if (err && !this.isIgnorableError(err)) {
           this.config.logger.error?.(`Output pipeline failed: ${err.message}`);
           this.emit("error", err);
         }
+        // If the error is ignorable (such as premature close), swallow silently.
       });
     }
 
@@ -272,6 +404,10 @@ export class Processor extends EventEmitter {
     );
   }
 
+  /**
+   * Setup non-stream process events (exit, error, cancel).
+   * @private
+   */
   private setupProcessEvents(): void {
     if (!this.process) return;
     this.process.once("exit", (code, signal) =>
@@ -287,6 +423,11 @@ export class Processor extends EventEmitter {
     this.process.on("cancel", () => this.kill("SIGTERM"));
   }
 
+  /**
+   * Handle incoming stderr data from ffmpeg and emit progress if enabled.
+   * @private
+   * @param {Buffer} chunk
+   */
   private handleStderrData(chunk: Buffer): void {
     const text = chunk.toString("utf-8");
     if (this.stderrBuffer.length + text.length > this.config.maxStderrBuffer) {
@@ -299,12 +440,23 @@ export class Processor extends EventEmitter {
       for (const line of lines) {
         if (line.includes("=")) {
           const progress = this.parseProgress(line);
+          /**
+           * Emitted for each FFmpeg progress report line (if enabled).
+           * @event Processor#progress
+           * @type {Partial<FFmpegProgress>}
+           */
           if (progress) this.emit("progress", progress);
         }
       }
     }
   }
 
+  /**
+   * Handle process exit/termination.
+   * @private
+   * @param {number|null} code
+   * @param {NodeJS.Signals|null} signal
+   */
   private handleProcessExit(
     code: number | null,
     signal: NodeJS.Signals | null,
@@ -317,16 +469,37 @@ export class Processor extends EventEmitter {
       isRecoverableExit;
     if (isSuccess) {
       if (this.isTerminating || isRecoverableExit)
+        /**
+         * Emitted if process was terminated by signal or abnormal exit.
+         * @event Processor#terminated
+         * @type {NodeJS.Signals | string}
+         */
         this.emit("terminated", signal ?? "SIGTERM");
+      /**
+       * Emitted at successful completion.
+       * @event Processor#end
+       */
       this.emit("end");
       this.finish();
     } else {
       const error = this.createExitError(code, signal);
+      /**
+       * Emitted if the process fails, with an Error.
+       * @event Processor#error
+       * @type {Error}
+       */
       this.emit("error", error);
       this.finish(error);
     }
   }
 
+  /**
+   * Construct an Error object for FFmpeg exit with code/signal and stderr snippet.
+   * @private
+   * @param {number|null} code
+   * @param {NodeJS.Signals|null} signal
+   * @returns {Error}
+   */
   private createExitError(
     code: number | null,
     signal: NodeJS.Signals | null,
@@ -339,6 +512,11 @@ export class Processor extends EventEmitter {
     return new Error(message);
   }
 
+  /**
+   * Trigger done promise resolution/rejection only once.
+   * @private
+   * @param {Error} [error]
+   */
   private finish(error?: Error): void {
     if (this.finished) return;
     this.finished = true;
@@ -347,6 +525,10 @@ export class Processor extends EventEmitter {
     else this.doneResolve();
   }
 
+  /**
+   * Safely destroy streams and process fds.
+   * @private
+   */
   private cleanup(): void {
     try {
       this.outputStream?.destroy();
@@ -358,6 +540,12 @@ export class Processor extends EventEmitter {
     }
   }
 
+  /**
+   * Parse FFmpeg "-progress"-formatted key=value line to progress object.
+   * @private
+   * @param {string} line
+   * @returns {Partial<FFmpegProgress> | null}
+   */
   private parseProgress(line: string): Partial<FFmpegProgress> | null {
     const progress: Partial<FFmpegProgress> = {};
     const parts = line.split("=");
@@ -402,12 +590,25 @@ export class Processor extends EventEmitter {
     return Object.keys(progress).length > 0 ? progress : null;
   }
 
+  /**
+   * Determines if an error should be considered "ignorable" for our pipeline/stream error handling.
+   * This includes EPIPE and also 'ERR_STREAM_PREMATURE_CLOSE' code and their message variants.
+   *
+   * @private
+   * @param {any} error - The error object (stream/process error).
+   * @returns {boolean} True if the error is considered safe to ignore.
+   */
   private isIgnorableError(error: any): boolean {
     const message = (error?.message || "").toLowerCase();
-    return (
+    // Ignore Node's ERR_STREAM_PREMATURE_CLOSE or any error with such a code
+    if (
       error?.code === "EPIPE" ||
+      TERMINATION_ERROR_CODES.includes(error?.code) ||
       TERMINATION_ERROR_PATTERNS.some((p) => message.includes(p))
-    );
+    ) {
+      return true;
+    }
+    return false;
   }
 }
 
