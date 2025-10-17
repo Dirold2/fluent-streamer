@@ -393,6 +393,8 @@ class FluentStream extends eventemitter3_1.EventEmitter {
     withAudioPlugins(registry, ...pluginConfigs) {
         const chain = registry.chain(...pluginConfigs);
         const transform = chain.getTransform();
+        // capture controllers for hot updates
+        this._pluginControllers = chain.getControllers();
         // Use defaults from registry.chain() (48000/2). Allow encoder to be configured afterwards by caller.
         return this.withAudioTransform(transform, (enc) => enc, { sampleRate: 48000, channels: 2 });
     }
@@ -406,6 +408,10 @@ class FluentStream extends eventemitter3_1.EventEmitter {
     /** Shortcut for a single plugin by name with optional options */
     usePlugin(name, options) {
         return this.usePlugins({ name, options });
+    }
+    /** Get controller instances of the last configured plugin chain (if any) */
+    getPluginControllers() {
+        return (this._pluginControllers ?? []);
     }
     /**
      * Execute the FFmpeg command. All processor events are re-emitted.

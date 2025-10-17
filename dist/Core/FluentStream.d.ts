@@ -250,6 +250,8 @@ export declare class FluentStream extends EventEmitter {
     }>): FluentStream;
     /** Shortcut for a single plugin by name with optional options */
     usePlugin(name: string, options?: Partial<AudioPluginOptions>): FluentStream;
+    /** Get controller instances of the last configured plugin chain (if any) */
+    getPluginControllers(): AudioPlugin[];
     /**
      * Execute the FFmpeg command. All processor events are re-emitted.
      * @param {{ffplay?: boolean, [key: string]: any}} [opts]

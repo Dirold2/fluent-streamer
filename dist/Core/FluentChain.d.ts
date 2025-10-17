@@ -1,5 +1,5 @@
 import { Transform, Writable, Readable } from "stream";
-import { AudioPluginOptions } from "./Filters.js";
+import { AudioPlugin, AudioPluginOptions } from "./Filters.js";
 import PluginRegistry from "./PluginRegistry.js";
 /**
  * FluentChain
@@ -11,6 +11,7 @@ export declare class FluentChain {
     private pluginConfigs;
     private defaultOptions;
     private transforms;
+    private controllers;
     constructor(registry: PluginRegistry, pluginConfigs: Array<{
         name: string;
         options?: Partial<AudioPluginOptions>;
@@ -27,4 +28,8 @@ export declare class FluentChain {
      * Get a single Transform stream representing the whole chain.
      */
     getTransform(): Transform;
+    /**
+     * Return controller instances (plugin objects) to allow hot parameter updates
+     */
+    getControllers(): AudioPlugin[];
 }

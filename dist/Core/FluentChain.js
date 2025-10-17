@@ -12,6 +12,7 @@ class FluentChain {
     pluginConfigs;
     defaultOptions;
     transforms = [];
+    controllers = [];
     constructor(registry, pluginConfigs, defaultOptions) {
         this.registry = registry;
         this.pluginConfigs = pluginConfigs;
@@ -22,17 +23,20 @@ class FluentChain {
      * Build Transform streams from plugin names and options.
      */
     buildChain() {
-        this.transforms = this.pluginConfigs.map(({ name, options }) => {
+        this.transforms = [];
+        this.controllers = [];
+        for (const { name, options } of this.pluginConfigs) {
             if (!this.registry.has(name))
                 throw new Error(`Plugin not found: ${name}`);
             const mergedOptions = {
                 ...this.defaultOptions,
                 ...options,
             };
-            return this.registry
-                .create(name, mergedOptions)
-                .createTransform(mergedOptions);
-        });
+            const plugin = this.registry.create(name, mergedOptions);
+            const transform = plugin.createTransform(mergedOptions);
+            this.controllers.push(plugin);
+            this.transforms.push(transform);
+        }
     }
     /**
      * Pipe a source stream into the chain and then to a destination.
@@ -99,6 +103,12 @@ class FluentChain {
         inputProxy.on('error', forwardError);
         outputProxy.on('error', forwardError);
         return combined;
+    }
+    /**
+     * Return controller instances (plugin objects) to allow hot parameter updates
+     */
+    getControllers() {
+        return [...this.controllers];
     }
 }
 exports.FluentChain = FluentChain;
