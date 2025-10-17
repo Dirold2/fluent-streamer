@@ -348,14 +348,24 @@ export class Processor extends EventEmitter {
       this.finish(err);
     });
 
-    this.process.stdin.on("error", (err) => {
-      this.config.logger.error?.(`Stdin error: ${err.message}`);
-      this.emit("error", err);
-      this.finish(err);
+    this.process.stdin.on("error", (err: any) => {
+      // Only log EPIPE warning, don't emit error twice
+      if ((err && err.code === "EPIPE") || `${err}`.includes("EPIPE")) {
+        this.config.logger.warn?.(`Stdin error: write EPIPE`);
+      } else {
+        this.config.logger.error?.(`Stdin error: ${err.message ?? err}`);
+        this.emit("error", err);
+        this.finish(err);
+      }
     });
 
     pipeline(first.stream, this.process.stdin, (err) => {
       if (err) {
+        // If EPIPE and process is already ending, suppress excess error reporting
+        if ((err.code === "EPIPE" || `${err}`.includes("EPIPE")) && this.finished) {
+          // Swallow, because FFmpeg can close stdin when output pipeline closes
+          return;
+        }
         this.config.logger.error?.(`Pipeline failed: ${err.message}`);
         this.emit("error", err);
         this.finish(err);
@@ -383,7 +393,17 @@ export class Processor extends EventEmitter {
     if (this.process.stdout) {
       pipeline(this.process.stdout, this.outputStream, (err) => {
         if (err) {
-          this.config.logger.error?.(`Output pipeline failed: ${err.message}`);
+          // Handle "premature close" as a warning if stdin also errored with EPIPE
+          if (
+            (err.message && /premature close/i.test(err.message)) &&
+            this.finished
+          ) {
+            this.config.logger.warn?.("Output pipeline failed: Premature close");
+            return;
+          }
+          this.config.logger.error?.(
+            `Output pipeline failed: ${err.message}`
+          );
           this.emit("error", err);
           this.finish(err);
         }
