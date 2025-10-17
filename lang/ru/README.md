@@ -2,9 +2,9 @@
 
 > 🇬🇧 [Read in English](/README.md)
 
-**Fluent Streamer** — мощная библиотека на Node.js для гибкого управления аудио и видео-потоками с помощью FFmpeg, с поддержкой расширяемых аудио-плагинов (Gain, Bass, Treble, Compressor и др.) и элегантного Fluent API.
+**Fluent Streamer** — мощная библиотека на Node.js для гибкого управления аудио и видео‑потоками с помощью FFmpeg, с поддержкой расширяемых аудио‑плагинов (Gain, Bass, Treble, Compressor и др.) и элегантного Fluent API.
 
-Позволяет в реальном времени строить цепочки любых аудио-эффектов и мгновенно интегрировать их с PCM-потоками (Discord, WebRTC, FFmpeg и прочее).
+Главная точка входа — `FluentStream`. Плагины можно регистрировать глобально и собирать конвейеры максимально кратко.
 
 ---
 
@@ -28,7 +28,52 @@ npm install fluent-streamer
 yarn add fluent-streamer
 ```
 
-## Аудио-плагины
+## Быстрый старт (FluentStream как основной API)
+
+```ts
+import FluentStream from "fluent-streamer";
+
+// 1) Глобальная регистрация плагинов (один раз при старте)
+FluentStream.registerPlugin("gain", (opts) => new GainPlugin(1.5));
+FluentStream.registerPlugin("bass", () => new BassPlugin(0.6));
+
+// 2) Конвейер: файл -> JS трансформы -> кодек -> stdout
+const ff = new FluentStream({ suppressPrematureCloseWarning: true })
+  .input("input.mp3")
+  .usePlugins("gain", { name: "bass", options: { /* параметры плагина */ } })
+  .audioCodec("aac")
+  .outputOptions("-b:a", "192k")
+  .output("pipe:1");
+
+const { output, done } = ff.run();
+output.pipe(process.stdout);
+await done;
+```
+
+Входной стрим + FFmpeg‑фильтры (`-af`):
+
+```ts
+import { PassThrough } from "stream";
+
+const input = new PassThrough();
+const filters = ["volume=2", "bass=g=5"]; // стандартные аудио‑фильтры FFmpeg
+
+const ff = new FluentStream()
+  .input(input)
+  .inputOptions("-f", "mp3") // или свой формат входа
+  .output("pipe:1")
+  .audioCodec("pcm_s16le")
+  .outputOptions("-f", "s16le", "-ar", "48000", "-ac", "2", "-af", filters.join(","));
+
+const { output, done } = ff.run();
+// пишите байты в `input`, чтобы стримить в ffmpeg
+```
+
+Примечания:
+- `{ suppressPrematureCloseWarning: true }` — подавляет безвредные предупреждения о «premature close», если потребитель может закрываться раньше.
+- Низкоуровневый `Processor` остаётся доступен, но предпочтителен `FluentStream`.
+
+## Аудио‑плагины
 
 Каждый плагин реализует интерфейс `AudioPlugin`:
 
@@ -53,7 +98,7 @@ export class GainPlugin implements AudioPlugin {
 }
 ```
 
-## Реестр Плагинов (PluginRegistry)
+## Реестр плагинов (опционально)
 
 ```ts
 import PluginRegistry from "fluent-streamer";
@@ -67,7 +112,7 @@ registry.register("bass", (opts) => new BassPlugin(opts.bass ?? 0));
 registry.register("treble", (opts) => new TreblePlugin(opts.treble ?? 0));
 ```
 
-## Создание цепочек плагинов
+## Создание цепочек плагинов (опционально)
 
 ```ts
 // Простая конвейерная цепочка
@@ -118,25 +163,33 @@ const ff = new FluentStream()
   .audioCodec("libopus")
   .format("opus")
   .output("pipe:1")
-  .withAudioPlugin(
-    registry.create("gain", { sampleRate: 48000, channels: 2 }),
-    (encoder) => encoder.audioCodec("libopus")
-  );
+  .usePlugins("gain")
+  .audioCodec("libopus");
 
 const { output, done } = ff.run();
 output.pipe(destination);
 await done;
 ```
 
-- `.withAudioPlugin(plugin, buildEncoder, options?)` — подключает AudioPlugin к PCM потоку.
+- `.usePlugins(...configs)` / `.usePlugin(name, options?)` — подключение глобально зарегистрированных плагинов по имени.
+- `.withAudioPlugins(registry, ...configs)` — то же самое, но с кастомным реестром.
+- `.withAudioPlugin(plugin, buildEncoder, options?)` — подключение вручную созданного экземпляра плагина.
 - `.crossfadeAudio(duration, options?)` — реализует кроссфейд между двумя аудио-входами.
 
-## Processor — Низкоуровневый запуск FFmpeg
+### Глобальный реестр плагинов
+
+```ts
+FluentStream.registerPlugin(name, factory);
+FluentStream.hasPlugin(name) // boolean
+FluentStream.clearPlugins()  // только для тестов/утилит
+```
+
+## Processor — низкоуровневый запуск FFmpeg (опционально)
 
 ```ts
 import { Processor } from "fluent-streamer";
 
-const proc = new Processor();
+const proc = new Processor({ suppressPrematureCloseWarning: true });
 proc.setArgs(["-i", "input.mp3", "-f", "s16le", "pipe:1"]);
 proc.run();
 proc.on("progress", console.log);

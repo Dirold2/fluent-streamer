@@ -38,6 +38,8 @@ import { spawnSync } from "child_process";
 import { dirname } from "path";
 import os from "os";
 import { type AudioPlugin, type AudioPluginOptions } from "./Filters.js";
+import PluginRegistry from "./PluginRegistry.js";
+import { FluentChain } from "./FluentChain.js";
 import Processor from "./Processor.js";
 import {
   type SimpleFFmpegOptions,
@@ -57,12 +59,38 @@ import {
  * const { output, done } = ff.run();
  */
 export class FluentStream extends EventEmitter {
+  // =============== Global Plugin Registry (static) ===============
+  private static _globalRegistry: PluginRegistry | null = null;
+
+  /** Get or create the global plugin registry singleton */
+  private static get globalRegistry(): PluginRegistry {
+    if (!this._globalRegistry) this._globalRegistry = new PluginRegistry();
+    return this._globalRegistry;
+  }
+
+  /** Register a plugin globally (preferred API surface) */
+  static registerPlugin(
+    name: string,
+    factory: (options: Required<AudioPluginOptions>) => AudioPlugin,
+  ): void {
+    this.globalRegistry.register(name, factory);
+  }
+
+  /** Check if a plugin is registered globally */
+  static hasPlugin(name: string): boolean {
+    return this.globalRegistry.has(name);
+  }
+
+  /** Clear global plugins (intended for tests) */
+  static clearPlugins(): void {
+    this._globalRegistry = new PluginRegistry();
+  }
   private args: string[] = [];
   private inputStreams: Array<{ stream: Readable; index: number }> = [];
   private inputFiles: string[] = [];
   private readonly options: Required<SimpleFFmpegOptions>;
   private pendingFifos: string[] = [];
-  private audioTransformConfig?: {
+  public audioTransformConfig?: {
     transform: Transform;
     sampleRate: number;
     channels: number;
@@ -434,6 +462,42 @@ export class FluentStream extends EventEmitter {
       buildEncoder,
     };
     return this;
+  }
+
+  /**
+   * Build and attach a chain of audio plugins via registry.
+   * Creates a composed Transform and delegates to withAudioTransform.
+   */
+  withAudioPlugins(
+    registry: PluginRegistry,
+    ...pluginConfigs: Array<string | { name: string; options?: Partial<AudioPluginOptions> }>
+  ): FluentStream {
+    const chain: FluentChain = registry.chain(...pluginConfigs);
+    const transform = chain.getTransform();
+
+    // Use defaults from registry.chain() (48000/2). Allow encoder to be configured afterwards by caller.
+    return this.withAudioTransform(
+      transform,
+      (enc) => enc,
+      { sampleRate: 48000, channels: 2 },
+    );
+  }
+
+  /**
+   * Preferable helper: use globally registered plugins by name.
+   * Equivalent to withAudioPlugins(FluentStream.globalRegistry, ...configs)
+   */
+  usePlugins(
+    ...pluginConfigs: Array<
+      string | { name: string; options?: Partial<AudioPluginOptions> }
+    >
+  ): FluentStream {
+    return this.withAudioPlugins(FluentStream.globalRegistry, ...pluginConfigs);
+  }
+
+  /** Shortcut for a single plugin by name with optional options */
+  usePlugin(name: string, options?: Partial<AudioPluginOptions>): FluentStream {
+    return this.usePlugins({ name, options });
   }
 
   /**

@@ -137,6 +137,8 @@ export class Processor extends EventEmitter {
       maxStderrBuffer: options.maxStderrBuffer ?? 1024 * 1024,
       enableProgressTracking: options.enableProgressTracking ?? false,
       logger: (options.logger as Logger) ?? console,
+      suppressPrematureCloseWarning:
+        options.suppressPrematureCloseWarning ?? false,
       abortSignal: options.abortSignal,
     };
 
@@ -394,10 +396,12 @@ export class Processor extends EventEmitter {
       pipeline(this.process.stdout, this.outputStream, (err) => {
         if (err) {
           // Handle "premature close" as a warning if stdin also errored with EPIPE
-          if (
-            (err.message && /premature close/i.test(err.message)) &&
-            this.finished
-          ) {
+          if (err.message && /premature close/i.test(err.message)) {
+            if (this.finished || (this as any).config?.suppressPrematureCloseWarning) {
+              // Treat as benign when process is already finishing or suppress flag is set
+              this.config.logger.debug?.("Premature close suppressed");
+              return;
+            }
             this.config.logger.warn?.("Output pipeline failed: Premature close");
             return;
           }
@@ -562,10 +566,15 @@ export class Processor extends EventEmitter {
    */
   private parseProgress(line: string): Partial<FFmpegProgress> | null {
     const progress: Partial<FFmpegProgress> = {};
-    const parts = line.split("=");
-    for (let i = 0; i < parts.length - 1; i += 2) {
-      const key = parts[i].trim();
-      const value = parts[i + 1].trim();
+    // Split tolerant of values that may contain '=' by splitting only on the first '=' per pair
+    const pairs = line
+      .split(/\n|\r/) // not strictly needed, but safe if multiline slips in
+      .flatMap((l) => (l ? [l] : []));
+    for (const pair of pairs) {
+      const eq = pair.indexOf("=");
+      if (eq <= 0) continue;
+      const key = pair.slice(0, eq).trim();
+      const value = pair.slice(eq + 1).trim();
       switch (key) {
         case "frame":
           progress.frame = Number.parseInt(value, 10);

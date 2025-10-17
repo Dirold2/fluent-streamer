@@ -4,6 +4,8 @@
 
 **Fluent Streamer** is a powerful Node.js library for flexible audio and video stream management using FFmpeg. It supports extensible audio plugins (Gain, Bass, Treble, Compressor, and more) and a sleek Fluent API.
 
+FluentStream is the primary API surface. You can register plugins globally and build end‑to‑end pipelines concisely.
+
 Build real-time chains of any audio effects and instantly integrate them with PCM streams (Discord, WebRTC, FFmpeg, and more).
 
 ---
@@ -27,6 +29,51 @@ npm install fluent-streamer
 # or
 yarn add fluent-streamer
 ```
+
+## Quick start (FluentStream as main API)
+
+```ts
+import FluentStream from "fluent-streamer";
+
+// 1) Register plugins globally (once at startup)
+FluentStream.registerPlugin("gain", (opts) => new GainPlugin(1.5));
+FluentStream.registerPlugin("bass", () => new BassPlugin(0.6));
+
+// 2) Build pipeline: file -> JS transforms -> encode -> stdout
+const ff = new FluentStream({ suppressPrematureCloseWarning: true })
+  .input("input.mp3")
+  .usePlugins("gain", { name: "bass", options: { /* plugin-specific */ } })
+  .audioCodec("aac")
+  .outputOptions("-b:a", "192k")
+  .output("pipe:1");
+
+const { output, done } = ff.run();
+output.pipe(process.stdout);
+await done;
+```
+
+Stream input + FFmpeg filters (`-af`):
+
+```ts
+import { PassThrough } from "stream";
+
+const input = new PassThrough();
+const filters = ["volume=2", "bass=g=5"]; // standard FFmpeg audio filters
+
+const ff = new FluentStream()
+  .input(input)
+  .inputOptions("-f", "mp3") // or your input format
+  .output("pipe:1")
+  .audioCodec("pcm_s16le")
+  .outputOptions("-f", "s16le", "-ar", "48000", "-ac", "2", "-af", filters.join(","));
+
+const { output, done } = ff.run();
+// write bytes into `input` to stream into ffmpeg
+```
+
+Notes:
+- Set `{ suppressPrematureCloseWarning: true }` if your consumer can close early and you want to silence benign "premature close" warnings.
+- You can still use low‑level `Processor`, but FluentStream is preferred.
 
 ## Audio Plugins
 
@@ -53,7 +100,7 @@ export class GainPlugin implements AudioPlugin {
 }
 ```
 
-## Plugin Registry
+## Plugin Registry (optional)
 
 ```ts
 import { PluginRegistry } from "fluent-streamer";
@@ -67,7 +114,7 @@ registry.register("bass", (opts) => new BassPlugin(opts.bass ?? 0));
 registry.register("treble", (opts) => new TreblePlugin(opts.treble ?? 0));
 ```
 
-## Creating Plugin Chains
+## Creating Plugin Chains (optional)
 
 ```ts
 // Simple pipeline chain
@@ -111,32 +158,40 @@ Input Stream (FFmpeg / PCM)
 ## FluentStream: High-Level API
 
 ```ts
-import { FluentStream } from "fluent-streamer";
+import FluentStream from "fluent-streamer";
 
 const ff = new FluentStream()
   .input("input.mp3")
   .audioCodec("libopus")
   .format("opus")
   .output("pipe:1")
-  .withAudioPlugin(
-    registry.create("gain", { sampleRate: 48000, channels: 2 }),
-    (encoder) => encoder.audioCodec("libopus")
-  );
+  .usePlugins("gain")
+  .audioCodec("libopus");
 
 const { output, done } = ff.run();
 output.pipe(destination);
 await done;
 ```
 
-- `.withAudioPlugin(plugin, buildEncoder, options?)` — attach an AudioPlugin to a PCM stream.
+- `.usePlugins(...configs)` / `.usePlugin(name, options?)` — attach globally registered plugins by name.
+- `.withAudioPlugins(registry, ...configs)` — same as above but with custom registry.
+- `.withAudioPlugin(plugin, buildEncoder, options?)` — attach a manually created plugin instance.
 - `.crossfadeAudio(duration, options?)` — performs a crossfade between two audio inputs.
 
-## Processor — Low-level FFmpeg Execution
+### Global plugin registry API
+
+```ts
+FluentStream.registerPlugin(name, factory);
+FluentStream.hasPlugin(name) // boolean
+FluentStream.clearPlugins()  // tests/tools only
+```
+
+## Processor — Low-level FFmpeg Execution (optional)
 
 ```ts
 import { Processor } from "fluent-streamer";
 
-const proc = new Processor();
+const proc = new Processor({ suppressPrematureCloseWarning: true });
 proc.setArgs(["-i", "input.mp3", "-f", "s16le", "pipe:1"]);
 proc.run();
 proc.on("progress", console.log);
