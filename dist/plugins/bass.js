@@ -1,0 +1,44 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.BassPlugin = void 0;
+const stream_1 = require("stream");
+/**
+ * Bass boost plugin.
+ * Simple IIR-style bass boost on stereo PCM audio.
+ */
+class BassPlugin {
+    bass;
+    constructor(bass) {
+        this.bass = bass;
+    }
+    setBass(b) {
+        this.bass = b;
+    }
+    createTransform(options) {
+        const { channels } = options;
+        const t = new stream_1.Transform({
+            transform: (chunk, _enc, cb) => {
+                try {
+                    const samples = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.length / 2);
+                    for (let i = 0; i < samples.length; i += channels) {
+                        for (let c = 0; c < channels; c++) {
+                            const idx = i + c;
+                            let val = samples[idx] / 32768;
+                            // Simple bass amplification for demonstration
+                            val = val * (1 + this.bass * 0.5);
+                            samples[idx] = Math.round(Math.max(-1, Math.min(1, val)) * 32767);
+                        }
+                    }
+                    cb(null, chunk);
+                }
+                catch (e) {
+                    cb(e);
+                }
+            },
+        });
+        t._bass = this.bass;
+        return t;
+    }
+}
+exports.BassPlugin = BassPlugin;
+//# sourceMappingURL=bass.js.map

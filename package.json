@@ -27,13 +27,5 @@
     "eventemitter3": "^5.0.1",
     "execa": "^9.6.0",
     "undici": "^7.16.0"
-  },
-  "devDependencies": {
-    "@types/node": "^24.8.1",
-    "eslint": "^9.37.0",
-    "dotenv": "^16.4.5",
-    "vitest": "^3.2.4",
-    "typescript": "^5.9.3",
-    "prettier": "^3.6.2"
   }
 }

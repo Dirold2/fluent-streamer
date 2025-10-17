@@ -5,7 +5,7 @@
     "lib": ["ES2023", "DOM"],
     "moduleResolution": "nodenext",
     "rootDir": "./src",
-    "outDir": "./build",
+    "outDir": "./dist",
     "allowSyntheticDefaultImports": true,
     "importHelpers": true,
     "strict": true,
