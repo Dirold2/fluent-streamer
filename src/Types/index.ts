@@ -117,6 +117,8 @@ export interface FFmpegRunResult {
   output: PassThrough;
   /** Promise that resolves when ffmpeg finishes */
   done: Promise<void>;
+  /** Function to stop the ffmpeg process */
+  stop: () => void;
 }
 
 /**

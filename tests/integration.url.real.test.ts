@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { mkdirSync, writeFileSync, existsSync, statSync } from 'fs'
 import { join } from 'path'
-import { SimpleFFmpeg } from '../src/Core/FluentStream'
+import { FluentStream } from '../src/Core/FluentStream'
 
 const RUN_REAL = process.env.RUN_REAL === '1'
 const OUT_DIR = join(process.cwd(), 'tests', '.tmp')
@@ -11,13 +11,13 @@ function ensureTmpDir() {
   try { mkdirSync(OUT_DIR, { recursive: true }) } catch {}
 }
 
-;(RUN_REAL ? describe : describe.skip)('SimpleFFmpeg (real URL input)', () => {
+;(RUN_REAL ? describe : describe.skip)('FluentStream (real URL input)', () => {
   it('downloads/transcodes a short segment from URL to mp3', async () => {
     ensureTmpDir()
     const outPath = join(OUT_DIR, `url_${Date.now()}.mp3`)
 
     // Build a small segment read to keep test fast
-    const cmd = new SimpleFFmpeg({ enableProgressTracking: false })
+    const cmd = new FluentStream({ enableProgressTracking: false })
       .input(STREAM_URL)
       .duration(5)
       .audioCodec('copy') // fastest path, avoid re-encode

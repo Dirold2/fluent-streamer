@@ -22,25 +22,6 @@ import {
   type FFmpegProgress,
 } from "../Types/index.js";
 
-// Added ERR_STREAM_PREMATURE_CLOSE code so we can ignore this error in stream pipeline handling
-const TERMINATION_ERROR_PATTERNS = [
-  "sigkill",
-  "sigterm",
-  "was killed",
-  "premature close",
-  "err_stream_premature_close",
-  "other side closed",
-  "econnreset",
-  "socketerror",
-  "timeout",
-  "request aborted",
-  "aborted",
-  "write after end",
-  "epipe",
-] as const;
-
-const TERMINATION_ERROR_CODES = ["ERR_STREAM_PREMATURE_CLOSE"];
-
 /**
  * @typedef {object} ProcessorOptions
  * @augments SimpleFFmpegOptions
@@ -235,7 +216,7 @@ export class Processor extends EventEmitter {
       this.emit("spawn", { pid: this.process?.pid ?? null });
     });
 
-    return { output: this.outputStream, done: this.donePromise };
+    return { output: this.outputStream, done: this.donePromise, stop: () => this.kill() };
   }
 
   /**
@@ -250,7 +231,9 @@ export class Processor extends EventEmitter {
         this.cleanup();
         this.process.kill(signal);
       } catch (error) {
-        this.config.logger.debug?.(`Kill error (ignored): ${error}`);
+        this.config.logger.error?.(`Kill error: ${error}`);
+        this.emit("error", error instanceof Error ? error : new Error(String(error)));
+        this.finish(error instanceof Error ? error : new Error(String(error)));
       }
     }
   }
@@ -352,26 +335,24 @@ export class Processor extends EventEmitter {
     first.stream.once("end", endStdin).once("close", endStdin);
 
     first.stream.on("error", (err) => {
-      if (!this.isIgnorableError(err)) {
-        this.config.logger.error?.(`Input stream error: ${err.message}`);
-        this.emit("error", err);
-      }
+      // Всегда логируем и эмитим ошибку
+      this.config.logger.error?.(`Input stream error: ${err.message}`);
+      this.emit("error", err);
+      this.finish(err);
     });
 
     this.process.stdin.on("error", (err) => {
-      if (!this.isIgnorableError(err)) {
-        this.config.logger.error?.(`Stdin error: ${err.message}`);
-        this.emit("error", err);
-      }
+      this.config.logger.error?.(`Stdin error: ${err.message}`);
+      this.emit("error", err);
+      this.finish(err);
     });
 
     pipeline(first.stream, this.process.stdin, (err) => {
-      // Only emit pipeline errors if they are NOT ignorable (e.g. not "ERR_STREAM_PREMATURE_CLOSE" or similar)
-      if (err && !this.isIgnorableError(err)) {
+      if (err) {
         this.config.logger.error?.(`Pipeline failed: ${err.message}`);
         this.emit("error", err);
+        this.finish(err);
       }
-      // If the error is ignorable (such as premature close), swallow silently.
     });
   }
 
@@ -381,21 +362,24 @@ export class Processor extends EventEmitter {
    */
   private setupOutputStreams(): void {
     if (!this.process || !this.outputStream) return;
-    this.process.stdout?.on("error", (e) =>
-      this.config.logger.debug?.(`stdout error: ${e}`),
-    );
-    this.process.stderr?.on("error", (e) =>
-      this.config.logger.debug?.(`stderr error: ${e}`),
-    );
+    this.process.stdout?.on("error", (e) => {
+      this.config.logger.error?.(`stdout error: ${e}`);
+      this.emit("error", e instanceof Error ? e : new Error(String(e)));
+      this.finish(e instanceof Error ? e : new Error(String(e)));
+    });
+    this.process.stderr?.on("error", (e) => {
+      this.config.logger.error?.(`stderr error: ${e}`);
+      this.emit("error", e instanceof Error ? e : new Error(String(e)));
+      this.finish(e instanceof Error ? e : new Error(String(e)));
+    });
 
     if (this.process.stdout) {
       pipeline(this.process.stdout, this.outputStream, (err) => {
-        // Only emit pipeline errors if they are NOT ignorable (e.g. not "ERR_STREAM_PREMATURE_CLOSE" or similar)
-        if (err && !this.isIgnorableError(err)) {
+        if (err) {
           this.config.logger.error?.(`Output pipeline failed: ${err.message}`);
           this.emit("error", err);
+          this.finish(err);
         }
-        // If the error is ignorable (such as premature close), swallow silently.
       });
     }
 
@@ -414,11 +398,9 @@ export class Processor extends EventEmitter {
       this.handleProcessExit(code, signal),
     );
     this.process.once("error", (err: Error) => {
-      if (!this.isTerminating || !this.isIgnorableError(err)) {
-        this.config.logger.error?.(`Process error: ${err.message}`);
-        this.emit("error", err);
-        this.finish(err);
-      }
+      this.config.logger.error?.(`Process error: ${err.message}`);
+      this.emit("error", err);
+      this.finish(err);
     });
     this.process.on("cancel", () => this.kill("SIGTERM"));
   }
@@ -536,7 +518,9 @@ export class Processor extends EventEmitter {
       this.process?.stdout?.destroy();
       this.process?.stderr?.destroy();
     } catch (error) {
-      this.config.logger.debug?.(`Cleanup error (ignored): ${error}`);
+      this.config.logger.error?.(`Cleanup error: ${error}`);
+      this.emit("error", error instanceof Error ? error : new Error(String(error)));
+      this.finish(error instanceof Error ? error : new Error(String(error)));
     }
   }
 
@@ -588,27 +572,6 @@ export class Processor extends EventEmitter {
       }
     }
     return Object.keys(progress).length > 0 ? progress : null;
-  }
-
-  /**
-   * Determines if an error should be considered "ignorable" for our pipeline/stream error handling.
-   * This includes EPIPE and also 'ERR_STREAM_PREMATURE_CLOSE' code and their message variants.
-   *
-   * @private
-   * @param {any} error - The error object (stream/process error).
-   * @returns {boolean} True if the error is considered safe to ignore.
-   */
-  private isIgnorableError(error: any): boolean {
-    const message = (error?.message || "").toLowerCase();
-    // Ignore Node's ERR_STREAM_PREMATURE_CLOSE or any error with such a code
-    if (
-      error?.code === "EPIPE" ||
-      TERMINATION_ERROR_CODES.includes(error?.code) ||
-      TERMINATION_ERROR_PATTERNS.some((p) => message.includes(p))
-    ) {
-      return true;
-    }
-    return false;
   }
 }
 
