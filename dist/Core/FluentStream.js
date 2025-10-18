@@ -2,518 +2,615 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.default = exports.FluentStream = void 0;
 const tslib_1 = require("tslib");
-/**
- * @class FluentStream
- * @classdesc
- * FluentStream is a fluent, chainable wrapper around the low-level Processor for building FFmpeg command arguments and optionally attaching input streams.
- *
- * Provides an ergonomic builder API for constructing FFmpeg commands,
- * attaching file or stream inputs, and customizing options including JS audio transforms.
- *
- * @example
- * // Basic usage with file input and output:
- * const ff = new FluentStream({ enableProgressTracking: true })
- *   .input('input.mp4')
- *   .videoCodec('libx264')
- *   .output('output.mp4');
- * const { output, done } = ff.run();
- *
- * @example
- * // With stream input/output and custom filter
- * const ff = new FluentStream()
- *   .input(someReadableStream)
- *   .outputOptions('-preset', 'fast')
- *   .complexFilter('[0:v]scale=320:240[vout]')
- *   .map('[vout]')
- *   .output('pipe:1');
- * const { output, done } = ff.run();
- *
- * @example
- * // Using JS audio transform (node stream as PCM)
- * ff
- *   .input('song.mp3')
- *   .withAudioTransform(myTransform, (enc) => enc.audioCodec('aac').output('song-processed.aac'));
- * ff.run();
- */
 const eventemitter3_1 = require("eventemitter3");
-const fs_1 = require("fs");
-const child_process_1 = require("child_process");
-const path_1 = require("path");
-const os_1 = tslib_1.__importDefault(require("os"));
+const stream_1 = require("stream");
 const PluginRegistry_js_1 = tslib_1.__importDefault(require("./PluginRegistry.js"));
 const Processor_js_1 = tslib_1.__importDefault(require("./Processor.js"));
 /**
- * @class SimpleFFmpeg
- * @classdesc
- * SimpleFFmpeg provides a convenient, chainable interface for constructing FFmpeg commands. It delegates execution to the low-level Processor.
+ * Internal class for "hot swapping" audio plugin chains without stopping the pipeline.
+ * Acts as a Transform stream that proxies data through the current plugin chain.
  *
- * @example
- * const ff = new SimpleFFmpeg({ enableProgressTracking: true })
- *   .input('input.mp4')
- *   .videoCodec('libx264')
- *   .output('pipe:1');
- * const { output, done } = ff.run();
+ * @internal
+ */
+class PluginHotSwap extends stream_1.Transform {
+    activeChain;
+    constructor(initialChain) {
+        super();
+        this.activeChain = initialChain;
+        this.wireChain(this.activeChain);
+    }
+    /**
+     * Set up listeners for data and errors for the active plugin chain.
+     * @param chain The chain to wire.
+     */
+    wireChain(chain) {
+        chain.on('data', (chunk) => {
+            if (!this.push(chunk)) {
+                chain.pause(); // Manage backpressure
+            }
+        });
+        chain.on('error', (err) => this.emit('error', err));
+    }
+    /**
+     * Remove listeners from the given plugin chain.
+     * @param chain The chain to unwire.
+     */
+    unwireChain(chain) {
+        chain.removeAllListeners('data');
+        chain.removeAllListeners('error');
+    }
+    /** Invoked when the consumer is ready to read more data. */
+    _read() {
+        this.activeChain.resume();
+    }
+    /** Called when data is written to this stream to process it through the plugin chain. */
+    _transform(chunk, _encoding, callback) {
+        if (!this.activeChain.write(chunk)) {
+            this.activeChain.once('drain', callback);
+        }
+        else {
+            callback();
+        }
+    }
+    /** Called when the input stream ends. */
+    _flush(callback) {
+        this.activeChain.end(() => {
+            callback();
+        });
+    }
+    /**
+     * Hot-swap the current plugin chain for a new one.
+     * @param newChain The new plugin Transform chain to use.
+     */
+    async swap(newChain) {
+        const oldChain = this.activeChain;
+        const promise = new Promise((resolve) => {
+            oldChain.once('end', () => {
+                this.unwireChain(oldChain);
+                resolve();
+            });
+        });
+        // Switch to the new chain for all new data
+        this.activeChain = newChain;
+        this.wireChain(this.activeChain);
+        // End the old chain and wait until it finishes processing
+        oldChain.end();
+        await promise;
+    }
+}
+/**
+ * The FluentStream class provides a convenient, fluent API wrapper around a low-level `Processor` for working with FFmpeg.
+ * Allows you to easily configure FFmpeg commands, manage inputs/outputs, and build advanced audio processing pipelines using plugins.
+ * Supports building complex transcoding and media processing pipelines through chained methods, including handling user-defined audio plugins.
+ *
+ * @example <caption>Basic file conversion</caption>
+ * const stream = new FluentStream()
+ *   .input("input.mp3")
+ *   .audioCodec("aac")
+ *   .audioBitrate("192k")
+ *   .output("output.aac");
+ *
+ * const { output, done } = stream.run();
+ * output.pipe(fs.createWriteStream("output.aac"));
+ * await done;
+ *
+ * @example <caption>Using audio effect plugins</caption>
+ * // Register a custom plugin
+ * FluentStream.registerPlugin("gain", opts => new GainPlugin(opts));
+ *
+ * // Using a registered plugin
+ * const stream = new FluentStream()
+ *   .input(fs.createReadStream("raw.wav"))
+ *   .usePlugins(
+ *     enc => enc.audioCodec("aac").output("final.m4a"),
+ *     { name: "gain", options: { gainDb: 6 } }
+ *   );
+ *
+ * const { output, done } = stream.run();
+ * output.pipe(fs.createWriteStream("final.m4a"));
+ * await done;
+ *
+ * @example <caption>Dynamically update plugins during processing</caption>
+ * await stream.updatePlugins({ name: "compressor", options: { threshold: -20 } });
+ *
+ * @see run
  */
 class FluentStream extends eventemitter3_1.EventEmitter {
-    // =============== Global Plugin Registry (static) ===============
     static _globalRegistry = null;
-    /** Get or create the global plugin registry singleton */
+    // --- Humanity header addition ---
+    static HUMANITY_HEADER = {
+        "X-Human-Intent": "true",
+        "X-Request-Attention": "just-want-to-do-my-best",
+        "User-Agent": "FluentStream/1.0 (friendly bot)"
+    };
     static get globalRegistry() {
         if (!this._globalRegistry)
             this._globalRegistry = new PluginRegistry_js_1.default();
         return this._globalRegistry;
     }
-    /** Register a plugin globally (preferred API surface) */
+    /**
+     * Register a plugin for later use by name across all FluentStream instances.
+     * @param name Plugin name.
+     * @param factory Factory function to create a plugin instance given options.
+     * @example
+     * FluentStream.registerPlugin("normalize", opts => new NormalizePlugin(opts));
+     */
     static registerPlugin(name, factory) {
         this.globalRegistry.register(name, factory);
     }
-    /** Check if a plugin is registered globally */
+    /**
+     * Check if a plugin is registered globally by name.
+     * @param name Plugin name.
+     * @returns true if the plugin is registered globally.
+     */
     static hasPlugin(name) {
         return this.globalRegistry.has(name);
     }
-    /** Clear global plugins (intended for tests) */
+    /**
+     * Clear all globally registered plugins.
+     */
     static clearPlugins() {
         this._globalRegistry = new PluginRegistry_js_1.default();
     }
     args = [];
     inputStreams = [];
-    inputFiles = [];
+    complexFilters = [];
     options;
-    pendingFifos = [];
-    audioTransformConfig;
-    audioPluginConfig;
+    // State for two-process pipeline with plugins
+    audioTransform = null;
+    pluginHotSwap = null;
+    pcmOptions = null;
+    encoderBuilder = null;
+    _pluginControllers = [];
     /**
-     * Create a new FluentStream builder.
-     *
-     * @param {SimpleFFmpegOptions} [options] - Default configuration for the created Processor.
-     *
-     * @example
-     * const ff = new FluentStream({ enableProgressTracking: true });
+     * FluentStream constructor.
+     * @param options Optional configuration for the FFmpeg/Processor.
      */
     constructor(options = {}) {
         super();
-        this.options = {
-            ffmpegPath: options.ffmpegPath ?? "ffmpeg",
-            failFast: options.failFast ?? false,
-            extraGlobalArgs: options.extraGlobalArgs ?? [],
-            loggerTag: options.loggerTag ?? `ffmpeg_${Date.now()}`,
-            enableProgressTracking: options.enableProgressTracking ?? false,
-            logger: options.logger ?? console,
-        };
-        if (this.options.failFast)
-            this.args.push("-xerror");
-        if (this.options.extraGlobalArgs?.length)
-            this.args.push(...this.options.extraGlobalArgs);
-        if (this.options.enableProgressTracking)
-            this.args.push("-progress", "pipe:2");
+        this.options = options;
     }
-    // ================= Fluent API =================
-    /**
-     * Set global FFmpeg options (prepended to command).
-     * @param {...string} opts
-     * @returns {FluentStream}
-     */
-    globalOptions(...opts) {
-        this.args.unshift(...opts);
-        return this;
+    getAudioTransform() {
+        if (!this.audioTransform)
+            throw new Error("Audio transform not initialized. Call usePlugins() first.");
+        return this.audioTransform;
     }
-    /**
-     * Set input options (inserted before last input).
-     * @param {...string} opts
-     * @returns {FluentStream}
-     */
-    inputOptions(...opts) {
-        const lastInputIndex = this.args.lastIndexOf("-i");
-        if (lastInputIndex !== -1) {
-            this.args.splice(lastInputIndex, 0, ...opts);
-        }
-        else {
-            this.args.unshift(...opts);
-        }
-        return this;
+    clear() {
+        this.audioTransform = null;
+        this.pluginHotSwap = null;
+        this.pcmOptions = null;
+        this.encoderBuilder = null;
+        this._pluginControllers = [];
+        this.args = [];
+        this.inputStreams = [];
+        this.complexFilters = [];
     }
+    // ===================== Fluent API ========================
     /**
-     * Add an input (filename or Readable stream).
-     * @param {string|Readable} input
-     * @returns {FluentStream}
+     * Add an input file or stream to the FFmpeg command.
+     * Multiple calls allowed for files (only one for streams).
+     * Throws if called after .usePlugins().
+     * @param input File path or a Readable stream.
+     * @example
+     * stream.input("input.mp3");
+     * stream.input(fs.createReadStream("foo.wav"));
      */
     input(input) {
+        if (this.encoderBuilder)
+            throw new Error("Cannot add new inputs after .usePlugins() has been called.");
         if (typeof input === "string") {
             this.args.push("-i", input);
-            this.inputFiles.push(input);
         }
         else {
-            const index = this.inputStreams.length;
-            this.inputStreams.push({ stream: input, index });
+            if (this.inputStreams.length > 0)
+                throw new Error("Multiple stream inputs are not supported.");
+            this.inputStreams.push({ stream: input, index: 0 });
             this.args.push("-i", "pipe:0");
         }
         return this;
     }
     /**
-     * Add a named pipe FIFO as input.
-     * @param {string} fifoPath
-     * @returns {FluentStream}
-     */
-    inputFifo(fifoPath) {
-        this.pendingFifos.push(fifoPath);
-        this.args.push("-i", fifoPath);
-        return this;
-    }
-    /**
-     * Generate a new FIFO path in a temp directory and add as an input.
-     * @param {{dir?: string, prefix?: string}} [options]
-     * @returns {string} Absolute FIFO path
-     */
-    prepareNextTrackFifo(options) {
-        const dir = options?.dir ?? os_1.default.tmpdir();
-        const prefix = options?.prefix ?? "ffmpeg_fifo";
-        const unique = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const path = `${dir}/${prefix}_${unique}.fifo`;
-        this.inputFifo(path);
-        return path;
-    }
-    /**
-     * Set output destination (filename, 'pipe:1', etc.).
-     * @param {string} output
-     * @returns {FluentStream}
+     * Set the output file for FFmpeg.
+     * @param output Output file path.
+     * @example
+     * stream.output("output.mp3")
      */
     output(output) {
         this.args.push(output);
         return this;
     }
     /**
-     * Add options for output.
-     * @param {...string} opts
-     * @returns {FluentStream}
+     * Add global FFmpeg options (before inputs).
+     * @param opts Array of FFmpeg options (e.g. "-hide_banner", "-y").
+     * @example
+     * stream.globalOptions("-y", "-hide_banner");
      */
-    outputOptions(...opts) {
-        this.args.push(...opts);
+    globalOptions(...opts) { this.args.unshift(...opts); return this; }
+    /**
+     * Add FFmpeg options for the last input.
+     * @param opts Options for the corresponding input (e.g. "-ss", "30").
+     * @example
+     * stream.inputOptions("-ss", "10");
+     */
+    inputOptions(...opts) {
+        const lastInputIndex = this.args.lastIndexOf("-i");
+        if (lastInputIndex !== -1)
+            this.args.splice(lastInputIndex, 0, ...opts);
+        else
+            this.args.unshift(...opts);
         return this;
     }
     /**
-     * Specify video codec.
-     * @param {string} codec
-     * @returns {FluentStream}
+     * Add FFmpeg output options.
+     * @param opts Output options (e.g. "-map", "0:a").
+     * @example
+     * stream.outputOptions("-map", "0:a");
+     */
+    outputOptions(...opts) { this.args.push(...opts); return this; }
+    /**
+     * Set the video codec.
+     * Skips if codec is falsy/empty.
+     * @param codec Codec name (e.g. "libx264").
+     * @example
+     * stream.videoCodec("libx264")
      */
     videoCodec(codec) {
-        this.args.push("-c:v", codec);
+        if (codec)
+            this.args.push("-c:v", codec);
         return this;
     }
     /**
-     * Specify audio codec.
-     * @param {string} codec
-     * @returns {FluentStream}
+     * Set the audio codec.
+     * Skips if codec is falsy/empty.
+     * @param codec Audio codec name (e.g. "aac").
+     * @example
+     * stream.audioCodec("aac")
      */
     audioCodec(codec) {
-        this.args.push("-c:a", codec);
+        if (codec)
+            this.args.push("-c:a", codec);
         return this;
     }
     /**
-     * Set video bitrate.
-     * @param {string} bitrate
-     * @returns {FluentStream}
+     * Set the video bitrate.
+     * @param bitrate Bitrate string (e.g. "1M").
+     * @example
+     * stream.videoBitrate("1M")
      */
-    videoBitrate(bitrate) {
-        this.args.push("-b:v", bitrate);
-        return this;
-    }
+    videoBitrate(bitrate) { this.args.push("-b:v", bitrate); return this; }
     /**
-     * Set audio bitrate.
-     * @param {string} bitrate
-     * @returns {FluentStream}
+     * Set the audio bitrate.
+     * @param bitrate Bitrate string (e.g. "192k").
+     * @example
+     * stream.audioBitrate("192k")
      */
-    audioBitrate(bitrate) {
-        this.args.push("-b:a", bitrate);
-        return this;
-    }
+    audioBitrate(bitrate) { this.args.push("-b:a", bitrate); return this; }
     /**
-     * Set output video size.
-     * @param {string} size
-     * @returns {FluentStream}
-     */
-    size(size) {
-        this.args.push("-s", size);
-        return this;
-    }
-    /**
-     * Set framerate.
-     * @param {number} fps
-     * @returns {FluentStream}
-     */
-    fps(fps) {
-        this.args.push("-r", fps.toString());
-        return this;
-    }
-    /**
-     * Set output duration.
-     * @param {string|number} duration
-     * @returns {FluentStream}
-     */
-    duration(duration) {
-        this.args.push("-t", duration.toString());
-        return this;
-    }
-    /**
-     * Set input seek time.
-     * @param {string|number} time
-     * @returns {FluentStream}
-     */
-    seek(time) {
-        this.args.push("-ss", time.toString());
-        return this;
-    }
-    /**
-     * Set output format.
-     * @param {string} format
-     * @returns {FluentStream}
+     * Specify the output format for FFmpeg.
+     * Calling multiple times replaces the previous format.
+     * @param format Format string (e.g. "mp3").
+     * @example
+     * stream.format("mp3")
      */
     format(format) {
+        // Remove any previous -f and its argument
+        for (let i = 0; i < this.args.length - 1;) {
+            if (this.args[i] === "-f") {
+                this.args.splice(i, 2);
+            }
+            else {
+                i++;
+            }
+        }
         this.args.push("-f", format);
         return this;
     }
     /**
-     * Enable overwrite output files.
-     * @returns {FluentStream}
+     * Set the duration limit.
+     * @param time Time in seconds or FFmpeg time string (e.g. "00:00:30").
+     * @example
+     * stream.duration(20)
+     * stream.duration("00:01:10")
      */
-    overwrite() {
-        this.args.push("-y");
+    duration(time) { this.args.push("-t", String(time)); return this; }
+    /**
+     * Disable video stream in the output.
+     * @example
+     * stream.noVideo()
+     */
+    noVideo() { this.args.push("-vn"); return this; }
+    /**
+     * Disable audio stream in the output.
+     * @example
+     * stream.noAudio();
+     */
+    noAudio() { this.args.push("-an"); return this; }
+    /**
+     * Set the audio sample rate.
+     * @param freq Sample rate (e.g. 44100)
+     * @example
+     * stream.audioFrequency(48000)
+     */
+    audioFrequency(freq) { this.args.push("-ar", String(freq)); return this; }
+    /**
+     * Copy all codecs without transcoding.
+     * Ensures only one "-c copy" is present.
+     * @example
+     * stream.copyCodecs()
+     */
+    copyCodecs() {
+        // Only add "-c copy" if it's not already present.
+        for (let i = 0; i < this.args.length - 1;) {
+            if (this.args[i] === "-c" && this.args[i + 1] === "copy") {
+                // Already present, don't add and return immediately.
+                return this;
+            }
+            else {
+                i++;
+            }
+        }
+        this.args.push("-c", "copy");
         return this;
     }
     /**
-     * Disable overwrite output files.
-     * @returns {FluentStream}
+     * Allow overwriting the output file (-y).
+     * @example
+     * stream.overwrite()
      */
-    noOverwrite() {
-        this.args.push("-n");
+    overwrite() { this.args.push("-y"); return this; }
+    /**
+     * Use FFmpeg -map to map input streams to output.
+     * @param label Map label string.
+     * @example
+     * stream.map("0:a:0")
+     */
+    map(label) { this.args.push('-map', label); return this; }
+    /**
+     * Seek to a specified input time using -ss.
+     * @param time Time in seconds or FFmpeg time string.
+     * @example
+     * stream.seekInput(30)
+     */
+    seekInput(time) {
+        const lastInputIndex = this.args.lastIndexOf("-i");
+        const seekArgs = ['-ss', String(time)];
+        if (lastInputIndex !== -1)
+            this.args.splice(lastInputIndex, 0, ...seekArgs);
+        else
+            this.args.unshift(...seekArgs);
         return this;
     }
     /**
-     * Add a complex filtergraph.
-     * @param {string} filterGraph
-     * @returns {FluentStream}
+     * Add a FFmpeg filter_complex graph to the pipeline.
+     * Can be called multiple times.
+     * Ignores empty strings.
+     * @param graph Filter string or array of strings.
+     * @example
+     * stream.complexFilter("[0:a]loudnorm[aout]");
      */
-    complexFilter(filterGraph) {
-        this.args.push("-filter_complex", filterGraph);
-        return this;
-    }
-    /**
-     * Select FFmpeg output stream label.
-     * @param {string} label
-     * @returns {FluentStream}
-     */
-    map(label) {
-        this.args.push("-map", label);
-        return this;
-    }
-    /**
-     * Add an audio crossfade filter. Output is mapped to '[aout]'.
-     * @param {number} durationSeconds
-     * @param {{inputA?: number, inputB?: number, curve1?: string, curve2?: string}} [options]
-     * @returns {FluentStream}
-     */
-    crossfadeAudio(durationSeconds, options) {
-        const inputA = options?.inputA ?? 0;
-        const inputB = options?.inputB ?? 1;
-        const c1 = options?.curve1 ?? "tri";
-        const c2 = options?.curve2 ?? "tri";
-        const graph = `[${inputA}:a][${inputB}:a]acrossfade=d=${durationSeconds}:c1=${c1}:c2=${c2}[aout]`;
-        this.args.push("-filter_complex", graph, "-map", "[aout]");
-        return this;
-    }
-    /**
-     * Attach a JS Transform stream to process PCM data between decode and encode. Only one FFmpeg process is spawned with transform inserted in the chain.
-     *
-     * @param {Transform} transform - Node.js transform stream
-     * @param {function(FluentStream):void} buildEncoder - Callback to set codecs/output after transform
-     * @param {{sampleRate?: number, channels?: number}} [opts] - Audio stream settings
-     * @returns {FluentStream}
-     */
-    withAudioTransform(transform, buildEncoder, opts) {
-        this.audioTransformConfig = {
-            transform,
-            sampleRate: opts?.sampleRate ?? 48000,
-            channels: opts?.channels ?? 2,
-            buildEncoder,
-        };
-        // Remove all "-i pipe:0" except the first (rightmost)
-        let firstPipeIndex = -1;
-        for (let i = this.args.length - 1; i >= 0; --i) {
-            if (this.args[i] === "-i" && this.args[i + 1] === "pipe:0") {
-                if (firstPipeIndex === -1) {
-                    firstPipeIndex = i;
-                }
-                else {
-                    this.args.splice(i, 2);
+    complexFilter(graph) {
+        if (Array.isArray(graph)) {
+            for (const g of graph) {
+                if (typeof g === 'string' && g.trim() !== "") {
+                    this.complexFilters.push(g);
                 }
             }
         }
-        this.inputStreams = this.inputStreams.slice(0, 1);
-        buildEncoder(this);
-        // Ensure raw PCM decode inserted if needed
-        const sr = this.audioTransformConfig.sampleRate;
-        const ch = this.audioTransformConfig.channels;
-        let haveInputRaw = false;
-        let haveCodec = false;
-        for (let i = 0; i < this.args.length; ++i) {
-            if (this.args[i] === "-f" && this.args[i + 1] === "s16le")
-                haveInputRaw = true;
-            if ((this.args[i] === "-acodec" || this.args[i] === "-c:a") &&
-                this.args[i + 1] === "pcm_s16le")
-                haveCodec = true;
-        }
-        if (!haveInputRaw || !haveCodec) {
-            const firstInputIdx = this.args.findIndex((x, i) => x === "-i" && this.args[i + 1] === "pipe:0");
-            let insertPos = firstInputIdx + 2;
-            this.args.splice(insertPos, 0, "-f", "s16le", "-ar", String(sr), "-ac", String(ch), "-acodec", "pcm_s16le");
+        else if (typeof graph === "string" && graph.trim() !== "") {
+            this.complexFilters.push(graph);
         }
         return this;
     }
     /**
-     * Use an AudioPlugin (see Filters.js) to insert a JS transform in the PCM chain. buildEncoder lets you configure target encoding/output after processing.
-     * @param {AudioPlugin} plugin
-     * @param {function(FluentStream):void} buildEncoder
-     * @param {AudioPluginBaseOptions} [opts]
-     * @returns {FluentStream}
+     * Adds an audio crossfade (acrossfade) filter between two audio streams to the filter_complex graph.
+     * Throws if number of inputs is not exactly 2.
+     * @param duration Duration in seconds.
+     * @param options Optional channel labels.
+     * @example
+     * stream.crossfadeAudio(2.5, { inputA: '[0:a]', inputB: '[1:a]', outputLabel: 'acrossfaded' })
      */
-    withAudioPlugin(plugin, buildEncoder, opts) {
-        this.audioPluginConfig = {
-            plugin,
-            options: {
-                sampleRate: opts?.sampleRate ?? 48000,
-                channels: opts?.channels ?? 2,
-            },
-            buildEncoder,
-        };
-        return this;
+    crossfadeAudio(duration, options) {
+        const inputCount = this.args.filter(arg => arg === "-i").length;
+        if (inputCount !== 2) {
+            throw new Error(`crossfadeAudio requires exactly 2 input files, but got ${inputCount}`);
+        }
+        const inputA = options?.inputA ?? '[0:a]';
+        const inputB = options?.inputB ?? '[1:a]';
+        const outputLabel = options?.outputLabel ?? 'aout';
+        const graph = `${inputA}${inputB}acrossfade=d=${duration}[${outputLabel}]`;
+        return this.complexFilter(graph).map(`[${outputLabel}]`);
     }
     /**
-     * Build and attach a chain of audio plugins via registry.
-     * Creates a composed Transform and delegates to withAudioTransform.
+     * Alias for usePlugins for a single plugin.
+     * @param buildEncoder Function that configures the output FluentStream encoder.
+     * @param pluginConfig Plugin string or object with its options.
+     * @example
+     * stream.usePlugin(enc => enc.output("out.ogg"), "normalize");
      */
-    withAudioPlugins(registry, ...pluginConfigs) {
-        const chain = registry.chain(...pluginConfigs);
-        const transform = chain.getTransform();
-        // capture controllers for hot updates
+    usePlugin(buildEncoder, pluginConfig) {
+        return this.usePlugins(buildEncoder, pluginConfig);
+    }
+    /**
+     * Switch the pipeline into plugin-processing mode.
+     * Multiple plugins (chained) can be specified.
+     * @param buildEncoder Function receiving a FluentStream for configuring the encoder (output process).
+     * @param pluginConfigs One or more plugins: either a name string or an object { name, options }
+     * @example
+     * stream.input("in.wav").usePlugins(
+     *   enc => enc.audioBitrate("192k").output("out.ogg"),
+     *   "normalize", { name: "compressor" }
+     * );
+     */
+    usePlugins(buildEncoder, ...pluginConfigs) {
+        if (pluginConfigs.length === 0)
+            throw new Error("usePlugins requires at least one plugin.");
+        const chain = FluentStream.globalRegistry.chain(...pluginConfigs);
         this._pluginControllers = chain.getControllers();
-        // Use defaults from registry.chain() (48000/2). Allow encoder to be configured afterwards by caller.
-        return this.withAudioTransform(transform, (enc) => enc, {
-            sampleRate: 48000,
-            channels: 2,
-        });
+        this.encoderBuilder = buildEncoder;
+        // Create an instance of PluginHotSwap to manage the audio transform pipeline
+        const initialChainTransform = chain.getTransform();
+        this.pluginHotSwap = new PluginHotSwap(initialChainTransform);
+        this.audioTransform = this.pluginHotSwap;
+        this.pcmOptions = this._pluginControllers[0]?.getOptions?.() ?? { sampleRate: 48000, channels: 2 };
+        return this;
     }
     /**
-     * Preferable helper: use globally registered plugins by name.
-     * Equivalent to withAudioPlugins(FluentStream.globalRegistry, ...configs)
+     * Returns the plugin controllers, for usePlugins-style interface.
+     * When called as a property on the result of usePlugins, is bound.
      */
-    usePlugins(...pluginConfigs) {
-        return this.withAudioPlugins(FluentStream.globalRegistry, ...pluginConfigs);
+    getControllers() {
+        return this._pluginControllers;
     }
-    /** Shortcut for a single plugin by name with optional options */
-    usePlugin(name, options) {
-        return this.usePlugins({ name, options });
+    /**
+     * Hot-swap (update) the plugin chain at runtime without stopping the pipeline.
+     * ONLY after calling usePlugins().
+     * @param pluginConfigs New configuration(s) for plugin(s).
+     * @example
+     * await stream.updatePlugins("compressor", { name: "custom", options: {...} });
+     */
+    async updatePlugins(...pluginConfigs) {
+        if (!this.pluginHotSwap) {
+            throw new Error("Plugins can only be updated after .usePlugins() has been called.");
+        }
+        if (pluginConfigs.length === 0) {
+            throw new Error("updatePlugins requires at least one plugin.");
+        }
+        const newChainInstance = FluentStream.globalRegistry.chain(...pluginConfigs);
+        const newTransform = newChainInstance.getTransform();
+        await this.pluginHotSwap.swap(newTransform);
+        this._pluginControllers = newChainInstance.getControllers();
     }
-    /** Get controller instances of the last configured plugin chain (if any) */
+    /**
+     * Get the array of plugin controller instances currently in use.
+     * @returns An array of AudioPlugin instances.
+     */
     getPluginControllers() {
-        return (this._pluginControllers ?? []);
+        return this._pluginControllers;
     }
     /**
-     * Execute the FFmpeg command. All processor events are re-emitted.
-     * @param {{ffplay?: boolean, [key: string]: any}} [opts]
-     * @returns {FFmpegRunResult}
+     * Run the constructed FFmpeg pipeline.
+     * If plugins are used: spawns both a decoder, plugin-processing chain, and encoder (dual process).
+     * Returns an object with output Readable stream, a done promise, and a stop function.
+     *
+     * @example
+     * const { output, done, stop } = stream.run();
+     * output.pipe(fs.createWriteStream("foo.ogg"));
+     * await done;
      */
-    run(opts = {}) {
-        for (const fifoPath of this.pendingFifos) {
-            this.ensureFifoSync(fifoPath);
+    run() {
+        if (this.encoderBuilder && this.audioTransform && this.pcmOptions) {
+            return this.runWithPlugins();
         }
-        if (this.audioPluginConfig && !this.audioTransformConfig) {
-            const t = this.audioPluginConfig.plugin.createTransform(this.audioPluginConfig.options);
-            const { sampleRate, channels } = this.audioPluginConfig.options;
-            return this.withAudioTransform(t, this.audioPluginConfig.buildEncoder, {
-                sampleRate,
-                channels,
-            }).run(opts);
-        }
-        const processor = new Processor_js_1.default({
-            ffmpegPath: this.options.ffmpegPath,
-            failFast: this.options.failFast,
-            extraGlobalArgs: this.options.extraGlobalArgs,
-            enableProgressTracking: this.options.enableProgressTracking,
-            logger: this.options.logger,
-        });
-        if (this.audioTransformConfig) {
-            if (this.inputStreams.length > 0) {
-                const { transform } = this.audioTransformConfig;
-                const userInput = this.inputStreams[0].stream;
-                userInput.pipe(transform);
-                processor.setInputStreams([
-                    { stream: transform, index: 0 },
-                ]);
-            }
-        }
-        else {
-            if (this.inputStreams.length > 0)
-                processor.setInputStreams(this.inputStreams);
-        }
-        processor.on("spawn", (data) => this.emit("spawn", data));
-        processor.on("start", (cmd) => this.emit("start", cmd));
-        processor.on("progress", (p) => this.emit("progress", p));
-        processor.on("end", () => this.emit("end"));
-        processor.on("terminated", (s) => this.emit("terminated", s));
-        processor.on("error", (e) => this.emit("error", e));
-        processor.setArgs(this.args);
-        const { output, done, stop } = processor.run();
-        return {
-            output,
-            done,
-            stop,
-        };
+        return this.runSingleProcess();
     }
-    // ================= Utilities =================
     /**
-     * Get current FFmpeg arguments.
-     * @returns {string[]}
+     * Get the current array of arguments for the ffmpeg process.
+     * @returns FFmpeg argument array.
+     * @example
+     * const args = stream.getArgs();
      */
     getArgs() {
         return [...this.args];
     }
-    /**
-     * Get a string representation of the full FFmpeg command.
-     * @returns {string}
-     */
-    toString() {
-        return `${this.options.ffmpegPath} ${this.args.join(" ")}`;
+    // ---- Private Methods ----
+    assembleArgs() {
+        const finalArgs = [...this.args];
+        if (this.complexFilters.length > 0) {
+            finalArgs.push('-filter_complex', this.complexFilters.join(';'));
+        }
+        if (this.options.failFast && !finalArgs.includes('-xerror')) {
+            finalArgs.push('-xerror');
+        }
+        if (this.options.enableProgressTracking && !finalArgs.some(arg => arg === '-progress')) {
+            finalArgs.push('-progress', 'pipe:2');
+        }
+        return finalArgs;
     }
-    /**
-     * Get all configured input streams.
-     * @returns {Array<{stream: Readable, index: number}>}
-     */
-    getInputStreams() {
-        return this.inputStreams;
-    }
-    /**
-     * Ensure that a FIFO file exists, creating it synchronously if needed.
-     * Throws if existing path is not a FIFO.
-     * @param {string} filePath
-     * @private
-     */
-    ensureFifoSync(filePath) {
-        try {
-            if ((0, fs_1.existsSync)(filePath)) {
-                const stat = (0, fs_1.lstatSync)(filePath);
-                if (!stat.isFIFO())
-                    throw new Error(`Path exists but is not FIFO: ${filePath}`);
-                return;
+    addHumanityHeadersToProcessorOptions(options) {
+        // "headers" may or may not be present; normalize it
+        const originalHeaders = typeof options.headers === "object" && options.headers !== null
+            ? options.headers
+            : {};
+        return {
+            ...options,
+            headers: {
+                ...originalHeaders,
+                ...FluentStream.HUMANITY_HEADER
             }
-            (0, fs_1.mkdirSync)((0, path_1.dirname)(filePath), { recursive: true });
-            const res = (0, child_process_1.spawnSync)("mkfifo", ["-m", "600", filePath], {
-                stdio: "ignore",
-            });
-            if (res.status !== 0)
-                throw new Error(`mkfifo failed for ${filePath}`);
-        }
-        catch (e) {
-            throw new Error(`Failed to ensure FIFO at ${filePath}: ${e.message}`);
-        }
+        };
+    }
+    runSingleProcess() {
+        // Добавим "человечность" к headers в опциях для Processor
+        const processorOptions = this.addHumanityHeadersToProcessorOptions(this.options);
+        const processor = new Processor_js_1.default(processorOptions);
+        this.setupProcessorEvents(processor);
+        processor.setArgs(this.assembleArgs());
+        if (this.inputStreams.length > 0)
+            processor.setInputStreams(this.inputStreams);
+        return processor.run();
+    }
+    runWithPlugins() {
+        const decoderArgs = [
+            ...this.assembleArgs(),
+            '-f', 's16le',
+            '-ar', String(this.pcmOptions.sampleRate),
+            '-ac', String(this.pcmOptions.channels),
+            '-c:a', 'pcm_s1le',
+            'pipe:1'
+        ];
+        const decoderProcessorOptions = this.addHumanityHeadersToProcessorOptions({
+            ...this.options,
+            loggerTag: "ffmpeg-decoder"
+        });
+        const decoderProcessor = new Processor_js_1.default(decoderProcessorOptions);
+        this.setupProcessorEvents(decoderProcessor, 'decoder');
+        decoderProcessor.setArgs(decoderArgs);
+        if (this.inputStreams.length > 0)
+            decoderProcessor.setInputStreams(this.inputStreams);
+        const encoder = new FluentStream(this.options);
+        this.encoderBuilder(encoder);
+        const encoderArgs = [
+            '-f', 's16le',
+            '-ar', String(this.pcmOptions.sampleRate),
+            '-ac', String(this.pcmOptions.channels),
+            '-i', 'pipe:0',
+            ...encoder.assembleArgs()
+        ];
+        const encoderProcessorOptions = this.addHumanityHeadersToProcessorOptions({
+            ...this.options,
+            loggerTag: "ffmpeg-encoder"
+        });
+        const encoderProcessor = new Processor_js_1.default(encoderProcessorOptions);
+        this.setupProcessorEvents(encoderProcessor, 'encoder');
+        encoderProcessor.setArgs(encoderArgs);
+        const { output: decoderOutput, done: decoderDone } = decoderProcessor.run();
+        const { output: finalOutput, done: encoderDone } = encoderProcessor.run();
+        (0, stream_1.pipeline)(decoderOutput, this.audioTransform, encoderProcessor.process.stdin, (err) => {
+            if (err) {
+                this.emit('error', new Error(`Plugin pipeline failed: ${err.message}`));
+                decoderProcessor.kill();
+                encoderProcessor.kill();
+            }
+        });
+        const done = Promise.all([decoderDone, encoderDone]).then(() => undefined);
+        const stop = () => {
+            decoderProcessor.kill();
+            encoderProcessor.kill();
+        };
+        return { output: finalOutput, done, stop };
+    }
+    setupProcessorEvents(processor, prefix) {
+        const emit = (event, data) => {
+            if (prefix)
+                this.emit(`${prefix}:${event}`, data);
+            this.emit(event, data);
+        };
+        processor.on("spawn", (data) => emit("spawn", data));
+        processor.on("start", (cmd) => emit("start", cmd));
+        processor.on("progress", (p) => emit("progress", p));
+        processor.on("end", () => emit("end", { processor: prefix }));
+        processor.on("terminated", (s) => emit("terminated", s));
+        processor.on("error", (e) => emit("error", e));
     }
 }
 exports.FluentStream = FluentStream;

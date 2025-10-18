@@ -46,6 +46,11 @@ export interface SimpleFFmpegOptions {
     abortSignal?: AbortSignal;
     /** Suppress warning for output pipeline "premature close" (treat as benign). */
     suppressPrematureCloseWarning?: boolean;
+    /**
+     * Optional HTTP headers to pass to ffmpeg for network requests.
+     * Either an object of key-value pairs, or the raw string as accepted by ffmpeg.
+     */
+    headers?: Record<string, string> | string;
 }
 /**
  * Represents the current progress state of an ffmpeg process, as parsed

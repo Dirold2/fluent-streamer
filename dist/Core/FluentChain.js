@@ -5,7 +5,36 @@ const stream_1 = require("stream");
 /**
  * FluentChain
  *
- * Wrapper around multiple AudioPlugins that allows piping sequentially.
+ * A wrapper for connecting several AudioPlugin (Transform streams) in sequence.
+ *
+ * @example <caption>Basic chaining and piping</caption>
+ * import { Readable, Writable } from "stream";
+ * import { FluentChain } from "./FluentChain";
+ * import { PluginRegistry } from "./PluginRegistry";
+ *
+ * const myRegistry = new PluginRegistry();
+ * // Assume plugins "gain" and "compressor" are registered in myRegistry
+ * const pluginConfigs = [
+ *   { name: "gain", options: { gain: 1.5 } },
+ *   { name: "compressor", options: { threshold: -10 } }
+ * ];
+ * const defaultOptions = { sampleRate: 44100, channels: 2, bitDepth: 16 };
+ *
+ * const chain = new FluentChain(myRegistry, pluginConfigs, defaultOptions);
+ * const source = Readable.from(* some audio data *);
+ * const dest = new Writable({ write(chunk, enc, cb) { * ... * cb(); } });
+ *
+ * chain.pipe(source, dest);
+ *
+ * @example <caption>Get a Transform for integration with pipeline()</caption>
+ * import { pipeline } from "stream";
+ *
+ * const transform = chain.getTransform();
+ * pipeline(source, transform, dest, (err) => {
+ *   if (err) {
+ *     console.error("Pipeline error:", err);
+ *   }
+ * });
  */
 class FluentChain {
     registry;
@@ -13,6 +42,12 @@ class FluentChain {
     defaultOptions;
     transforms = [];
     controllers = [];
+    /**
+     * Constructs a new FluentChain.
+     * @param registry - The plugin registry containing available plugins.
+     * @param pluginConfigs - The ordered list of plugins to use and their options.
+     * @param defaultOptions - The default options to apply to each plugin.
+     */
     constructor(registry, pluginConfigs, defaultOptions) {
         this.registry = registry;
         this.pluginConfigs = pluginConfigs;
@@ -20,92 +55,95 @@ class FluentChain {
         this.buildChain();
     }
     /**
-     * Build Transform streams from plugin names and options.
+     * Initializes the chain of Transform streams based on plugin configuration.
+     * Throws if a plugin is not found in the registry.
      */
     buildChain() {
         this.transforms = [];
         this.controllers = [];
         for (const { name, options } of this.pluginConfigs) {
-            if (!this.registry.has(name))
+            if (!this.registry.has(name)) {
                 throw new Error(`Plugin not found: ${name}`);
+            }
+            // Merge defaultOptions with plugin-specific options
             const mergedOptions = {
                 ...this.defaultOptions,
                 ...options,
             };
+            // Instantiate the plugin using the registry
             const plugin = this.registry.create(name, mergedOptions);
-            const transform = plugin.createTransform(mergedOptions);
+            // Use createTransform if present, otherwise fallback to getTransform
+            let transform;
+            if (typeof plugin.createTransform === "function") {
+                transform = plugin.createTransform(mergedOptions);
+            }
+            else if (typeof plugin.getTransform === "function") {
+                transform = plugin.getTransform();
+            }
+            else {
+                throw new Error(`Plugin "${name}" does not provide a createTransform or getTransform method.`);
+            }
             this.controllers.push(plugin);
             this.transforms.push(transform);
         }
     }
     /**
-     * Pipe a source stream into the chain and then to a destination.
+     * Pipes the source Readable through all plugin transforms into the destination Writable.
+     * Handles errors from any stream in the chain.
+     *
+     * @param source - The input Readable stream.
+     * @param destination - The output Writable stream.
+     * @example
+     * chain.pipe(sourceStream, destStream);
      */
     pipe(source, destination) {
-        if (this.transforms.length === 0) {
-            source.pipe(destination);
-            return;
-        }
-        // Ведущий трансформ, в который пишем из source
-        const head = this.transforms[0];
-        let current = head;
-        // Связываем цепочку: head -> ... -> last
-        for (let i = 1; i < this.transforms.length; i++) {
-            current = current.pipe(this.transforms[i]);
-        }
-        // Подключаем источник и вывод
-        source.pipe(head);
-        current.pipe(destination);
+        const streams = [source, ...this.transforms, destination];
+        (0, stream_1.pipeline)(streams, (err) => {
+            if (err) {
+                // Errors from anywhere in the chain will be propagated here.
+                source.emit("error", err);
+                destination.emit("error", err);
+            }
+        });
     }
     /**
-     * Get a single Transform stream representing the whole chain.
+     * Returns a single Transform stream representing the entire plugin chain.
+     * Useful for embedding the whole chain as a single element in another pipeline.
+     *
+     * @returns {Transform} A transform that pipes data through all plugins.
+     * @example
+     * pipeline(source, chain.getTransform(), destination, cb);
      */
     getTransform() {
-        if (this.transforms.length === 0)
+        if (this.transforms.length === 0) {
             return new stream_1.PassThrough();
-        // Собираем конвейер head -> ... -> last
-        const head = this.transforms[0];
-        let last = head;
-        for (let i = 1; i < this.transforms.length; i++) {
-            last = last.pipe(this.transforms[i]);
         }
-        // Прокси-вход и выход, чтобы вернуть единый Transform
-        const inputProxy = new stream_1.PassThrough();
-        const outputProxy = new stream_1.PassThrough();
-        // Направляем входной поток в голову цепочки
-        inputProxy.pipe(head);
-        // И направляем выход последнего звена в выходной прокси
-        last.pipe(outputProxy);
-        // Комбинированный Transform: пишет в inputProxy, читает из outputProxy
-        const combined = new stream_1.Transform({
-            transform(chunk, _enc, cb) {
-                // Пишем данные в входной прокси; он пойдет в head
-                if (!inputProxy.write(chunk)) {
-                    inputProxy.once("drain", () => cb());
-                }
-                else {
-                    cb();
-                }
-            },
-            flush(cb) {
-                inputProxy.end();
-                cb();
-            },
+        if (this.transforms.length === 1) {
+            return this.transforms[0];
+        }
+        // Use pipeline to reliably connect streams and propagate errors.
+        // `pipeline` will properly destroy all streams on error.
+        const head = this.transforms[0];
+        const tail = this.transforms[this.transforms.length - 1];
+        (0, stream_1.pipeline)(this.transforms, (err) => {
+            // If any stream errors, emit from the head so the outer pipeline can catch it.
+            if (err) {
+                head.emit("error", err);
+            }
         });
-        // Передаем данные из выходного прокси наружу
-        outputProxy.on("data", (chunk) => combined.push(chunk));
-        outputProxy.once("end", () => combined.push(null));
-        outputProxy.once("close", () => combined.push(null));
-        // Пробрасываем ошибки
-        const forwardError = (err) => combined.emit("error", err);
-        head.on("error", forwardError);
-        last.on("error", forwardError);
-        inputProxy.on("error", forwardError);
-        outputProxy.on("error", forwardError);
-        return combined;
+        // Create a duplex stream: write to 'head', read from 'tail'
+        const duplex = new stream_1.PassThrough();
+        duplex.pipe(head);
+        tail.pipe(duplex);
+        return duplex;
     }
     /**
-     * Return controller instances (plugin objects) to allow hot parameter updates
+     * Returns plugin controller instances for parameter control.
+     *
+     * @returns {AudioPlugin[]} The plugin controller objects.
+     * @example
+     * const controllers = chain.getControllers();
+     * controllers[0].setGain(2.0);
      */
     getControllers() {
         return [...this.controllers];

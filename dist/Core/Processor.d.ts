@@ -1,233 +1,141 @@
-/**
- * Low-level FFmpeg process runner.
- *
- * This class is responsible for spawning the FFmpeg process, wiring stdin/stdout/stderr,
- * handling timeouts and termination, and emitting lifecycle/progress events.
- * It does not implement a fluent API and does not depend on the fluent wrapper.
- *
- * @fires Processor#start
- * @fires Processor#spawn
- * @fires Processor#progress
- * @fires Processor#end
- * @fires Processor#error
- * @fires Processor#terminated
- */
 import { EventEmitter } from "eventemitter3";
 import { type Readable } from "stream";
 import { type SimpleFFmpegOptions, type FFmpegRunResult } from "../Types/index.js";
-/**
- * @typedef {object} ProcessorOptions
- * @augments SimpleFFmpegOptions
- */
 export interface ProcessorOptions extends SimpleFFmpegOptions {
 }
 /**
- * The FFmpeg process runner, responsible for running, controlling, and emitting events for an FFmpeg subprocess.
- * @class
- * @extends EventEmitter
+ * Low-level FFmpeg process executor.
+ * Responsible for starting, managing, and emitting process lifecycle events.
+ * This is a "raw" executor and does not add arguments on its own.
+ *
+ * @example <caption>Basic usage</caption>
+ * ```ts
+ * import Processor from "./Processor";
+ * import { Readable } from "stream";
+ *
+ * // Prepare input stream with audio data
+ * const input = Readable.from(getRawPcmAudioDataSomehow());
+ *
+ * // Instantiate processor
+ * const proc = new Processor({
+ *   ffmpegPath: "ffmpeg",
+ *   timeout: 20000,
+ *   loggerTag: "demo",
+ *   enableProgressTracking: true,
+ * });
+ *
+ * // Set arguments and input streams
+ * proc.setArgs([
+ *   "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "pipe:0",
+ *   "-f", "wav", "pipe:1"
+ * ]);
+ * proc.setInputStreams([{stream: input, index: 0}]);
+ *
+ * // Listen for process events (optional)
+ * proc.on("progress", (progress) => {
+ *   console.log("Progress:", progress);
+ * });
+ * proc.on("end", () => {
+ *   console.log("Process finished!");
+ * });
+ *
+ * // Start FFmpeg
+ * const { output, done, stop } = proc.run();
+ * output.on("data", chunk => { * handle WAV data * });
+ * await done;
+ * ```
+ *
+ * @example <caption>Handling errors and manual stop</caption>
+ * ```ts
+ * const { output, done, stop } = proc.run();
+ * done.catch((err) => {
+ *   console.error("Process error:", err);
+ * });
+ * setTimeout(() => stop(), 5000); // Kill process after 5 seconds
+ * ```
+ *
+ * @fires Processor#"start" - Emitted when FFmpeg process starts (with command string)
+ * @fires Processor#"spawn" - Emitted when FFmpeg process actually spawns ({ pid })
+ * @fires Processor#"progress" - Emitted with progress info, if enabled
+ * @fires Processor#"error" - Emitted on error
+ * @fires Processor#"end" - Emitted on clean process exit
+ * @fires Processor#"terminated" - Emitted when forcibly killed (with signal)
  */
 export declare class Processor extends EventEmitter {
-    /**
-     * Underlying FFmpeg process, or null if not started yet.
-     * @private
-     * @type {Subprocess | null}
-     */
     private process;
-    /**
-     * Output stream from ffmpeg.
-     * @private
-     * @type {PassThrough | null}
-     */
     private outputStream;
-    /**
-     * Input streams for ffmpeg with associated indices.
-     * @private
-     * @type {Array<{ stream: Readable; index: number }>}
-     */
     private inputStreams;
-    /**
-     * Captured stderr buffer.
-     * @private
-     * @type {string}
-     */
     private stderrBuffer;
-    /**
-     * Is the process terminating.
-     * @private
-     * @type {boolean}
-     */
     private isTerminating;
-    /**
-     * Has the process finished.
-     * @private
-     * @type {boolean}
-     */
-    private finished;
-    /**
-     * Process timeout timer.
-     * @private
-     * @type {NodeJS.Timeout | undefined}
-     */
+    private hasFinished;
     private timeoutHandle?;
-    /**
-     * Internal resolve for done promise.
-     * @private
-     */
     private doneResolve;
-    /**
-     * Internal reject for done promise.
-     * @private
-     */
     private doneReject;
-    /**
-     * Done promise, resolves or rejects when process ends.
-     * @private
-     * @readonly
-     */
     private readonly donePromise;
-    /**
-     * Complete static configuration.
-     * @private
-     * @readonly
-     */
     private readonly config;
-    /**
-     * PID of FFmpeg process. May be null if process has not started.
-     * @readonly
-     */
     readonly pid: number | null;
-    /**
-     * Arguments for ffmpeg.
-     * @private
-     */
     private args;
-    /**
-     * Creates a new Processor instance.
-     * @param {ProcessorOptions} [options] - FFmpeg process and runner options.
-     */
     constructor(options?: ProcessorOptions);
     /**
-     * Set the FFmpeg argument list.
-     * @param {string[]} args
-     * @returns {this}
+     * Set the command-line arguments for FFmpeg.
+     * @param args The ffmpeg argument array (excluding executable).
+     * @returns this
+     * @example
+     * proc.setArgs(["-i", "pipe:0", "-f", "mp3", "pipe:1"]);
      */
     setArgs(args: string[]): this;
     /**
-     * Set the input streams for ffmpeg (for stdin piping).
-     * @param {Array<{ stream: Readable, index: number }>} streams
-     * @returns {this}
+     * Get a copy of the FFmpeg arguments for this Processor.
+     */
+    getArgs(): string[];
+    /**
+     * Set the process input streams.
+     * @param streams An array of objects with .stream (Readable) and .index
+     * @returns this
+     * @example
+     * proc.setInputStreams([{ stream: myInput, index: 0 }]);
      */
     setInputStreams(streams: Array<{
         stream: Readable;
         index: number;
     }>): this;
     /**
-     * Launches the FFmpeg subprocess with the preset arguments and streams.
-     * Also wires up output/pipeline, progress tracking and events.
+     * Start the FFmpeg process.
+     * @returns FFmpegRunResult containing output stream, done promise, and a stop method.
+     * @throws If the process is already running.
      *
-     * @throws {Error} If already running.
-     * @returns {FFmpegRunResult} FFmpeg output and process done promise.
-     * @fires Processor#start
-     * @fires Processor#spawn
+     * @example
+     * const { output, done, stop } = proc.run();
+     * output.on("data", chunk => { ... }); // handle output
+     * await done;
+     * stop(); // gracefully stop (if not already finished)
      */
     run(): FFmpegRunResult;
     /**
-     * Forcefully terminate the ffmpeg process.
-     * @param {NodeJS.Signals} [signal="SIGTERM"] Signal to send to child process.
-     * @returns {void}
+     * Send a signal to terminate the FFmpeg process.
+     * @param signal The signal to send (default SIGTERM)
+     * @example
+     * proc.kill(); // send SIGTERM
+     * proc.kill("SIGKILL");
      */
     kill(signal?: NodeJS.Signals): void;
     /**
-     * Returns the full CLI command as a string.
-     * @returns {string}
+     * Get a string representation of the full ffmpeg command.
+     * @returns The ffmpeg command as a string.
+     * @example
+     * console.log(proc.toString());
      */
     toString(): string;
-    /**
-     * Get a copy of the current ffmpeg argument array.
-     * @returns {string[]}
-     */
-    getArgs(): string[];
-    /**
-     * Promise that resolves on process end, or rejects on error.
-     * @readonly
-     * @returns {Promise<void>}
-     */
-    get done(): Promise<void>;
-    /**
-     * The ffmpeg subprocess stdout stream.
-     * @readonly
-     * @throws {Error} If process not yet started or stream is missing.
-     * @returns {Readable}
-     */
-    get stdout(): Readable;
-    /**
-     * Attach abortSignal handling, if provided in options.
-     * @private
-     */
     private setupAbortSignal;
-    /**
-     * Apply global/initial ffmpeg args from config.
-     * @private
-     */
-    private applyInitialArgs;
-    /**
-     * Setup a timeout trigger if configured.
-     * @private
-     */
     private setupTimeout;
-    /**
-     * Connect input stream(s) to ffmpeg stdin.
-     * @private
-     */
     private setupInputStreams;
-    /**
-     * Setup output (stdout) and stderr event wiring to forward/pipe.
-     * @private
-     */
     private setupOutputStreams;
-    /**
-     * Setup non-stream process events (exit, error, cancel).
-     * @private
-     */
     private setupProcessEvents;
-    /**
-     * Handle incoming stderr data from ffmpeg and emit progress if enabled.
-     * @private
-     * @param {Buffer} chunk
-     */
     private handleStderrData;
-    /**
-     * Handle process exit/termination.
-     * @private
-     * @param {number|null} code
-     * @param {NodeJS.Signals|null} signal
-     */
     private handleProcessExit;
-    /**
-     * Construct an Error object for FFmpeg exit with code/signal and stderr snippet.
-     * @private
-     * @param {number|null} code
-     * @param {NodeJS.Signals|null} signal
-     * @returns {Error}
-     */
     private createExitError;
-    /**
-     * Trigger done promise resolution/rejection only once.
-     * @private
-     * @param {Error} [error]
-     */
     private finish;
-    /**
-     * Safely destroy streams and process fds.
-     * @private
-     */
     private cleanup;
-    /**
-     * Parse FFmpeg "-progress"-formatted key=value line to progress object.
-     * @private
-     * @param {string} line
-     * @returns {Partial<FFmpegProgress> | null}
-     */
     private parseProgress;
 }
 export default Processor;

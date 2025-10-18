@@ -1,6 +1,3 @@
-/**
- * Core public API: low-level `Processor` and fluent `SimpleFFmpeg` wrapper.
- */
 export { Processor, FluentStream, PluginRegistry, FluentChain, } from "./Core/index.js";
 export { BassPlugin } from "./plugins/bass.js";
 export { TreblePlugin } from "./plugins/treble.js";

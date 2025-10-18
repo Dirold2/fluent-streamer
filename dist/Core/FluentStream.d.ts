@@ -1,290 +1,305 @@
-/**
- * @class FluentStream
- * @classdesc
- * FluentStream is a fluent, chainable wrapper around the low-level Processor for building FFmpeg command arguments and optionally attaching input streams.
- *
- * Provides an ergonomic builder API for constructing FFmpeg commands,
- * attaching file or stream inputs, and customizing options including JS audio transforms.
- *
- * @example
- * // Basic usage with file input and output:
- * const ff = new FluentStream({ enableProgressTracking: true })
- *   .input('input.mp4')
- *   .videoCodec('libx264')
- *   .output('output.mp4');
- * const { output, done } = ff.run();
- *
- * @example
- * // With stream input/output and custom filter
- * const ff = new FluentStream()
- *   .input(someReadableStream)
- *   .outputOptions('-preset', 'fast')
- *   .complexFilter('[0:v]scale=320:240[vout]')
- *   .map('[vout]')
- *   .output('pipe:1');
- * const { output, done } = ff.run();
- *
- * @example
- * // Using JS audio transform (node stream as PCM)
- * ff
- *   .input('song.mp3')
- *   .withAudioTransform(myTransform, (enc) => enc.audioCodec('aac').output('song-processed.aac'));
- * ff.run();
- */
 import { EventEmitter } from "eventemitter3";
 import { type Readable, Transform } from "stream";
 import { type AudioPlugin, type AudioPluginBaseOptions } from "./Filters.js";
 import PluginRegistry from "./PluginRegistry.js";
 import { type SimpleFFmpegOptions, type FFmpegRunResult } from "../Types/index.js";
+type EncoderBuilder = (encoder: FluentStream) => void;
 /**
- * @class SimpleFFmpeg
- * @classdesc
- * SimpleFFmpeg provides a convenient, chainable interface for constructing FFmpeg commands. It delegates execution to the low-level Processor.
+ * The FluentStream class provides a convenient, fluent API wrapper around a low-level `Processor` for working with FFmpeg.
+ * Allows you to easily configure FFmpeg commands, manage inputs/outputs, and build advanced audio processing pipelines using plugins.
+ * Supports building complex transcoding and media processing pipelines through chained methods, including handling user-defined audio plugins.
  *
- * @example
- * const ff = new SimpleFFmpeg({ enableProgressTracking: true })
- *   .input('input.mp4')
- *   .videoCodec('libx264')
- *   .output('pipe:1');
- * const { output, done } = ff.run();
+ * @example <caption>Basic file conversion</caption>
+ * const stream = new FluentStream()
+ *   .input("input.mp3")
+ *   .audioCodec("aac")
+ *   .audioBitrate("192k")
+ *   .output("output.aac");
+ *
+ * const { output, done } = stream.run();
+ * output.pipe(fs.createWriteStream("output.aac"));
+ * await done;
+ *
+ * @example <caption>Using audio effect plugins</caption>
+ * // Register a custom plugin
+ * FluentStream.registerPlugin("gain", opts => new GainPlugin(opts));
+ *
+ * // Using a registered plugin
+ * const stream = new FluentStream()
+ *   .input(fs.createReadStream("raw.wav"))
+ *   .usePlugins(
+ *     enc => enc.audioCodec("aac").output("final.m4a"),
+ *     { name: "gain", options: { gainDb: 6 } }
+ *   );
+ *
+ * const { output, done } = stream.run();
+ * output.pipe(fs.createWriteStream("final.m4a"));
+ * await done;
+ *
+ * @example <caption>Dynamically update plugins during processing</caption>
+ * await stream.updatePlugins({ name: "compressor", options: { threshold: -20 } });
+ *
+ * @see run
  */
 export declare class FluentStream extends EventEmitter {
     private static _globalRegistry;
-    /** Get or create the global plugin registry singleton */
-    private static get globalRegistry();
-    /** Register a plugin globally (preferred API surface) */
-    static registerPlugin<Options extends AudioPluginBaseOptions>(name: string, factory: (options: Required<Options>) => AudioPlugin<Options>): void;
-    /** Check if a plugin is registered globally */
+    private static HUMANITY_HEADER;
+    static get globalRegistry(): PluginRegistry;
+    /**
+     * Register a plugin for later use by name across all FluentStream instances.
+     * @param name Plugin name.
+     * @param factory Factory function to create a plugin instance given options.
+     * @example
+     * FluentStream.registerPlugin("normalize", opts => new NormalizePlugin(opts));
+     */
+    static registerPlugin<O extends AudioPluginBaseOptions>(name: string, factory: (options: Required<O>) => AudioPlugin<O>): void;
+    /**
+     * Check if a plugin is registered globally by name.
+     * @param name Plugin name.
+     * @returns true if the plugin is registered globally.
+     */
     static hasPlugin(name: string): boolean;
-    /** Clear global plugins (intended for tests) */
+    /**
+     * Clear all globally registered plugins.
+     */
     static clearPlugins(): void;
     private args;
     private inputStreams;
-    private inputFiles;
-    private readonly options;
-    private pendingFifos;
-    audioTransformConfig?: {
-        transform: Transform;
-        sampleRate: number;
-        channels: number;
-        buildEncoder: (enc: FluentStream) => void;
-    };
-    private audioPluginConfig?;
+    private complexFilters;
+    readonly options: SimpleFFmpegOptions;
+    private audioTransform;
+    private pluginHotSwap;
+    private pcmOptions;
+    private encoderBuilder;
+    private _pluginControllers;
     /**
-     * Create a new FluentStream builder.
-     *
-     * @param {SimpleFFmpegOptions} [options] - Default configuration for the created Processor.
-     *
-     * @example
-     * const ff = new FluentStream({ enableProgressTracking: true });
+     * FluentStream constructor.
+     * @param options Optional configuration for the FFmpeg/Processor.
      */
     constructor(options?: SimpleFFmpegOptions);
+    getAudioTransform(): Transform;
+    clear(): void;
     /**
-     * Set global FFmpeg options (prepended to command).
-     * @param {...string} opts
-     * @returns {FluentStream}
+     * Add an input file or stream to the FFmpeg command.
+     * Multiple calls allowed for files (only one for streams).
+     * Throws if called after .usePlugins().
+     * @param input File path or a Readable stream.
+     * @example
+     * stream.input("input.mp3");
+     * stream.input(fs.createReadStream("foo.wav"));
      */
-    globalOptions(...opts: string[]): FluentStream;
+    input(input: string | Readable): this;
     /**
-     * Set input options (inserted before last input).
-     * @param {...string} opts
-     * @returns {FluentStream}
+     * Set the output file for FFmpeg.
+     * @param output Output file path.
+     * @example
+     * stream.output("output.mp3")
      */
-    inputOptions(...opts: string[]): FluentStream;
+    output(output: string): this;
     /**
-     * Add an input (filename or Readable stream).
-     * @param {string|Readable} input
-     * @returns {FluentStream}
+     * Add global FFmpeg options (before inputs).
+     * @param opts Array of FFmpeg options (e.g. "-hide_banner", "-y").
+     * @example
+     * stream.globalOptions("-y", "-hide_banner");
      */
-    input(input: string | Readable): FluentStream;
+    globalOptions(...opts: string[]): this;
     /**
-     * Add a named pipe FIFO as input.
-     * @param {string} fifoPath
-     * @returns {FluentStream}
+     * Add FFmpeg options for the last input.
+     * @param opts Options for the corresponding input (e.g. "-ss", "30").
+     * @example
+     * stream.inputOptions("-ss", "10");
      */
-    inputFifo(fifoPath: string): FluentStream;
+    inputOptions(...opts: string[]): this;
     /**
-     * Generate a new FIFO path in a temp directory and add as an input.
-     * @param {{dir?: string, prefix?: string}} [options]
-     * @returns {string} Absolute FIFO path
+     * Add FFmpeg output options.
+     * @param opts Output options (e.g. "-map", "0:a").
+     * @example
+     * stream.outputOptions("-map", "0:a");
      */
-    prepareNextTrackFifo(options?: {
-        dir?: string;
-        prefix?: string;
-    }): string;
+    outputOptions(...opts: string[]): this;
     /**
-     * Set output destination (filename, 'pipe:1', etc.).
-     * @param {string} output
-     * @returns {FluentStream}
+     * Set the video codec.
+     * Skips if codec is falsy/empty.
+     * @param codec Codec name (e.g. "libx264").
+     * @example
+     * stream.videoCodec("libx264")
      */
-    output(output: string): FluentStream;
+    videoCodec(codec: string): this;
     /**
-     * Add options for output.
-     * @param {...string} opts
-     * @returns {FluentStream}
+     * Set the audio codec.
+     * Skips if codec is falsy/empty.
+     * @param codec Audio codec name (e.g. "aac").
+     * @example
+     * stream.audioCodec("aac")
      */
-    outputOptions(...opts: string[]): FluentStream;
+    audioCodec(codec: string): this;
     /**
-     * Specify video codec.
-     * @param {string} codec
-     * @returns {FluentStream}
+     * Set the video bitrate.
+     * @param bitrate Bitrate string (e.g. "1M").
+     * @example
+     * stream.videoBitrate("1M")
      */
-    videoCodec(codec: string): FluentStream;
+    videoBitrate(bitrate: string): this;
     /**
-     * Specify audio codec.
-     * @param {string} codec
-     * @returns {FluentStream}
+     * Set the audio bitrate.
+     * @param bitrate Bitrate string (e.g. "192k").
+     * @example
+     * stream.audioBitrate("192k")
      */
-    audioCodec(codec: string): FluentStream;
+    audioBitrate(bitrate: string): this;
     /**
-     * Set video bitrate.
-     * @param {string} bitrate
-     * @returns {FluentStream}
+     * Specify the output format for FFmpeg.
+     * Calling multiple times replaces the previous format.
+     * @param format Format string (e.g. "mp3").
+     * @example
+     * stream.format("mp3")
      */
-    videoBitrate(bitrate: string): FluentStream;
+    format(format: string): this;
     /**
-     * Set audio bitrate.
-     * @param {string} bitrate
-     * @returns {FluentStream}
+     * Set the duration limit.
+     * @param time Time in seconds or FFmpeg time string (e.g. "00:00:30").
+     * @example
+     * stream.duration(20)
+     * stream.duration("00:01:10")
      */
-    audioBitrate(bitrate: string): FluentStream;
+    duration(time: string | number): this;
     /**
-     * Set output video size.
-     * @param {string} size
-     * @returns {FluentStream}
+     * Disable video stream in the output.
+     * @example
+     * stream.noVideo()
      */
-    size(size: string): FluentStream;
+    noVideo(): this;
     /**
-     * Set framerate.
-     * @param {number} fps
-     * @returns {FluentStream}
+     * Disable audio stream in the output.
+     * @example
+     * stream.noAudio();
      */
-    fps(fps: number): FluentStream;
+    noAudio(): this;
     /**
-     * Set output duration.
-     * @param {string|number} duration
-     * @returns {FluentStream}
+     * Set the audio sample rate.
+     * @param freq Sample rate (e.g. 44100)
+     * @example
+     * stream.audioFrequency(48000)
      */
-    duration(duration: string | number): FluentStream;
+    audioFrequency(freq: number): this;
     /**
-     * Set input seek time.
-     * @param {string|number} time
-     * @returns {FluentStream}
+     * Copy all codecs without transcoding.
+     * Ensures only one "-c copy" is present.
+     * @example
+     * stream.copyCodecs()
      */
-    seek(time: string | number): FluentStream;
+    copyCodecs(): this;
     /**
-     * Set output format.
-     * @param {string} format
-     * @returns {FluentStream}
+     * Allow overwriting the output file (-y).
+     * @example
+     * stream.overwrite()
      */
-    format(format: string): FluentStream;
+    overwrite(): this;
     /**
-     * Enable overwrite output files.
-     * @returns {FluentStream}
+     * Use FFmpeg -map to map input streams to output.
+     * @param label Map label string.
+     * @example
+     * stream.map("0:a:0")
      */
-    overwrite(): FluentStream;
+    map(label: string): this;
     /**
-     * Disable overwrite output files.
-     * @returns {FluentStream}
+     * Seek to a specified input time using -ss.
+     * @param time Time in seconds or FFmpeg time string.
+     * @example
+     * stream.seekInput(30)
      */
-    noOverwrite(): FluentStream;
+    seekInput(time: string | number): this;
     /**
-     * Add a complex filtergraph.
-     * @param {string} filterGraph
-     * @returns {FluentStream}
+     * Add a FFmpeg filter_complex graph to the pipeline.
+     * Can be called multiple times.
+     * Ignores empty strings.
+     * @param graph Filter string or array of strings.
+     * @example
+     * stream.complexFilter("[0:a]loudnorm[aout]");
      */
-    complexFilter(filterGraph: string): FluentStream;
+    complexFilter(graph: string | string[]): this;
     /**
-     * Select FFmpeg output stream label.
-     * @param {string} label
-     * @returns {FluentStream}
+     * Adds an audio crossfade (acrossfade) filter between two audio streams to the filter_complex graph.
+     * Throws if number of inputs is not exactly 2.
+     * @param duration Duration in seconds.
+     * @param options Optional channel labels.
+     * @example
+     * stream.crossfadeAudio(2.5, { inputA: '[0:a]', inputB: '[1:a]', outputLabel: 'acrossfaded' })
      */
-    map(label: string): FluentStream;
+    crossfadeAudio(duration: number, options?: {
+        inputA?: string;
+        inputB?: string;
+        outputLabel?: string;
+    }): this;
     /**
-     * Add an audio crossfade filter. Output is mapped to '[aout]'.
-     * @param {number} durationSeconds
-     * @param {{inputA?: number, inputB?: number, curve1?: string, curve2?: string}} [options]
-     * @returns {FluentStream}
+     * Alias for usePlugins for a single plugin.
+     * @param buildEncoder Function that configures the output FluentStream encoder.
+     * @param pluginConfig Plugin string or object with its options.
+     * @example
+     * stream.usePlugin(enc => enc.output("out.ogg"), "normalize");
      */
-    crossfadeAudio(durationSeconds: number, options?: {
-        inputA?: number;
-        inputB?: number;
-        curve1?: string;
-        curve2?: string;
-    }): FluentStream;
-    /**
-     * Attach a JS Transform stream to process PCM data between decode and encode. Only one FFmpeg process is spawned with transform inserted in the chain.
-     *
-     * @param {Transform} transform - Node.js transform stream
-     * @param {function(FluentStream):void} buildEncoder - Callback to set codecs/output after transform
-     * @param {{sampleRate?: number, channels?: number}} [opts] - Audio stream settings
-     * @returns {FluentStream}
-     */
-    withAudioTransform(transform: Transform, buildEncoder: (enc: FluentStream) => void, opts?: {
-        sampleRate?: number;
-        channels?: number;
-    }): FluentStream;
-    /**
-     * Use an AudioPlugin (see Filters.js) to insert a JS transform in the PCM chain. buildEncoder lets you configure target encoding/output after processing.
-     * @param {AudioPlugin} plugin
-     * @param {function(FluentStream):void} buildEncoder
-     * @param {AudioPluginBaseOptions} [opts]
-     * @returns {FluentStream}
-     */
-    withAudioPlugin(plugin: AudioPlugin, buildEncoder: (enc: FluentStream) => void, opts?: AudioPluginBaseOptions): FluentStream;
-    /**
-     * Build and attach a chain of audio plugins via registry.
-     * Creates a composed Transform and delegates to withAudioTransform.
-     */
-    withAudioPlugins(registry: PluginRegistry, ...pluginConfigs: Array<string | {
+    usePlugin(buildEncoder: EncoderBuilder, pluginConfig: string | {
         name: string;
         options?: Partial<AudioPluginBaseOptions>;
-    }>): FluentStream;
+    }): this;
     /**
-     * Preferable helper: use globally registered plugins by name.
-     * Equivalent to withAudioPlugins(FluentStream.globalRegistry, ...configs)
+     * Switch the pipeline into plugin-processing mode.
+     * Multiple plugins (chained) can be specified.
+     * @param buildEncoder Function receiving a FluentStream for configuring the encoder (output process).
+     * @param pluginConfigs One or more plugins: either a name string or an object { name, options }
+     * @example
+     * stream.input("in.wav").usePlugins(
+     *   enc => enc.audioBitrate("192k").output("out.ogg"),
+     *   "normalize", { name: "compressor" }
+     * );
      */
-    usePlugins(...pluginConfigs: Array<string | {
+    usePlugins(buildEncoder: EncoderBuilder, ...pluginConfigs: Array<string | {
         name: string;
         options?: Partial<AudioPluginBaseOptions>;
-    }>): FluentStream;
-    /** Shortcut for a single plugin by name with optional options */
-    usePlugin(name: string, options?: Partial<AudioPluginBaseOptions>): FluentStream;
-    /** Get controller instances of the last configured plugin chain (if any) */
+    }>): this;
+    /**
+     * Returns the plugin controllers, for usePlugins-style interface.
+     * When called as a property on the result of usePlugins, is bound.
+     */
+    getControllers(): AudioPlugin[];
+    /**
+     * Hot-swap (update) the plugin chain at runtime without stopping the pipeline.
+     * ONLY after calling usePlugins().
+     * @param pluginConfigs New configuration(s) for plugin(s).
+     * @example
+     * await stream.updatePlugins("compressor", { name: "custom", options: {...} });
+     */
+    updatePlugins(...pluginConfigs: Array<string | {
+        name: string;
+        options?: Partial<AudioPluginBaseOptions>;
+    }>): Promise<void>;
+    /**
+     * Get the array of plugin controller instances currently in use.
+     * @returns An array of AudioPlugin instances.
+     */
     getPluginControllers(): AudioPlugin[];
     /**
-     * Execute the FFmpeg command. All processor events are re-emitted.
-     * @param {{ffplay?: boolean, [key: string]: any}} [opts]
-     * @returns {FFmpegRunResult}
+     * Run the constructed FFmpeg pipeline.
+     * If plugins are used: spawns both a decoder, plugin-processing chain, and encoder (dual process).
+     * Returns an object with output Readable stream, a done promise, and a stop function.
+     *
+     * @example
+     * const { output, done, stop } = stream.run();
+     * output.pipe(fs.createWriteStream("foo.ogg"));
+     * await done;
      */
-    run(opts?: {
-        ffplay?: boolean;
-        [key: string]: any;
-    }): FFmpegRunResult;
+    run(): FFmpegRunResult;
     /**
-     * Get current FFmpeg arguments.
-     * @returns {string[]}
+     * Get the current array of arguments for the ffmpeg process.
+     * @returns FFmpeg argument array.
+     * @example
+     * const args = stream.getArgs();
      */
     getArgs(): string[];
-    /**
-     * Get a string representation of the full FFmpeg command.
-     * @returns {string}
-     */
-    toString(): string;
-    /**
-     * Get all configured input streams.
-     * @returns {Array<{stream: Readable, index: number}>}
-     */
-    getInputStreams(): Array<{
-        stream: Readable;
-        index: number;
-    }>;
-    /**
-     * Ensure that a FIFO file exists, creating it synchronously if needed.
-     * Throws if existing path is not a FIFO.
-     * @param {string} filePath
-     * @private
-     */
-    private ensureFifoSync;
+    private assembleArgs;
+    private addHumanityHeadersToProcessorOptions;
+    private runSingleProcess;
+    private runWithPlugins;
+    private setupProcessorEvents;
 }
 export { FluentStream as default };

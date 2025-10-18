@@ -1,9 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.VolumeFaderPlugin = exports.CompressorPlugin = exports.TreblePlugin = exports.BassPlugin = exports.FluentChain = exports.PluginRegistry = exports.FluentStream = exports.Processor = void 0;
-/**
- * Core public API: low-level `Processor` and fluent `SimpleFFmpeg` wrapper.
- */
 var index_js_1 = require("./Core/index.js");
 Object.defineProperty(exports, "Processor", { enumerable: true, get: function () { return index_js_1.Processor; } });
 Object.defineProperty(exports, "FluentStream", { enumerable: true, get: function () { return index_js_1.FluentStream; } });
