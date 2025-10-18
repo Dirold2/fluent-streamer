@@ -1,13 +1,17 @@
-import { AudioPlugin, AudioPluginOptions } from "src/Core";
+import { AudioPlugin, AudioPluginBaseOptions } from "../../src/Core";
 import { Transform } from "stream";
+export interface VolumePluginOptions extends AudioPluginBaseOptions {
+    start: number;
+    end: number;
+}
 /**
  * Volume fade plugin.
  * Smoothly interpolates volume over frames.
  */
 export declare class VolumeFaderPlugin implements AudioPlugin {
-    private start;
-    private end;
-    constructor(start?: number, end?: number);
-    setFade(start: number, end: number): void;
-    createTransform(options: Required<AudioPluginOptions>): Transform;
+    private options;
+    constructor(options: VolumePluginOptions);
+    setOptions(options: Partial<VolumePluginOptions>): void;
+    getOptions(): Required<VolumePluginOptions>;
+    createTransform(options: Required<VolumePluginOptions>): Transform;
 }

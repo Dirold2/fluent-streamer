@@ -1,8 +1,12 @@
-import { AudioPlugin, AudioPluginOptions } from "src/Core";
+import { AudioPlugin, AudioPluginBaseOptions } from "src/Core";
 import { Transform } from "stream";
-export declare class TreblePlugin implements AudioPlugin {
-    private treble;
-    constructor(treble: number);
-    setTreble(t: number): void;
-    createTransform(options: Required<AudioPluginOptions>): Transform;
+export interface TreblePluginOptions extends AudioPluginBaseOptions {
+    treble: number;
+}
+export declare class TreblePlugin implements AudioPlugin<TreblePluginOptions> {
+    private options;
+    constructor(options: TreblePluginOptions);
+    setOptions(options: Partial<TreblePluginOptions>): void;
+    getOptions(): Required<TreblePluginOptions>;
+    createTransform(options: Required<TreblePluginOptions>): Transform;
 }

@@ -1,12 +1,17 @@
-import { AudioPlugin, AudioPluginOptions } from "src/Core";
+import { AudioPlugin, AudioPluginBaseOptions } from "../../src/Core";
 import { Transform } from "stream";
+export interface BassPluginOptions extends AudioPluginBaseOptions {
+    bass: number;
+}
 /**
  * Bass boost plugin.
- * Simple IIR-style bass boost on stereo PCM audio.
+ * Усиление басов на PCM аудио.
  */
-export declare class BassPlugin implements AudioPlugin {
-    private bass;
-    constructor(bass: number);
-    setBass(b: number): void;
-    createTransform(options: Required<AudioPluginOptions>): Transform;
+export declare class BassPlugin implements AudioPlugin<BassPluginOptions> {
+    private options;
+    constructor(options: BassPluginOptions);
+    /** Динамически меняем настройки */
+    setOptions(options: Partial<BassPluginOptions>): void;
+    getOptions(): Required<BassPluginOptions>;
+    createTransform(options?: Required<BassPluginOptions>): Transform;
 }

@@ -1,44 +1,24 @@
-import { AudioPluginOptions, AudioPlugin } from "./Filters.js";
+import { AudioPluginBaseOptions, AudioPlugin } from "./Filters.js";
 import { FluentChain } from "./FluentChain.js";
-type PluginFactory = (options: Required<AudioPluginOptions>) => AudioPlugin;
+/** Универсальная фабрика плагина с дженериком для опций */
+export type PluginFactory<Options extends AudioPluginBaseOptions = AudioPluginBaseOptions> = (options: Required<Options>) => AudioPlugin<Options>;
 /**
  * Registry for audio plugins.
- *
- * Allows registering plugins by name and creating instances with specific options.
  */
 export declare class PluginRegistry {
     private registry;
-    /**
-     * Registers an audio plugin.
-     * @param name - Unique plugin name
-     * @param factory - Factory function that creates the plugin instance
-     */
-    register(name: string, factory: PluginFactory): void;
-    /**
-     * Checks if a plugin with the given name is registered.
-     * @param name - Plugin name
-     * @returns True if registered, false otherwise
-     */
+    /** Регистрирует плагин */
+    register<Options extends AudioPluginBaseOptions = AudioPluginBaseOptions>(name: string, factory: PluginFactory<Options>): void;
+    /** Проверяет, зарегистрирован ли плагин */
     has(name: string): boolean;
-    /**
-     * Returns the factory for a registered plugin, or undefined if not found.
-     */
+    /** Получает фабрику плагина */
     get(name: string): PluginFactory | undefined;
-    /**
-     * Creates an instance of a registered plugin.
-     * @param name - Plugin name
-     * @param options - Plugin options
-     * @throws Error if plugin is not found
-     * @returns The created AudioPlugin instance
-     */
-    create(name: string, options: Required<AudioPluginOptions>): AudioPlugin;
-    /**
-     * Create a fluent chain of plugins with optional individual options.
-     * @param pluginConfigs - Array of plugin names or objects { name, options }
-     */
+    /** Создаёт экземпляр плагина с конкретными опциями */
+    create<Options extends AudioPluginBaseOptions>(name: string, options: Required<Options>): AudioPlugin<Options>;
+    /** Создаёт цепочку FluentChain */
     chain(...pluginConfigs: Array<string | {
         name: string;
-        options?: Partial<AudioPluginOptions>;
+        options?: Partial<AudioPluginBaseOptions>;
     }>): FluentChain;
 }
 export default PluginRegistry;

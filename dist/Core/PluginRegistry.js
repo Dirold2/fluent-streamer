@@ -4,54 +4,33 @@ exports.PluginRegistry = void 0;
 const FluentChain_js_1 = require("./FluentChain.js");
 /**
  * Registry for audio plugins.
- *
- * Allows registering plugins by name and creating instances with specific options.
  */
 class PluginRegistry {
     registry = new Map();
-    /**
-     * Registers an audio plugin.
-     * @param name - Unique plugin name
-     * @param factory - Factory function that creates the plugin instance
-     */
+    /** Регистрирует плагин */
     register(name, factory) {
         this.registry.set(name, factory);
     }
-    /**
-     * Checks if a plugin with the given name is registered.
-     * @param name - Plugin name
-     * @returns True if registered, false otherwise
-     */
+    /** Проверяет, зарегистрирован ли плагин */
     has(name) {
         return this.registry.has(name);
     }
-    /**
-     * Returns the factory for a registered plugin, or undefined if not found.
-     */
+    /** Получает фабрику плагина */
     get(name) {
         return this.registry.get(name);
     }
-    /**
-     * Creates an instance of a registered plugin.
-     * @param name - Plugin name
-     * @param options - Plugin options
-     * @throws Error if plugin is not found
-     * @returns The created AudioPlugin instance
-     */
+    /** Создаёт экземпляр плагина с конкретными опциями */
     create(name, options) {
         const factory = this.registry.get(name);
         if (!factory)
             throw new Error(`Plugin not found: ${name}`);
+        // Приведение типов для корректной работы дженериков
         return factory(options);
     }
-    /**
-     * Create a fluent chain of plugins with optional individual options.
-     * @param pluginConfigs - Array of plugin names or objects { name, options }
-     */
+    /** Создаёт цепочку FluentChain */
     chain(...pluginConfigs) {
         if (pluginConfigs.length === 0)
             throw new Error("No plugin names provided");
-        // Normalize plugin configs
         const configs = pluginConfigs.map((p) => typeof p === "string" ? { name: p, options: {} } : p);
         const defaultOptions = {
             sampleRate: 48000,

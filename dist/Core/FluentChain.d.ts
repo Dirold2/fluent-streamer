@@ -1,5 +1,5 @@
 import { Transform, Writable, Readable } from "stream";
-import { AudioPlugin, AudioPluginOptions } from "./Filters.js";
+import { AudioPlugin, AudioPluginBaseOptions } from "./Filters.js";
 import PluginRegistry from "./PluginRegistry.js";
 /**
  * FluentChain
@@ -14,8 +14,8 @@ export declare class FluentChain {
     private controllers;
     constructor(registry: PluginRegistry, pluginConfigs: Array<{
         name: string;
-        options?: Partial<AudioPluginOptions>;
-    }>, defaultOptions: Required<AudioPluginOptions>);
+        options?: Partial<AudioPluginBaseOptions>;
+    }>, defaultOptions: Required<AudioPluginBaseOptions>);
     /**
      * Build Transform streams from plugin names and options.
      */

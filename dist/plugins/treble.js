@@ -3,15 +3,18 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.TreblePlugin = void 0;
 const stream_1 = require("stream");
 class TreblePlugin {
-    treble;
-    constructor(treble) {
-        this.treble = treble;
+    options;
+    constructor(options) {
+        this.options = { sampleRate: 48000, channels: 2, ...options };
     }
-    setTreble(t) {
-        this.treble = t;
+    setOptions(options) {
+        this.options = { ...this.options, ...options };
+    }
+    getOptions() {
+        return this.options;
     }
     createTransform(options) {
-        const { channels } = options;
+        const { channels, treble } = options;
         const t = new stream_1.Transform({
             transform: (chunk, _enc, cb) => {
                 try {
@@ -21,7 +24,7 @@ class TreblePlugin {
                             const idx = i + c;
                             let val = samples[idx] / 32768;
                             // Simple treble boost simulation (linear for demo)
-                            val = val * (1 + this.treble * 0.3);
+                            val = val * (1 + treble * 0.3);
                             samples[idx] = Math.round(Math.max(-1, Math.min(1, val)) * 32767);
                         }
                     }
@@ -32,7 +35,7 @@ class TreblePlugin {
                 }
             },
         });
-        t._treble = this.treble;
+        t._treble = treble;
         return t;
     }
 }

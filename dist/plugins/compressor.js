@@ -7,18 +7,19 @@ const stream_1 = require("stream");
  * Limits peaks above threshold.
  */
 class CompressorPlugin {
-    threshold;
-    ratio;
-    constructor(threshold = 0.8, ratio = 4) {
-        this.threshold = threshold;
-        this.ratio = ratio;
+    options;
+    constructor(options) {
+        this.options = { sampleRate: 48000, channels: 2, ...options };
     }
-    setParams(threshold, ratio) {
-        this.threshold = threshold;
-        this.ratio = ratio;
+    /** Динамически меняем настройки */
+    setOptions(options) {
+        this.options = { ...this.options, ...options };
+    }
+    getOptions() {
+        return this.options;
     }
     createTransform(options) {
-        const { channels } = options;
+        const { channels, threshold, ratio } = options;
         const t = new stream_1.Transform({
             transform: (chunk, _enc, cb) => {
                 try {
@@ -28,10 +29,8 @@ class CompressorPlugin {
                             const idx = i + c;
                             let val = samples[idx] / 32768;
                             const abs = Math.abs(val);
-                            if (abs > this.threshold) {
-                                val =
-                                    Math.sign(val) *
-                                        (this.threshold + (abs - this.threshold) / this.ratio);
+                            if (abs > threshold) {
+                                val = Math.sign(val) * (threshold + (abs - threshold) / ratio);
                             }
                             samples[idx] = Math.round(Math.max(-1, Math.min(1, val)) * 32767);
                         }
@@ -43,8 +42,8 @@ class CompressorPlugin {
                 }
             },
         });
-        t._threshold = this.threshold;
-        t._ratio = this.ratio;
+        t._threshold = threshold;
+        t._ratio = ratio;
         return t;
     }
 }

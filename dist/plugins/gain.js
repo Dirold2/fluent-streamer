@@ -7,16 +7,15 @@ const stream_1 = require("stream");
  * Multiplies each audio sample by a gain factor.
  */
 class GainPlugin {
-    gain;
-    constructor(gain) {
-        this.gain = gain;
+    options;
+    constructor(options) {
+        this.options = { sampleRate: 48000, channels: 2, ...options };
     }
-    /**
-     * Sets the gain factor.
-     * @param g - Gain multiplier
-     */
-    setGain(g) {
-        this.gain = g;
+    setOptions(options) {
+        this.options = { ...this.options, ...options };
+    }
+    getOptions() {
+        return this.options;
     }
     /**
      * Creates a Node.js Transform stream that applies the gain to PCM s16le audio.
@@ -24,7 +23,8 @@ class GainPlugin {
      * @returns Transform stream that processes audio
      */
     createTransform(options) {
-        const { channels } = options;
+        const opts = options ?? this.options;
+        const { channels, gain } = opts;
         const t = new stream_1.Transform({
             transform: (chunk, _enc, cb) => {
                 try {
@@ -44,7 +44,7 @@ class GainPlugin {
                 }
             },
         });
-        t._gain = this.gain;
+        t._gain = gain;
         return t;
     }
 }

@@ -81,7 +81,7 @@ class FluentChain {
             transform(chunk, _enc, cb) {
                 // Пишем данные в входной прокси; он пойдет в head
                 if (!inputProxy.write(chunk)) {
-                    inputProxy.once('drain', () => cb());
+                    inputProxy.once("drain", () => cb());
                 }
                 else {
                     cb();
@@ -93,15 +93,15 @@ class FluentChain {
             },
         });
         // Передаем данные из выходного прокси наружу
-        outputProxy.on('data', (chunk) => combined.push(chunk));
-        outputProxy.once('end', () => combined.push(null));
-        outputProxy.once('close', () => combined.push(null));
+        outputProxy.on("data", (chunk) => combined.push(chunk));
+        outputProxy.once("end", () => combined.push(null));
+        outputProxy.once("close", () => combined.push(null));
         // Пробрасываем ошибки
-        const forwardError = (err) => combined.emit('error', err);
-        head.on('error', forwardError);
-        last.on('error', forwardError);
-        inputProxy.on('error', forwardError);
-        outputProxy.on('error', forwardError);
+        const forwardError = (err) => combined.emit("error", err);
+        head.on("error", forwardError);
+        last.on("error", forwardError);
+        inputProxy.on("error", forwardError);
+        outputProxy.on("error", forwardError);
         return combined;
     }
     /**

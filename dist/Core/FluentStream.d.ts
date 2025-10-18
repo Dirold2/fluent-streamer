@@ -33,7 +33,7 @@
  */
 import { EventEmitter } from "eventemitter3";
 import { type Readable, Transform } from "stream";
-import { type AudioPlugin, type AudioPluginOptions } from "./Filters.js";
+import { type AudioPlugin, type AudioPluginBaseOptions } from "./Filters.js";
 import PluginRegistry from "./PluginRegistry.js";
 import { type SimpleFFmpegOptions, type FFmpegRunResult } from "../Types/index.js";
 /**
@@ -53,7 +53,7 @@ export declare class FluentStream extends EventEmitter {
     /** Get or create the global plugin registry singleton */
     private static get globalRegistry();
     /** Register a plugin globally (preferred API surface) */
-    static registerPlugin(name: string, factory: (options: Required<AudioPluginOptions>) => AudioPlugin): void;
+    static registerPlugin<Options extends AudioPluginBaseOptions>(name: string, factory: (options: Required<Options>) => AudioPlugin<Options>): void;
     /** Check if a plugin is registered globally */
     static hasPlugin(name: string): boolean;
     /** Clear global plugins (intended for tests) */
@@ -228,17 +228,17 @@ export declare class FluentStream extends EventEmitter {
      * Use an AudioPlugin (see Filters.js) to insert a JS transform in the PCM chain. buildEncoder lets you configure target encoding/output after processing.
      * @param {AudioPlugin} plugin
      * @param {function(FluentStream):void} buildEncoder
-     * @param {AudioPluginOptions} [opts]
+     * @param {AudioPluginBaseOptions} [opts]
      * @returns {FluentStream}
      */
-    withAudioPlugin(plugin: AudioPlugin, buildEncoder: (enc: FluentStream) => void, opts?: AudioPluginOptions): FluentStream;
+    withAudioPlugin(plugin: AudioPlugin, buildEncoder: (enc: FluentStream) => void, opts?: AudioPluginBaseOptions): FluentStream;
     /**
      * Build and attach a chain of audio plugins via registry.
      * Creates a composed Transform and delegates to withAudioTransform.
      */
     withAudioPlugins(registry: PluginRegistry, ...pluginConfigs: Array<string | {
         name: string;
-        options?: Partial<AudioPluginOptions>;
+        options?: Partial<AudioPluginBaseOptions>;
     }>): FluentStream;
     /**
      * Preferable helper: use globally registered plugins by name.
@@ -246,10 +246,10 @@ export declare class FluentStream extends EventEmitter {
      */
     usePlugins(...pluginConfigs: Array<string | {
         name: string;
-        options?: Partial<AudioPluginOptions>;
+        options?: Partial<AudioPluginBaseOptions>;
     }>): FluentStream;
     /** Shortcut for a single plugin by name with optional options */
-    usePlugin(name: string, options?: Partial<AudioPluginOptions>): FluentStream;
+    usePlugin(name: string, options?: Partial<AudioPluginBaseOptions>): FluentStream;
     /** Get controller instances of the last configured plugin chain (if any) */
     getPluginControllers(): AudioPlugin[];
     /**

@@ -372,7 +372,7 @@ class FluentStream extends eventemitter3_1.EventEmitter {
      * Use an AudioPlugin (see Filters.js) to insert a JS transform in the PCM chain. buildEncoder lets you configure target encoding/output after processing.
      * @param {AudioPlugin} plugin
      * @param {function(FluentStream):void} buildEncoder
-     * @param {AudioPluginOptions} [opts]
+     * @param {AudioPluginBaseOptions} [opts]
      * @returns {FluentStream}
      */
     withAudioPlugin(plugin, buildEncoder, opts) {
@@ -396,7 +396,10 @@ class FluentStream extends eventemitter3_1.EventEmitter {
         // capture controllers for hot updates
         this._pluginControllers = chain.getControllers();
         // Use defaults from registry.chain() (48000/2). Allow encoder to be configured afterwards by caller.
-        return this.withAudioTransform(transform, (enc) => enc, { sampleRate: 48000, channels: 2 });
+        return this.withAudioTransform(transform, (enc) => enc, {
+            sampleRate: 48000,
+            channels: 2,
+        });
     }
     /**
      * Preferable helper: use globally registered plugins by name.

@@ -1,13 +1,18 @@
-import { AudioPlugin, AudioPluginOptions } from "src/Core";
+import { AudioPlugin, AudioPluginBaseOptions } from "../../src/Core";
 import { Transform } from "stream";
+export interface CompressorPluginOptions extends AudioPluginBaseOptions {
+    threshold: number;
+    ratio: number;
+}
 /**
  * Simple dynamic range compressor.
  * Limits peaks above threshold.
  */
-export declare class CompressorPlugin implements AudioPlugin {
-    private threshold;
-    private ratio;
-    constructor(threshold?: number, ratio?: number);
-    setParams(threshold: number, ratio: number): void;
-    createTransform(options: Required<AudioPluginOptions>): Transform;
+export declare class CompressorPlugin implements AudioPlugin<CompressorPluginOptions> {
+    private options;
+    constructor(options: CompressorPluginOptions);
+    /** Динамически меняем настройки */
+    setOptions(options: Partial<CompressorPluginOptions>): void;
+    getOptions(): Required<CompressorPluginOptions>;
+    createTransform(options: Required<CompressorPluginOptions>): Transform;
 }

@@ -7,25 +7,25 @@ const stream_1 = require("stream");
  * Smoothly interpolates volume over frames.
  */
 class VolumeFaderPlugin {
-    start;
-    end;
-    constructor(start = 1, end = 1) {
-        this.start = start;
-        this.end = end;
+    options;
+    constructor(options) {
+        this.options = { sampleRate: 48000, channels: 2, ...options };
     }
-    setFade(start, end) {
-        this.start = start;
-        this.end = end;
+    setOptions(options) {
+        this.options = { ...this.options, ...options };
+    }
+    getOptions() {
+        return this.options;
     }
     createTransform(options) {
-        const { channels } = options;
+        const { channels, start, end } = options;
         const t = new stream_1.Transform({
             transform: (chunk, _enc, cb) => {
                 try {
                     const samples = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.length / 2);
                     const frameCount = samples.length / channels;
                     for (let frame = 0; frame < frameCount; frame++) {
-                        const factor = this.start + ((this.end - this.start) * frame) / frameCount;
+                        const factor = start + ((end - start) * frame) / frameCount;
                         for (let c = 0; c < channels; c++) {
                             const idx = frame * channels + c;
                             let val = samples[idx] / 32768;
@@ -39,8 +39,8 @@ class VolumeFaderPlugin {
                 }
             },
         });
-        t._start = this.start;
-        t._end = this.end;
+        t._start = start;
+        t._end = end;
         return t;
     }
 }

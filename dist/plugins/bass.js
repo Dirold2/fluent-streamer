@@ -4,18 +4,23 @@ exports.BassPlugin = void 0;
 const stream_1 = require("stream");
 /**
  * Bass boost plugin.
- * Simple IIR-style bass boost on stereo PCM audio.
+ * Усиление басов на PCM аудио.
  */
 class BassPlugin {
-    bass;
-    constructor(bass) {
-        this.bass = bass;
+    options;
+    constructor(options) {
+        this.options = { sampleRate: 48000, channels: 2, ...options };
     }
-    setBass(b) {
-        this.bass = b;
+    /** Динамически меняем настройки */
+    setOptions(options) {
+        this.options = { ...this.options, ...options };
+    }
+    getOptions() {
+        return this.options;
     }
     createTransform(options) {
-        const { channels } = options;
+        const opts = options ?? this.options;
+        const { channels, bass } = opts;
         const t = new stream_1.Transform({
             transform: (chunk, _enc, cb) => {
                 try {
@@ -24,8 +29,7 @@ class BassPlugin {
                         for (let c = 0; c < channels; c++) {
                             const idx = i + c;
                             let val = samples[idx] / 32768;
-                            // Simple bass amplification for demonstration
-                            val = val * (1 + this.bass * 0.5);
+                            val = val * (1 + bass * 0.5);
                             samples[idx] = Math.round(Math.max(-1, Math.min(1, val)) * 32767);
                         }
                     }
@@ -36,7 +40,7 @@ class BassPlugin {
                 }
             },
         });
-        t._bass = this.bass;
+        t._bass = bass;
         return t;
     }
 }
