@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import PluginRegistry from '../src/Core/PluginRegistry'
-import { type AudioPlugin, type AudioPluginOptions } from '../src/Core/Filters'
+import { type AudioPlugin, type AudioPluginBaseOptions } from '../src/Core/Filters'
 import { Transform, PassThrough } from 'stream'
 
 class DoublePlugin implements AudioPlugin {
-  createTransform(_options: Required<AudioPluginOptions>): Transform {
+  createTransform(_options: Required<AudioPluginBaseOptions>): Transform {
     return new Transform({
       transform(chunk, _enc, cb) {
         const out = Buffer.concat([chunk, chunk])
@@ -15,7 +15,7 @@ class DoublePlugin implements AudioPlugin {
 }
 
 class IncrementPlugin implements AudioPlugin {
-  createTransform(_options: Required<AudioPluginOptions>): Transform {
+  createTransform(_options: Required<AudioPluginBaseOptions>): Transform {
     return new Transform({
       transform(chunk, _enc, cb) {
         const out = Buffer.from(chunk)

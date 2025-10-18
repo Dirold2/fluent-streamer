@@ -1,23 +1,33 @@
-import { AudioPlugin, AudioPluginOptions } from "src/Core";
+import { AudioPlugin, AudioPluginBaseOptions } from "../../src/Core";
 import { Transform } from "stream";
+
+export interface CompressorPluginOptions extends AudioPluginBaseOptions {
+  threshold: number;
+  ratio: number;
+}
 
 /**
  * Simple dynamic range compressor.
  * Limits peaks above threshold.
  */
-export class CompressorPlugin implements AudioPlugin {
-  constructor(
-    private threshold = 0.8,
-    private ratio = 4,
-  ) {}
+export class CompressorPlugin implements AudioPlugin<CompressorPluginOptions> {
+  private options: Required<CompressorPluginOptions>;
 
-  setParams(threshold: number, ratio: number) {
-    this.threshold = threshold;
-    this.ratio = ratio;
+  constructor(options: CompressorPluginOptions) {
+    this.options = { sampleRate: 48000, channels: 2, ...options };
   }
 
-  createTransform(options: Required<AudioPluginOptions>): Transform {
-    const { channels } = options;
+  /** Динамически меняем настройки */
+  setOptions(options: Partial<CompressorPluginOptions>) {
+    this.options = { ...this.options, ...options };
+  }
+
+  getOptions(): Required<CompressorPluginOptions> {
+    return this.options;
+  }
+
+  createTransform(options: Required<CompressorPluginOptions>): Transform {
+    const { channels, threshold, ratio } = options;
     const t = new Transform({
       transform: (chunk: Buffer, _enc, cb) => {
         try {
@@ -31,10 +41,8 @@ export class CompressorPlugin implements AudioPlugin {
               const idx = i + c;
               let val = samples[idx] / 32768;
               const abs = Math.abs(val);
-              if (abs > this.threshold) {
-                val =
-                  Math.sign(val) *
-                  (this.threshold + (abs - this.threshold) / this.ratio);
+              if (abs > threshold) {
+                val = Math.sign(val) * (threshold + (abs - threshold) / ratio);
               }
               samples[idx] = Math.round(Math.max(-1, Math.min(1, val)) * 32767);
             }
@@ -46,8 +54,8 @@ export class CompressorPlugin implements AudioPlugin {
       },
     }) as Transform & { _threshold: number; _ratio: number };
 
-    t._threshold = this.threshold;
-    t._ratio = this.ratio;
+    t._threshold = threshold;
+    t._ratio = ratio;
     return t;
   }
 }

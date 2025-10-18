@@ -1,17 +1,25 @@
 import { Transform } from "stream";
 
-export interface AudioPluginOptions {
+/** Базовые опции для всех плагинов — могут быть расширены конкретными плагинами */
+export interface AudioPluginBaseOptions {
   sampleRate?: number;
   channels?: number;
+  [key: string]: any; // позволяет динамически добавлять любые опции
 }
 
-/**
- * AudioPlugin produces a Node Transform stream that processes PCM s16le audio.
- * It may also expose a small control API for runtime adjustments.
- */
-export interface AudioPlugin {
-  /** Optional diagnostic name for logs and introspection */
+/** Универсальный AudioPlugin с дженериком для конкретных опций */
+export interface AudioPlugin<
+  Options extends AudioPluginBaseOptions = AudioPluginBaseOptions,
+> {
+  /** Имя плагина для логов и регистрации */
   name?: string;
-  /** Create the transform implementing the plugin DSP */
-  createTransform(options: Required<AudioPluginOptions>): Transform;
+
+  /** Создаёт Transform с конкретными опциями плагина */
+  createTransform(options: Required<Options>): Transform;
+
+  /** Опциональный метод для динамического обновления настроек плагина */
+  setOptions?(options: Partial<Options>): void;
+
+  /** Опциональный метод для получения текущих настроек */
+  getOptions?(): Required<Options>;
 }

@@ -37,7 +37,7 @@ import { existsSync, lstatSync, mkdirSync } from "fs";
 import { spawnSync } from "child_process";
 import { dirname } from "path";
 import os from "os";
-import { type AudioPlugin, type AudioPluginOptions } from "./Filters.js";
+import { type AudioPlugin, type AudioPluginBaseOptions } from "./Filters.js";
 import PluginRegistry from "./PluginRegistry.js";
 import { FluentChain } from "./FluentChain.js";
 import Processor from "./Processor.js";
@@ -69,9 +69,9 @@ export class FluentStream extends EventEmitter {
   }
 
   /** Register a plugin globally (preferred API surface) */
-  static registerPlugin(
+  static registerPlugin<Options extends AudioPluginBaseOptions>(
     name: string,
-    factory: (options: Required<AudioPluginOptions>) => AudioPlugin,
+    factory: (options: Required<Options>) => AudioPlugin<Options>,
   ): void {
     this.globalRegistry.register(name, factory);
   }
@@ -98,7 +98,7 @@ export class FluentStream extends EventEmitter {
   };
   private audioPluginConfig?: {
     plugin: AudioPlugin;
-    options: Required<AudioPluginOptions>;
+    options: Required<AudioPluginBaseOptions>;
     buildEncoder: (enc: FluentStream) => void;
   };
 
@@ -445,13 +445,13 @@ export class FluentStream extends EventEmitter {
    * Use an AudioPlugin (see Filters.js) to insert a JS transform in the PCM chain. buildEncoder lets you configure target encoding/output after processing.
    * @param {AudioPlugin} plugin
    * @param {function(FluentStream):void} buildEncoder
-   * @param {AudioPluginOptions} [opts]
+   * @param {AudioPluginBaseOptions} [opts]
    * @returns {FluentStream}
    */
   withAudioPlugin(
     plugin: AudioPlugin,
     buildEncoder: (enc: FluentStream) => void,
-    opts?: AudioPluginOptions,
+    opts?: AudioPluginBaseOptions,
   ): FluentStream {
     this.audioPluginConfig = {
       plugin,
@@ -470,7 +470,9 @@ export class FluentStream extends EventEmitter {
    */
   withAudioPlugins(
     registry: PluginRegistry,
-    ...pluginConfigs: Array<string | { name: string; options?: Partial<AudioPluginOptions> }>
+    ...pluginConfigs: Array<
+      string | { name: string; options?: Partial<AudioPluginBaseOptions> }
+    >
   ): FluentStream {
     const chain: FluentChain = registry.chain(...pluginConfigs);
     const transform = chain.getTransform();
@@ -478,11 +480,10 @@ export class FluentStream extends EventEmitter {
     (this as any)._pluginControllers = chain.getControllers();
 
     // Use defaults from registry.chain() (48000/2). Allow encoder to be configured afterwards by caller.
-    return this.withAudioTransform(
-      transform,
-      (enc) => enc,
-      { sampleRate: 48000, channels: 2 },
-    );
+    return this.withAudioTransform(transform, (enc) => enc, {
+      sampleRate: 48000,
+      channels: 2,
+    });
   }
 
   /**
@@ -491,14 +492,17 @@ export class FluentStream extends EventEmitter {
    */
   usePlugins(
     ...pluginConfigs: Array<
-      string | { name: string; options?: Partial<AudioPluginOptions> }
+      string | { name: string; options?: Partial<AudioPluginBaseOptions> }
     >
   ): FluentStream {
     return this.withAudioPlugins(FluentStream.globalRegistry, ...pluginConfigs);
   }
 
   /** Shortcut for a single plugin by name with optional options */
-  usePlugin(name: string, options?: Partial<AudioPluginOptions>): FluentStream {
+  usePlugin(
+    name: string,
+    options?: Partial<AudioPluginBaseOptions>,
+  ): FluentStream {
     return this.usePlugins({ name, options });
   }
 

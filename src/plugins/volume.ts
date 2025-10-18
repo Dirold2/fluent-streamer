@@ -1,23 +1,32 @@
-import { AudioPlugin, AudioPluginOptions } from "src/Core";
+import { AudioPlugin, AudioPluginBaseOptions } from "../../src/Core";
 import { Transform } from "stream";
+
+export interface VolumePluginOptions extends AudioPluginBaseOptions {
+  start: number;
+  end: number;
+}
 
 /**
  * Volume fade plugin.
  * Smoothly interpolates volume over frames.
  */
 export class VolumeFaderPlugin implements AudioPlugin {
-  constructor(
-    private start = 1,
-    private end = 1,
-  ) {}
+  private options: Required<VolumePluginOptions>;
 
-  setFade(start: number, end: number) {
-    this.start = start;
-    this.end = end;
+  constructor(options: VolumePluginOptions) {
+    this.options = { sampleRate: 48000, channels: 2, ...options };
   }
 
-  createTransform(options: Required<AudioPluginOptions>): Transform {
-    const { channels } = options;
+  setOptions(options: Partial<VolumePluginOptions>) {
+    this.options = { ...this.options, ...options };
+  }
+
+  getOptions(): Required<VolumePluginOptions> {
+    return this.options;
+  }
+
+  createTransform(options: Required<VolumePluginOptions>): Transform {
+    const { channels, start, end } = options;
     const t = new Transform({
       transform: (chunk: Buffer, _enc, cb) => {
         try {
@@ -28,8 +37,7 @@ export class VolumeFaderPlugin implements AudioPlugin {
           );
           const frameCount = samples.length / channels;
           for (let frame = 0; frame < frameCount; frame++) {
-            const factor =
-              this.start + ((this.end - this.start) * frame) / frameCount;
+            const factor = start + ((end - start) * frame) / frameCount;
             for (let c = 0; c < channels; c++) {
               const idx = frame * channels + c;
               let val = samples[idx] / 32768;
@@ -45,8 +53,8 @@ export class VolumeFaderPlugin implements AudioPlugin {
       },
     }) as Transform & { _start: number; _end: number };
 
-    t._start = this.start;
-    t._end = this.end;
+    t._start = start;
+    t._end = end;
     return t;
   }
 }

@@ -1,74 +1,66 @@
-import { AudioPluginOptions, AudioPlugin } from "./Filters.js";
+import { AudioPluginBaseOptions, AudioPlugin } from "./Filters.js";
 import { FluentChain } from "./FluentChain.js";
 
-type PluginFactory = (options: Required<AudioPluginOptions>) => AudioPlugin;
+/** Универсальная фабрика плагина с дженериком для опций */
+export type PluginFactory<
+  Options extends AudioPluginBaseOptions = AudioPluginBaseOptions,
+> = (options: Required<Options>) => AudioPlugin<Options>;
 
 /**
  * Registry for audio plugins.
- *
- * Allows registering plugins by name and creating instances with specific options.
  */
 export class PluginRegistry {
   private registry = new Map<string, PluginFactory>();
 
-  /**
-   * Registers an audio plugin.
-   * @param name - Unique plugin name
-   * @param factory - Factory function that creates the plugin instance
-   */
-  register(name: string, factory: PluginFactory) {
-    this.registry.set(name, factory);
+  /** Регистрирует плагин */
+  register<Options extends AudioPluginBaseOptions = AudioPluginBaseOptions>(
+    name: string,
+    factory: PluginFactory<Options>,
+  ) {
+    this.registry.set(name, factory as PluginFactory);
   }
 
-  /**
-   * Checks if a plugin with the given name is registered.
-   * @param name - Plugin name
-   * @returns True if registered, false otherwise
-   */
+  /** Проверяет, зарегистрирован ли плагин */
   has(name: string): boolean {
     return this.registry.has(name);
   }
 
-  /**
-   * Returns the factory for a registered plugin, or undefined if not found.
-   */
+  /** Получает фабрику плагина */
   get(name: string): PluginFactory | undefined {
     return this.registry.get(name);
   }
 
-  /**
-   * Creates an instance of a registered plugin.
-   * @param name - Plugin name
-   * @param options - Plugin options
-   * @throws Error if plugin is not found
-   * @returns The created AudioPlugin instance
-   */
-  create(name: string, options: Required<AudioPluginOptions>): AudioPlugin {
+  /** Создаёт экземпляр плагина с конкретными опциями */
+  create<Options extends AudioPluginBaseOptions>(
+    name: string,
+    options: Required<Options>,
+  ): AudioPlugin<Options> {
     const factory = this.registry.get(name);
     if (!factory) throw new Error(`Plugin not found: ${name}`);
-    return factory(options);
+
+    // Приведение типов для корректной работы дженериков
+    return (
+      factory as unknown as (opts: Required<Options>) => AudioPlugin<Options>
+    )(options);
   }
 
-  /**
-   * Create a fluent chain of plugins with optional individual options.
-   * @param pluginConfigs - Array of plugin names or objects { name, options }
-   */
+  /** Создаёт цепочку FluentChain */
   chain(
     ...pluginConfigs: Array<
-      string | { name: string; options?: Partial<AudioPluginOptions> }
+      string | { name: string; options?: Partial<AudioPluginBaseOptions> }
     >
   ): FluentChain {
     if (pluginConfigs.length === 0) throw new Error("No plugin names provided");
 
-    // Normalize plugin configs
     const configs = pluginConfigs.map((p) =>
       typeof p === "string" ? { name: p, options: {} } : p,
     );
 
-    const defaultOptions: Required<AudioPluginOptions> = {
+    const defaultOptions: Required<AudioPluginBaseOptions> = {
       sampleRate: 48000,
       channels: 2,
     };
+
     return new FluentChain(this, configs, defaultOptions);
   }
 }

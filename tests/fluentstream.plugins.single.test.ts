@@ -10,10 +10,13 @@ describe('FluentStream.usePlugin (single)', () => {
 
   it('registers gain and composes transform via usePlugin', async () => {
     // Register a gain plugin globally (gain x2)
-    FluentStream.registerPlugin('gain', () => new GainPlugin(2))
+    
+  FluentStream.registerPlugin("gain", (options: { gain: number }) => new GainPlugin(options));
 
-    const ff = new FluentStream()
-    ;(ff as any).usePlugin('gain')
+
+    const ff = new FluentStream();
+    ff.usePlugin('gain', { gain: 2 })
+
     const t = (ff).audioTransformConfig?.transform as PassThrough
 
     // Prepare 2-channel s16le samples

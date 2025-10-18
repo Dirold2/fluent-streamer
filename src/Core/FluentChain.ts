@@ -1,5 +1,5 @@
 import { Transform, PassThrough, Writable, Readable } from "stream";
-import { AudioPlugin, AudioPluginOptions } from "./Filters.js";
+import { AudioPlugin, AudioPluginBaseOptions } from "./Filters.js";
 import PluginRegistry from "./PluginRegistry.js";
 
 /**
@@ -15,9 +15,9 @@ export class FluentChain {
     private registry: PluginRegistry,
     private pluginConfigs: Array<{
       name: string;
-      options?: Partial<AudioPluginOptions>;
+      options?: Partial<AudioPluginBaseOptions>;
     }>,
-    private defaultOptions: Required<AudioPluginOptions>,
+    private defaultOptions: Required<AudioPluginBaseOptions>,
   ) {
     this.buildChain();
   }
@@ -31,7 +31,7 @@ export class FluentChain {
     for (const { name, options } of this.pluginConfigs) {
       if (!this.registry.has(name))
         throw new Error(`Plugin not found: ${name}`);
-      const mergedOptions: Required<AudioPluginOptions> = {
+      const mergedOptions: Required<AudioPluginBaseOptions> = {
         ...this.defaultOptions,
         ...options,
       };
@@ -92,7 +92,7 @@ export class FluentChain {
       transform(chunk, _enc, cb) {
         // Пишем данные в входной прокси; он пойдет в head
         if (!inputProxy.write(chunk)) {
-          inputProxy.once('drain', () => cb());
+          inputProxy.once("drain", () => cb());
         } else {
           cb();
         }
@@ -104,16 +104,16 @@ export class FluentChain {
     });
 
     // Передаем данные из выходного прокси наружу
-    outputProxy.on('data', (chunk) => combined.push(chunk));
-    outputProxy.once('end', () => combined.push(null));
-    outputProxy.once('close', () => combined.push(null));
+    outputProxy.on("data", (chunk) => combined.push(chunk));
+    outputProxy.once("end", () => combined.push(null));
+    outputProxy.once("close", () => combined.push(null));
 
     // Пробрасываем ошибки
-    const forwardError = (err: Error) => combined.emit('error', err);
-    head.on('error', forwardError);
-    last.on('error', forwardError);
-    inputProxy.on('error', forwardError);
-    outputProxy.on('error', forwardError);
+    const forwardError = (err: Error) => combined.emit("error", err);
+    head.on("error", forwardError);
+    last.on("error", forwardError);
+    inputProxy.on("error", forwardError);
+    outputProxy.on("error", forwardError);
 
     return combined;
   }

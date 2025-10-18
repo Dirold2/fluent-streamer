@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import FluentStream from '../src/Core/FluentStream'
-import { type AudioPlugin, type AudioPluginOptions } from '../src/Core/Filters'
+import { type AudioPlugin, type AudioPluginBaseOptions } from '../src/Core/Filters'
 import { Transform, PassThrough } from 'stream'
 
 class UpperPlugin implements AudioPlugin {
   name = 'upper'
-  createTransform(_o: Required<AudioPluginOptions>): Transform {
+  createTransform(_o: Required<AudioPluginBaseOptions>): Transform {
     return new Transform({
       transform(chunk, _enc, cb) {
         const out = Buffer.from(chunk.toString('utf8').toUpperCase(), 'utf8')
@@ -16,7 +16,7 @@ class UpperPlugin implements AudioPlugin {
 }
 
 class SuffixPlugin implements AudioPlugin {
-  createTransform(_o: Required<AudioPluginOptions>): Transform {
+  createTransform(_o: Required<AudioPluginBaseOptions>): Transform {
     return new Transform({
       transform(chunk, _enc, cb) {
         const out = Buffer.concat([Buffer.from('['), chunk, Buffer.from(']')])

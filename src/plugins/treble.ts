@@ -1,15 +1,27 @@
-import { AudioPlugin, AudioPluginOptions } from "src/Core";
+import { AudioPlugin, AudioPluginBaseOptions } from "src/Core";
 import { Transform } from "stream";
 
-export class TreblePlugin implements AudioPlugin {
-  constructor(private treble: number) {}
+export interface TreblePluginOptions extends AudioPluginBaseOptions {
+  treble: number;
+}
 
-  setTreble(t: number) {
-    this.treble = t;
+export class TreblePlugin implements AudioPlugin<TreblePluginOptions> {
+  private options: Required<TreblePluginOptions>;
+
+  constructor(options: TreblePluginOptions) {
+    this.options = { sampleRate: 48000, channels: 2, ...options };
   }
 
-  createTransform(options: Required<AudioPluginOptions>): Transform {
-    const { channels } = options;
+  setOptions(options: Partial<TreblePluginOptions>) {
+    this.options = { ...this.options, ...options };
+  }
+
+  getOptions(): Required<TreblePluginOptions> {
+    return this.options;
+  }
+
+  createTransform(options: Required<TreblePluginOptions>): Transform {
+    const { channels, treble } = options;
     const t = new Transform({
       transform: (chunk: Buffer, _enc, cb) => {
         try {
@@ -23,7 +35,7 @@ export class TreblePlugin implements AudioPlugin {
               const idx = i + c;
               let val = samples[idx] / 32768;
               // Simple treble boost simulation (linear for demo)
-              val = val * (1 + this.treble * 0.3);
+              val = val * (1 + treble * 0.3);
               samples[idx] = Math.round(Math.max(-1, Math.min(1, val)) * 32767);
             }
           }
@@ -34,7 +46,7 @@ export class TreblePlugin implements AudioPlugin {
       },
     }) as Transform & { _treble: number };
 
-    t._treble = this.treble;
+    t._treble = treble;
     return t;
   }
 }

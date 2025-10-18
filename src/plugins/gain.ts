@@ -1,19 +1,27 @@
-import { AudioPlugin, AudioPluginOptions } from "src/Core";
+import { AudioPlugin, AudioPluginBaseOptions } from "src/Core";
 import { Transform } from "stream";
+
+export interface GainPluginOptions extends AudioPluginBaseOptions {
+  gain: number;
+}
 
 /**
  * Simple gain plugin example.
  * Multiplies each audio sample by a gain factor.
  */
-export class GainPlugin implements AudioPlugin {
-  constructor(private gain: number) {}
+export class GainPlugin implements AudioPlugin<GainPluginOptions> {
+  private options: Required<GainPluginOptions>;
 
-  /**
-   * Sets the gain factor.
-   * @param g - Gain multiplier
-   */
-  setGain(g: number) {
-    this.gain = g;
+  constructor(options: GainPluginOptions) {
+    this.options = { sampleRate: 48000, channels: 2, ...options };
+  }
+
+  setOptions(options: Partial<GainPluginOptions>) {
+    this.options = { ...this.options, ...options };
+  }
+
+  getOptions(): Required<GainPluginOptions> {
+    return this.options;
   }
 
   /**
@@ -21,8 +29,9 @@ export class GainPlugin implements AudioPlugin {
    * @param options - Audio options (sampleRate, channels)
    * @returns Transform stream that processes audio
    */
-  createTransform(options: Required<AudioPluginOptions>): Transform {
-    const { channels } = options;
+  createTransform(options: Required<GainPluginOptions>): Transform {
+    const opts = options ?? this.options;
+    const { channels, gain } = opts;
     const t = new Transform({
       transform: (chunk: Buffer, _enc: BufferEncoding, cb) => {
         try {
@@ -46,7 +55,7 @@ export class GainPlugin implements AudioPlugin {
       },
     }) as Transform & { _gain: number };
 
-    (t as any)._gain = this.gain;
+    (t as any)._gain = gain;
     return t;
   }
 }

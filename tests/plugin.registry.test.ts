@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import PluginRegistry from '../src/Core/PluginRegistry'
-import { type AudioPlugin, type AudioPluginOptions } from '../src/Core/Filters'
+import { type AudioPlugin, type AudioPluginBaseOptions } from '../src/Core/Filters'
 import { Transform, PassThrough } from 'stream'
 
 class DummyPlugin implements AudioPlugin {
   name = 'dummy'
-  createTransform(_options: Required<AudioPluginOptions>): Transform {
+  createTransform(_options: Required<AudioPluginBaseOptions>): Transform {
     // Pass-through transform
     return new Transform({
       transform(chunk, _enc, cb) {

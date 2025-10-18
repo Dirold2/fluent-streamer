@@ -79,12 +79,12 @@ const { output, done } = ff.run();
 
 ```ts
 import { Transform } from "stream";
-import { AudioPlugin, AudioPluginOptions } from "fluent-streamer";
+import { AudioPlugin, AudioPluginBaseOptions } from "fluent-streamer";
 
 export class GainPlugin implements AudioPlugin {
   constructor(private gain: number) {}
 
-  createTransform(options: Required<AudioPluginOptions>): Transform {
+  createTransform(options: Required<AudioPluginBaseOptions>): Transform {
     return new Transform({
       transform(chunk, _enc, cb) {
         const samples = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.length / 2);

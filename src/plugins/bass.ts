@@ -1,19 +1,34 @@
-import { AudioPlugin, AudioPluginOptions } from "src/Core";
+import { AudioPlugin, AudioPluginBaseOptions } from "../../src/Core";
 import { Transform } from "stream";
+
+export interface BassPluginOptions extends AudioPluginBaseOptions {
+  bass: number;
+}
 
 /**
  * Bass boost plugin.
- * Simple IIR-style bass boost on stereo PCM audio.
+ * Усиление басов на PCM аудио.
  */
-export class BassPlugin implements AudioPlugin {
-  constructor(private bass: number) {}
+export class BassPlugin implements AudioPlugin<BassPluginOptions> {
+  private options: Required<BassPluginOptions>;
 
-  setBass(b: number) {
-    this.bass = b;
+  constructor(options: BassPluginOptions) {
+    this.options = { sampleRate: 48000, channels: 2, ...options };
   }
 
-  createTransform(options: Required<AudioPluginOptions>): Transform {
-    const { channels } = options;
+  /** Динамически меняем настройки */
+  setOptions(options: Partial<BassPluginOptions>) {
+    this.options = { ...this.options, ...options };
+  }
+
+  getOptions(): Required<BassPluginOptions> {
+    return this.options;
+  }
+
+  createTransform(options?: Required<BassPluginOptions>): Transform {
+    const opts = options ?? this.options;
+    const { channels, bass } = opts;
+
     const t = new Transform({
       transform: (chunk: Buffer, _enc, cb) => {
         try {
@@ -26,8 +41,7 @@ export class BassPlugin implements AudioPlugin {
             for (let c = 0; c < channels; c++) {
               const idx = i + c;
               let val = samples[idx] / 32768;
-              // Simple bass amplification for demonstration
-              val = val * (1 + this.bass * 0.5);
+              val = val * (1 + bass * 0.5);
               samples[idx] = Math.round(Math.max(-1, Math.min(1, val)) * 32767);
             }
           }
@@ -38,7 +52,7 @@ export class BassPlugin implements AudioPlugin {
       },
     }) as Transform & { _bass: number };
 
-    t._bass = this.bass;
+    t._bass = bass;
     return t;
   }
 }

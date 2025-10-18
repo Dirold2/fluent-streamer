@@ -364,7 +364,10 @@ export class Processor extends EventEmitter {
     pipeline(first.stream, this.process.stdin, (err) => {
       if (err) {
         // If EPIPE and process is already ending, suppress excess error reporting
-        if ((err.code === "EPIPE" || `${err}`.includes("EPIPE")) && this.finished) {
+        if (
+          (err.code === "EPIPE" || `${err}`.includes("EPIPE")) &&
+          this.finished
+        ) {
           // Swallow, because FFmpeg can close stdin when output pipeline closes
           return;
         }
@@ -397,17 +400,20 @@ export class Processor extends EventEmitter {
         if (err) {
           // Handle "premature close" as a warning if stdin also errored with EPIPE
           if (err.message && /premature close/i.test(err.message)) {
-            if (this.finished || (this as any).config?.suppressPrematureCloseWarning) {
+            if (
+              this.finished ||
+              (this as any).config?.suppressPrematureCloseWarning
+            ) {
               // Treat as benign when process is already finishing or suppress flag is set
               this.config.logger.debug?.("Premature close suppressed");
               return;
             }
-            this.config.logger.warn?.("Output pipeline failed: Premature close");
+            this.config.logger.warn?.(
+              "Output pipeline failed: Premature close",
+            );
             return;
           }
-          this.config.logger.error?.(
-            `Output pipeline failed: ${err.message}`
-          );
+          this.config.logger.error?.(`Output pipeline failed: ${err.message}`);
           this.emit("error", err);
           this.finish(err);
         }

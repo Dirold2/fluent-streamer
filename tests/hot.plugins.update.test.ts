@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import FluentStream from '../src/Core/FluentStream'
-import { type AudioPlugin, type AudioPluginOptions } from '../src/Core/Filters'
+import { type AudioPlugin, type AudioPluginBaseOptions } from '../src/Core/Filters'
 import { Transform, PassThrough } from 'stream'
 import { GainPlugin } from '../src/plugins/gain'
 
@@ -10,11 +10,11 @@ describe('Hot plugin updates', () => {
 
   it('applies setGain during streaming', async () => {
     // Arrange: register gain plugin
-    FluentStream.registerPlugin('gain', () => new GainPlugin(1))
+    FluentStream.registerPlugin('gain', (options: { gain: number }) => new GainPlugin(options))
     const ff = new FluentStream()
     ff.usePlugins('gain')
     const controllers = ff.getPluginControllers() as any[]
-    const gainCtrl = controllers[0] as { setGain: (g: number) => void }
+    const gainCtrl = controllers[0] as { setOptions: (g: number) => void }
 
     // Compose pipeline
     const t = ff.audioTransformConfig?.transform as Transform
@@ -32,7 +32,7 @@ describe('Hot plugin updates', () => {
     src.write(Buffer.from(a.buffer))
 
     // Update gain on the fly
-    gainCtrl.setGain(2)
+    gainCtrl.setOptions(2)
 
     // Second chunk should be ~x2
     const b = new Int16Array([Math.round(0.1 * 32767)])
