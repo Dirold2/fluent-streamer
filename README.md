@@ -1,24 +1,27 @@
 # Fluent Streamer
 
-> 🇷🇺 [Читать на русском](/lang/ru/README.md)
+> 🇷🇺 [Read in Russian](/lang/ru/README.md)
 
-**Fluent Streamer** is a powerful Node.js library for flexible audio and video stream management using FFmpeg. It supports extensible audio plugins (Gain, Bass, Treble, Compressor, and more) and a sleek Fluent API.
+**Fluent Streamer** is a powerful Node.js library for advanced audio and video streaming, based on FFmpeg. It features a modern, flexible, fluent API and makes building extensible audio plugin chains easy. With *FluentStream*, you can concatenate, process, and transcode media streams using both native FFmpeg filters and JS-based plugins in real time.
 
-FluentStream is the primary API surface. You can register plugins globally and build end‑to‑end pipelines concisely.
+FluentStream is the main API. Plugins are registered globally and complete pipelines can be built using concise chaining.
 
-Build real-time chains of any audio effects and instantly integrate them with PCM streams (Discord, WebRTC, FFmpeg, and more).
+Create real-time audio effect chains and seamlessly connect with PCM streams for Discord, WebRTC, OBS, and any FFmpeg-based workflows.
 
 ---
 
 ## Features
 
-- Flexible registration and use of custom audio plugins
-- Convenient Fluent API for building complex effect chains
-- Individual parameters for each plugin
-- Full compatibility with Node.js `stream.Transform`
-- Real-time audio processing and native FFmpeg integration
-- Rich event model: `start`, `spawn`, `progress`, `end`, `terminated`, `error`
-- Support for async processing, extensibility, and type safety
+- Register and use custom audio plugins with flexible options
+- Compose complex transcoding pipelines with a fluent API
+- Pass options to individual plugins in the chain
+- Compatible with Node.js `stream.Transform` and pipeline flows
+- Native FFmpeg integration for high performance
+- Real-time, low-latency PCM processing
+- Full event system: `start`, `spawn`, `progress`, `end`, `terminated`, `error`
+- Dynamic plugin updating (hot-swap) at runtime
+- TypeScript-first, extensible, async/sync API
+- **Automatic “Humanity” HTTP headers** for all spawned FFmpeg processes (see below)
 
 ---
 
@@ -30,54 +33,95 @@ npm install fluent-streamer
 yarn add fluent-streamer
 ```
 
-## Quick start (FluentStream as main API)
+---
+
+## Quick Start
 
 ```ts
 import FluentStream from "fluent-streamer";
 
-// 1) Register plugins globally (once at startup)
-FluentStream.registerPlugin("gain", (opts) => new GainPlugin(1.5));
-FluentStream.registerPlugin("bass", () => new BassPlugin(0.6));
+// 1) Register your audio plugins globally
+FluentStream.registerPlugin("gain", opts => new GainPlugin(opts.gain ?? 1));
+FluentStream.registerPlugin("bass", opts => new BassPlugin(opts.bass ?? 0.6));
 
-// 2) Build pipeline: file -> JS transforms -> encode -> stdout
+// 2) Build a pipeline: file -> plugins -> encode -> stdout
 const ff = new FluentStream({ suppressPrematureCloseWarning: true })
   .input("input.mp3")
-  .usePlugins("gain", { name: "bass", options: { /* plugin-specific */ } })
+  .usePlugins(
+    { name: "gain", options: { gain: 1.5 } },
+    "bass"
+  )
   .audioCodec("aac")
   .outputOptions("-b:a", "192k")
   .output("pipe:1");
+
+// New methods from FluentStream.ts
+ff.format("mp3");                             // Set output format, removes previous -f
+ff.copyCodecs();                              // Add -c copy if needed
+ff.overwrite();                               // Add -y to allow overwrite
+ff.map("0:a:0");                              // Map input streams
+ff.seekInput(12);                             // Seek input before -i
+ff.complexFilter("[0:a]loudnorm[aout]");      // Add filter_complex
+ff.crossfadeAudio(2.5, {
+    inputA: "[0:a]", inputB: "[1:a]", outputLabel: "[xfade]"
+});                                           // Add audio crossfade
+
+const controllers = ff.getControllers();      // Get current plugin controllers
+// Hot-swap (update) plugin chain after .usePlugins
+await ff.updatePlugins({ name: "compressor", options: { threshold: -20 } });
 
 const { output, done } = ff.run();
 output.pipe(process.stdout);
 await done;
 ```
 
-Stream input + FFmpeg filters (`-af`):
+---
+
+## HTTP “Humanity” Headers
+
+Every FFmpeg process spawned by FluentStream and Processor
+will include special “humanity” headers to indicate friendly bot intent and user agent:
+
+```json
+{
+  "X-Human-Intent": "true",
+  "X-Request-Attention": "just-want-to-do-my-best",
+  "User-Agent": "FluentStream/1.0 (friendly bot)"
+}
+```
+You do not need to do anything — these headers are set automatically for each process invocation.
+
+---
+
+**Streaming input and using FFmpeg-native filters:**
 
 ```ts
 import { PassThrough } from "stream";
 
 const input = new PassThrough();
-const filters = ["volume=2", "bass=g=5"]; // standard FFmpeg audio filters
+const filters = ["volume=2", "bass=g=5"]; // FFmpeg filtergraph
 
 const ff = new FluentStream()
   .input(input)
-  .inputOptions("-f", "mp3") // or your input format
+  .inputOptions("-f", "mp3")
   .output("pipe:1")
   .audioCodec("pcm_s16le")
   .outputOptions("-f", "s16le", "-ar", "48000", "-ac", "2", "-af", filters.join(","));
 
 const { output, done } = ff.run();
-// write bytes into `input` to stream into ffmpeg
+// Write audio data into `input` to stream to ffmpeg
 ```
 
-Notes:
-- Set `{ suppressPrematureCloseWarning: true }` if your consumer can close early and you want to silence benign "premature close" warnings.
-- You can still use low‑level `Processor`, but FluentStream is preferred.
+**Notes:**
+
+- Use `{ suppressPrematureCloseWarning: true }` if you expect the consumer to terminate the stream early.
+- You can always access the low-level `Processor` API if needed.
+
+---
 
 ## Audio Plugins
 
-Each plugin implements the `AudioPlugin` interface:
+All audio plugins must implement the `AudioPlugin` interface:
 
 ```ts
 import { Transform } from "stream";
@@ -87,53 +131,60 @@ export class GainPlugin implements AudioPlugin {
   constructor(private gain: number) {}
 
   createTransform(options: Required<AudioPluginBaseOptions>): Transform {
+    const gain = this.gain;
     return new Transform({
       transform(chunk, _enc, cb) {
-        const samples = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.length / 2);
+        const samples = new Int16Array(
+          chunk.buffer, chunk.byteOffset, chunk.length / 2
+        );
         for (let i = 0; i < samples.length; i++) {
-          samples[i] = Math.max(-32768, Math.min(32767, samples[i] * this.gain));
+          samples[i] = Math.max(-32768, Math.min(32767, samples[i] * gain));
         }
         cb(null, chunk);
       },
-    }) as Transform;
+    });
   }
 }
 ```
 
-## Plugin Registry (optional)
+---
+
+## Plugin Registry (optional/custom usage)
 
 ```ts
 import { PluginRegistry } from "fluent-streamer";
 import { GainPlugin, BassPlugin, TreblePlugin } from "./plugins";
 
 const registry = new PluginRegistry();
-
-// Register plugins with default settings
-registry.register("gain", (opts) => new GainPlugin(opts.gain ?? 1));
-registry.register("bass", (opts) => new BassPlugin(opts.bass ?? 0));
-registry.register("treble", (opts) => new TreblePlugin(opts.treble ?? 0));
+registry.register("gain", opts => new GainPlugin(opts.gain ?? 1));
+registry.register("bass", opts => new BassPlugin(opts.bass ?? 0));
+registry.register("treble", opts => new TreblePlugin(opts.treble ?? 0));
 ```
 
-## Creating Plugin Chains (optional)
+---
+
+## Building Plugin Chains
 
 ```ts
-// Simple pipeline chain
+// Simple chain
 registry.chain("gain", "bass", "treble")
   .pipeTo(destination);
 
-// With individual parameters for each plugin
+// Per-plugin options
 registry.chain(
   { name: "gain", options: { gain: 2 } },
   { name: "bass", options: { bass: 0.7 } },
   "treble"
 ).pipeTo(destination);
 
-// Get a Transform chain for pipeline usage
+// Manual transform chain use
 const chainTransform = registry.chain("gain", "bass").getTransform();
 ffmpegOutput.pipe(chainTransform).pipe(destination);
 ```
 
-## Audio Stream Diagram
+---
+
+## PCM Audio Plugin Pipeline Diagram
 
 ```plaintext
 Input Stream (FFmpeg / PCM)
@@ -155,6 +206,8 @@ Input Stream (FFmpeg / PCM)
  (Discord PCM / FFmpeg pipe)
 ```
 
+---
+
 ## FluentStream: High-Level API
 
 ```ts
@@ -165,28 +218,47 @@ const ff = new FluentStream()
   .audioCodec("libopus")
   .format("opus")
   .output("pipe:1")
-  .usePlugins("gain")
-  .audioCodec("libopus");
+  .usePlugins("gain", "bass")
+  .audioCodec("libopus")
+  .copyCodecs()
+  .overwrite()
+  .seekInput("00:00:30")
+  .map("0:a:0")
+  .complexFilter("[0:a]loudnorm[aout]")
+  .crossfadeAudio(2.5, { inputA: '[0:a]', inputB: '[1:a]', outputLabel: '[crossed]' });
+
+const controllers = ff.getControllers();
+await ff.updatePlugins("compressor", { name: "custom", options: { ratio: 2 } });
 
 const { output, done } = ff.run();
 output.pipe(destination);
 await done;
 ```
 
-- `.usePlugins(...configs)` / `.usePlugin(name, options?)` — attach globally registered plugins by name.
-- `.withAudioPlugins(registry, ...configs)` — same as above but with custom registry.
-- `.withAudioPlugin(plugin, buildEncoder, options?)` — attach a manually created plugin instance.
-- `.crossfadeAudio(duration, options?)` — performs a crossfade between two audio inputs.
+### Main methods
 
-### Global plugin registry API
+- `.input(input: string | Readable)` — Add input file or stream
+- `.usePlugins(...configs)` — Insert plugins (by name or with options) from the registry into the audio pipeline
+- `.getControllers()` — Get active plugin controller instances
+- `.updatePlugins(...)` — Hot-swap the plugin chain at runtime
+- `.crossfadeAudio(duration, options?)` — Crossfade between two audio streams
+- `.audioCodec(codec)`, `.output(path)`, `.outputOptions(...)`, `.inputOptions(...)`, `.seekInput(time)`, `.map(label)`
+- `.complexFilter(string|string[])` — Append to FFmpeg filter_complex
+- `.copyCodecs()`, `.format(fmt)`, `.overwrite()`
+- `.run()` — Start pipeline; returns `{ output, done, stop }`
+- `.getArgs()` — Current FFmpeg argument array
+
+### Global plugin registry
 
 ```ts
 FluentStream.registerPlugin(name, factory);
-FluentStream.hasPlugin(name) // boolean
-FluentStream.clearPlugins()  // tests/tools only
+FluentStream.hasPlugin(name);      // Returns boolean
+FluentStream.clearPlugins();       // Remove all plugins (e.g., for tests/dev)
 ```
 
-## Processor — Low-level FFmpeg Execution (optional)
+---
+
+## Low-level Processor API
 
 ```ts
 import { Processor } from "fluent-streamer";
@@ -198,7 +270,9 @@ proc.on("progress", console.log);
 proc.on("end", () => console.log("Done"));
 ```
 
-## Dynamic Plugin Loading
+---
+
+## Dynamic Plugin Loading Example
 
 ```ts
 import fs from "fs";
@@ -212,14 +286,16 @@ for (const file of fs.readdirSync(pluginsPath)) {
 }
 ```
 
+---
+
 ## Events
 
-- `start(cmd: string)` — before FFmpeg starts  
-- `spawn(data)` — FFmpeg process started  
-- `progress(progress: FFmpegProgress)` — progress via special side-channel  
-- `end()` — process finished successfully  
-- `terminated(signal: string)` — finished by signal  
-- `error(err: Error)` — any error from process or streams  
+- `start(cmd)` — Before the FFmpeg process spawns
+- `spawn(data)` — FFmpeg process started
+- `progress(progress)` — Progress info from FFmpeg
+- `end()` — Finished successfully
+- `terminated(signal)` — Process was killed or interrupted
+- `error(err)` — Error during processing or plugin operation
 
 ---
 

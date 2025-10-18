@@ -1,6 +1,3 @@
-/**
- * Core public API: low-level `Processor` and fluent `SimpleFFmpeg` wrapper.
- */
 export {
   Processor,
   FluentStream,
