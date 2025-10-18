@@ -10,7 +10,7 @@ export interface VolumePluginOptions extends AudioPluginBaseOptions {
  * Volume fade plugin.
  * Smoothly interpolates volume over frames.
  */
-export class VolumeFaderPlugin implements AudioPlugin {
+export class VolumeFaderPlugin implements AudioPlugin<VolumePluginOptions> {
   private options: Required<VolumePluginOptions>;
 
   constructor(options: VolumePluginOptions) {

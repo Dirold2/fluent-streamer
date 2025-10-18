@@ -10,7 +10,6 @@ describe('FluentStream.usePlugin (single)', () => {
 
   it('registers gain and composes transform via usePlugin', async () => {
     // Register a gain plugin globally (gain x2)
-    
   FluentStream.registerPlugin("gain", (options: { gain: number }) => new GainPlugin(options));
 
 
