@@ -26,7 +26,7 @@ class PluginHotSwap extends stream_1.Transform {
     wireChain(chain) {
         chain.on('data', (chunk) => {
             if (!this.push(chunk)) {
-                chain.pause(); // Manage backpressure
+                chain.pause();
             }
         });
         chain.on('error', (err) => this.emit('error', err));
@@ -550,12 +550,17 @@ class FluentStream extends eventemitter3_1.EventEmitter {
         return processor.run();
     }
     runWithPlugins() {
+        // Fix for ffmpeg commands:
+        // Properly decode to 16-bit signed little-endian PCM, ar/channels, pipe:1
+        // Remove double -c:a for output
+        // Decoder command:
+        // ffmpeg -f mp3 -i input.mp3 -c:a pcm_s16le -f s16le -ar 48000 -ac 2 pipe:1
         const decoderArgs = [
             ...this.assembleArgs(),
+            '-c:a', 'pcm_s16le',
             '-f', 's16le',
             '-ar', String(this.pcmOptions.sampleRate),
             '-ac', String(this.pcmOptions.channels),
-            '-c:a', 'pcm_s1le',
             'pipe:1'
         ];
         const decoderProcessorOptions = this.addHumanityHeadersToProcessorOptions({
@@ -569,12 +574,30 @@ class FluentStream extends eventemitter3_1.EventEmitter {
             decoderProcessor.setInputStreams(this.inputStreams);
         const encoder = new FluentStream(this.options);
         this.encoderBuilder(encoder);
-        const encoderArgs = [
+        // Encoder command:
+        // ffmpeg -f s16le -ar 48000 -ac 2 -i pipe:0 ...user args... pipe:1
+        // No extra -f s16le/-ar/-ac unless user calls it themselves via encoder options
+        // Remove duplicate -f/-ar/-ac/-c:a from encoder arguments to avoid redundancy
+        const encoderBaseArgs = [
             '-f', 's16le',
             '-ar', String(this.pcmOptions.sampleRate),
             '-ac', String(this.pcmOptions.channels),
             '-i', 'pipe:0',
-            ...encoder.assembleArgs()
+        ];
+        const userArgs = encoder.assembleArgs().filter((arg, idx, arr) => {
+            if (arg === '-f' && arr[idx + 1] === 's16le')
+                return false;
+            if (arg === '-ar' && arr[idx + 1] === String(this.pcmOptions.sampleRate))
+                return false;
+            if (arg === '-ac' && arr[idx + 1] === String(this.pcmOptions.channels))
+                return false;
+            if (arg === '-c:a' && (arr[idx + 1] === 'pcm_s16le' || arr[idx + 1] === 'pcm_s1le'))
+                return false;
+            return true;
+        });
+        const encoderArgs = [
+            ...encoderBaseArgs,
+            ...userArgs
         ];
         const encoderProcessorOptions = this.addHumanityHeadersToProcessorOptions({
             ...this.options,
