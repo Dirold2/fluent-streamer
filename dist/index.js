@@ -1,14 +1,11 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.VolumeFaderPlugin = exports.CompressorPlugin = exports.TreblePlugin = exports.BassPlugin = exports.Processor = exports.FluentStream = exports.FluentChain = exports.PluginRegistry = void 0;
-const tslib_1 = require("tslib");
 var index_js_1 = require("./Core/index.js");
 Object.defineProperty(exports, "PluginRegistry", { enumerable: true, get: function () { return index_js_1.PluginRegistry; } });
 Object.defineProperty(exports, "FluentChain", { enumerable: true, get: function () { return index_js_1.FluentChain; } });
-var FluentStream_js_1 = require("./Core/FluentStream.js");
-Object.defineProperty(exports, "FluentStream", { enumerable: true, get: function () { return tslib_1.__importDefault(FluentStream_js_1).default; } });
-var Processor_js_1 = require("./Core/Processor.js");
-Object.defineProperty(exports, "Processor", { enumerable: true, get: function () { return tslib_1.__importDefault(Processor_js_1).default; } });
+Object.defineProperty(exports, "FluentStream", { enumerable: true, get: function () { return index_js_1.FluentStream; } });
+Object.defineProperty(exports, "Processor", { enumerable: true, get: function () { return index_js_1.Processor; } });
 var bass_js_1 = require("./plugins/bass.js");
 Object.defineProperty(exports, "BassPlugin", { enumerable: true, get: function () { return bass_js_1.BassPlugin; } });
 var treble_js_1 = require("./plugins/treble.js");
