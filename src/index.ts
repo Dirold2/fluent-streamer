@@ -1,8 +1,4 @@
-export { PluginRegistry, FluentChain } from "./Core/index.js";
-
-export { default as FluentStream } from "./Core/FluentStream.js";
-
-export { default as Processor } from "./Core/Processor.js";
+export { PluginRegistry, FluentChain, FluentStream, Processor } from "./Core/index.js";
 
 export { BassPlugin } from "./plugins/bass.js";
 export { TreblePlugin } from "./plugins/treble.js";
