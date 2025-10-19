@@ -263,7 +263,7 @@ describe("FluentStream тяжёлые тесты (FFmpeg и плагины)", ()
         .headers({ "X-Header-Test": "abc", "Demo": "yes" })
         .usePlugins(() => {}, "idsoft");
       
-      // --- Ensure -user-agent appears before -headers in FFmpeg args ---
+      // --- Ensure -user_agent appears before -headers in FFmpeg args ---
       const args = (typeof s.getArgs === "function") ? s.getArgs() : (s as any).args;
       const uaIdx = args.indexOf("-user_agent");
       const hIdx = args.indexOf("-headers");

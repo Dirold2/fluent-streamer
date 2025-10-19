@@ -9,24 +9,54 @@ import type {
 import { ProcessorOptions } from "../Types/index.js";
 
 /**
- * Class for launching and managing FFmpeg processes, their lifecycle and progress.
+ * A class for spawning and managing FFmpeg processes, including progress,
+ * lifecycle, killing by signal, and stream throttling for realtime output simulation.
  *
- * @example
- * ```typescript
- * import Processor from './Processor';
- * const proc = new Processor({ ffmpegPath: 'ffmpeg' });
- * proc.setArgs(['-i', 'input.mp3', 'output.wav']);
+ * ### Features
+ * - Stream input and output support
+ * - Progress reporting and buffer management
+ * - Realtime throttling for PCM/raw output formats (for "broadcast" simulation)
+ * - Custom logger support
+ * - AbortSignal-based cancellation and timeouts
+ *
+ * ### Usage Example
+ * ```ts
+ * import Processor from "./Core/Processor";
+ * import { createReadStream } from "fs";
+ *
+ * const proc = new Processor({
+ *   ffmpegPath: "/usr/bin/ffmpeg",
+ *   enableProgressTracking: true,
+ *   debug: true,
+ *   timeout: 10000,
+ * });
+ *
+ * proc.setArgs([
+ *   "-f", "mp3",
+ *   "-i", "pipe:0",
+ *   "-f", "s16le",
+ *   "-ar", "44100",
+ *   "-ac", "2",
+ *   "pipe:1"
+ * ]);
+ *
+ * proc.setInputStreams([{ stream: createReadStream("input.mp3"), index: 0 }]);
+ *
  * const { output, done, stop } = proc.run();
- * output.pipe(fs.createWriteStream('output.wav'));
- * await done;
- * ```
+ * output.pipe(process.stdout);
  *
- * @fires Processor#progress
- * @fires Processor#error
- * @fires Processor#end
- * @fires Processor#terminated
- * @fires Processor#start
- * @fires Processor#spawn
+ * proc.on("progress", (info) => {
+ *   console.log("FFmpeg progress", info);
+ * });
+ *
+ * done
+ *   .then(() => {
+ *     console.log("Process finished.");
+ *   })
+ *   .catch((err) => {
+ *     console.error("Process error:", err);
+ *   });
+ * ```
  */
 export class Processor extends EventEmitter {
   private process: Subprocess | null = null;
@@ -52,15 +82,15 @@ export class Processor extends EventEmitter {
   private extraGlobalArgs: string[] = [];
 
   /**
-   * Gets the PID of the running FFmpeg process (null if not running).
+   * Returns the PID of the FFmpeg process, or null if not running.
    */
   public get pid(): number | null {
     return this.process?.pid ?? null;
   }
 
   /**
-   * Constructs a Processor object.
-   * @param options ProcessorOptions
+   * Constructs a Processor instance.
+   * @param options - FFmpeg related options and configuration.
    */
   constructor(options: ProcessorOptions = {}) {
     super();
@@ -90,82 +120,149 @@ export class Processor extends EventEmitter {
   }
 
   /**
-   * Sets the FFmpeg argument list.
-   * @param args Arguments array (e.g. ['-i', 'input', 'output'])
-   * @returns this
+   * Set the arguments for FFmpeg process (excluding global extra args).
+   * @param args - Arguments array for FFmpeg.
    */
   setArgs(args: string[]): this {
-    this.args = [...args];
+    this.args = Array.isArray(args) ? [...args] : [];
     return this;
   }
 
   /**
-   * Returns the current FFmpeg argument list.
-   * @returns Arguments array
+   * Returns a copy of the current argument list (excluding extra global args).
    */
   getArgs(): string[] {
     return [...this.args];
   }
 
   /**
-   * Sets the input streams for FFmpeg.
-   * @param streams Array of objects: { stream, index }
-   * @returns this
+   * Set one or more input streams for FFmpeg. Pass an array of
+   * `{ stream: Readable, index: number }` (index is used for complex FFmpeg invocations).
+   *
+   * @param streams - Array describing the input streams for FFMpeg.
    */
   setInputStreams(streams: Array<{ stream: Readable; index: number }>): this {
-    this.inputStreams = [...streams];
+    this.inputStreams = Array.isArray(streams) ? [...streams] : [];
     return this;
   }
 
   /**
-   * Returns FFmpeg's stdin stream if available.
+   * Returns the running process's stdin writable stream, if available.
    */
   getInputStream(): NodeJS.WritableStream | undefined {
     return this.process?.stdin ?? undefined;
   }
 
   /**
-   * Sets additional writable outputs for FFmpeg auxiliary pipes (e.g. pipe:2).
-   * @param streams Array of objects: { stream, index }
-   * @returns this
+   * Optional: Set extra output streams (not implemented in _bindOutputStreams yet).
+   * Intended for writing to multiple output destinations.
+   * @param streams - Array describing additional outputs.
    */
   setExtraOutputStreams(
     streams: Array<{ stream: Writable; index: number }>,
   ): this {
-    this.extraOutputs = [...streams];
+    this.extraOutputs = Array.isArray(streams) ? [...streams] : [];
     return this;
   }
 
   /**
-   * Sets extra arguments to be prepended globally to the FFmpeg command.
-   * @param args Arguments array
-   * @returns this
+   * Overwrite extra global arguments (prepended to FFmpeg args).
+   * @param args - Arguments that go before main ffmpeg args.
    */
   setExtraGlobalArgs(args: string[]): this {
-    this.extraGlobalArgs = [...args];
+    this.extraGlobalArgs = Array.isArray(args) ? [...args] : [];
     return this;
   }
 
   /**
-   * Returns the complete argument list passed to FFmpeg (extraGlobalArgs + args).
-   * @returns Arguments array
+   * Returns the complete list of arguments passed to FFmpeg, including global args.
    */
   getFullArgs(): string[] {
     return [...this.extraGlobalArgs, ...this.args];
   }
 
   /**
-   * Runs the FFmpeg process using the current options and argument list.
-   * Binds IO, process events, progress updates.
+   * Creates a realtime-throttled PassThrough stream to limit PCM/raw stream data rate.
+   * Used to simulate "live" streaming of PCM format output.
    *
-   * @returns {{ output: PassThrough, done: Promise<void>, stop: () => void }}
+   * @param sampleRate - PCM sample rate (Hz). Default: 44100 Hz.
+   * @param bits - PCM bit depth per sample. Default: 16.
+   * @param channels - Number of channels. Default: 2.
+   * @returns A throttled PassThrough stream.
+   */
+  private _createRealtimeThrottleStream(
+    sampleRate = 44100,
+    bits = 16,
+    channels = 2
+  ): PassThrough {
+    const bytesPerSample = bits / 8;
+    const bytesPerSecond = sampleRate * bytesPerSample * channels;
+    const throttle = new PassThrough();
+    let lastPush = Date.now();
+    let buffer: Buffer[] = [];
+    let timer: NodeJS.Timeout | null = null;
+
+    const pushLoop = () => {
+      if (!buffer.length) {
+        timer = null;
+        return;
+      }
+      const now = Date.now();
+      const elapsed = now - lastPush;
+      lastPush = now;
+      let bytesToSend = Math.floor((bytesPerSecond / 1000) * elapsed);
+
+      let outBytes = 0;
+      while (buffer.length && bytesToSend > 0) {
+        const buf = buffer[0];
+        if (buf.length <= bytesToSend) {
+          throttle.push(buffer.shift());
+          bytesToSend -= buf.length;
+          outBytes += buf.length;
+        } else {
+          throttle.push(buf.slice(0, bytesToSend));
+          buffer[0] = buf.slice(bytesToSend);
+          outBytes += bytesToSend;
+          bytesToSend = 0;
+        }
+      }
+      if (buffer.length) {
+        timer = setTimeout(pushLoop, 20);
+      } else {
+        timer = null;
+      }
+    };
+
+    throttle._write = function(chunk, _encoding, cb) {
+      buffer.push(Buffer.from(chunk));
+      if (!timer) {
+        timer = setTimeout(pushLoop, 20);
+      }
+      cb();
+    };
+
+    throttle._final = function(cb) {
+      while (buffer.length) {
+        throttle.push(buffer.shift());
+      }
+      cb();
+    };
+
+    return throttle;
+  }
+
+  /**
+   * Launches the FFmpeg process with the currently set arguments and input streams.
+   * If output is PCM or similar format, applies a realtime throttle to the output.
+   *
+   * @returns Object with { output, done, stop }:
+   *   - output: ReadableStream for the FFmpeg stdout.
+   *   - done: Promise resolved on process completion or rejected on error.
+   *   - stop(): Function to kill the process.
    *
    * @example
-   * const proc = new Processor();
-   * proc.setArgs(['-i', 'input.mp4', 'output.mp3']);
-   * const { output, done, stop } = proc.run();
-   * output.pipe(fs.createWriteStream('output.mp3'));
-   * await done;
+   * const proc = new Processor({...}).setArgs([...]).run()
+   * proc.output.pipe(fs.createWriteStream("output.pcm"))
    */
   run(): FFmpegRunResult {
     if (this.process) throw new Error("FFmpeg process is already running");
@@ -196,7 +293,7 @@ export class Processor extends EventEmitter {
 
     this._handleTimeout();
     this._bindInputStream();
-    this._bindOutputStreams();
+    this._bindOutputStreams(true);
     this._bindProcessEvents();
 
     this.process.once("spawn", () => {
@@ -211,8 +308,8 @@ export class Processor extends EventEmitter {
   }
 
   /**
-   * Kills the FFmpeg process.
-   * @param signal Signal to send (default: "SIGTERM")
+   * Kills the underlying FFmpeg process, sending a signal (default: SIGTERM).
+   * @param signal - Node.js signal string (e.g. "SIGTERM")]
    */
   kill(signal: NodeJS.Signals = "SIGTERM"): void {
     if (this.process && !this.isTerminating) {
@@ -227,11 +324,15 @@ export class Processor extends EventEmitter {
   }
 
   /**
-   * Builds an "acrossfade" FFmpeg filter string.
-   * @param opts Filter options
-   * @returns { filter: string, outputLabel?: string }
+   * Build the acrossfade FFmpeg filter string.
+   * Useful for audio cross-fading operations.
+   *
+   * @param opts - Filter options.
+   * @returns Object with filter string and (optional) outputLabel.
+   *
    * @example
-   * Processor.buildAcrossfadeFilter({ duration: 2, curve1: 'exp', curve2: 'sin' });
+   * Processor.buildAcrossfadeFilter({duration: 3, curve1: "exp", curve2: "exp"})
+   * // { filter: "acrossfade=d=3:c1=exp:c2=exp" }
    */
   static buildAcrossfadeFilter(
     opts: {
@@ -266,20 +367,13 @@ export class Processor extends EventEmitter {
   }
 
   /**
-   * Returns the FFmpeg command line as string.
-   * @returns Command string
-   * @example
-   * processor.toString(); // "ffmpeg -i foo.mp3 bar.wav"
+   * Returns CLI invocation string.
    */
   toString(): string {
     return `${this.config.ffmpegPath} ${this.getFullArgs().join(" ")}`;
   }
 
-  /**
-   * Sets up abort signal support.
-   * If abortSignal is triggered, will kill the process.
-   * @private
-   */
+  /** Bind abort signal, if provided, to kill on abort. */
   private _handleAbortSignal(): void {
     const { abortSignal } = this.config;
     if (!abortSignal) return;
@@ -291,10 +385,7 @@ export class Processor extends EventEmitter {
     }
   }
 
-  /**
-   * Sets up process timeout (if timeout > 0).
-   * @private
-   */
+  /** Handles timeout by killing FFmpeg if the configured timeout is reached. */
   private _handleTimeout(): void {
     if (this.config.timeout > 0) {
       this.timeoutHandle = setTimeout(() => {
@@ -308,72 +399,119 @@ export class Processor extends EventEmitter {
     }
   }
 
-  /**
-   * Connects the first input stream (if any) to the FFmpeg process stdin.
-   * @private
-   */
+  /** Binds a user-provided input stream to the FFmpeg process stdin. */
   private _bindInputStream(): void {
     if (!this.inputStreams.length || !this.process?.stdin) return;
     const { stream: inputStream } =
       this.inputStreams.find((i) => i.index === 0) || this.inputStreams[0];
     pipeline(inputStream, this.process.stdin, (err) => {
       if (err) {
-        if (err.code === "EPIPE" && (this.hasFinished || this.isTerminating)) {
+        if ((err as any).code === "EPIPE" && (this.hasFinished || this.isTerminating)) {
           return;
         }
         this.config.logger.error?.(
-          `[${this.config.loggerTag}] Input pipeline failed: ${err.message}`,
+          `[${this.config.loggerTag}] Input pipeline failed: ${(err as Error).message}`,
         );
         this.emit("error", err);
-        this._finalize(err);
+        this._finalize(err as Error);
       }
     });
   }
 
   /**
-   * Connects process.stdout to outputStream and sets up stderr handling.
-   * @private
+   * Decide if output stream needs throttling; if so, wrap it in a throttling stream.
+   * This applies to raw/pcm-like outputs (e.g. "-f s16le").
+   *
+   * @param applyThrottlePCM - If true, analyze arguments to possibly enable output throttling.
    */
-  private _bindOutputStreams(): void {
+  private _bindOutputStreams(applyThrottlePCM = false): void {
     if (!this.process || !this.outputStream) return;
-    if (this.process.stdout) {
-      pipeline(this.process.stdout, this.outputStream, (err) => {
-        if (err) {
-          if (
-            err.message &&
-            /premature close/i.test(err.message) &&
-            (this.hasFinished ||
-              this.isTerminating ||
-              this.config.suppressPrematureCloseWarning)
-          ) {
-            return;
-          }
-          if (err.message && /premature close/i.test(err.message)) {
-            if (this.config.debug) {
-              this.config.logger.warn?.(
-                `[${this.config.loggerTag}] Output pipeline warning: Premature close`,
-              );
-            }
-            return;
-          }
-          this.config.logger.error?.(
-            `[${this.config.loggerTag}] Output pipeline failed: ${err.message}`,
-          );
-          this.emit("error", err);
-          this._finalize(err);
+
+    let isPCM = false;
+    let sampleRate = 44100;
+    let bits = 16;
+    let channels = 2;
+
+    const args = this.getFullArgs();
+    for (let i = 0; i < args.length; ++i) {
+      if (args[i] === "-f" && typeof args[i + 1] === "string") {
+        const fmt = args[i + 1];
+        if (
+          /^s(8|16|24|32)le$/.test(fmt) ||
+          /^f(32|64)le$/.test(fmt) ||
+          fmt === "s16be" ||
+          fmt === "f32be" ||
+          fmt === "f64be" ||
+          fmt === "u8" ||
+          fmt === "pcm_s16le" ||
+          fmt === "pcm_s16be" ||
+          fmt === "pcm_f32le" ||
+          fmt === "pcm_f32be" ||
+          fmt === "rawaudio" ||
+          fmt === "wav"
+        ) {
+          isPCM = true;
         }
-      });
+      }
+      if (args[i] === "-ar" && typeof args[i + 1] === "string") {
+        const s = parseInt(args[i + 1], 10);
+        if (s > 1000 && s < 384000) sampleRate = s;
+      }
+      if (args[i] === "-ac" && typeof args[i + 1] === "string") {
+        const c = parseInt(args[i + 1], 10);
+        if (c > 0 && c < 32) channels = c;
+      }
+      if (args[i] === "-sample_fmt" && typeof args[i + 1] === "string") {
+        if (/^s(8|16|24|32)/.test(args[i + 1])) {
+          bits = parseInt(args[i + 1].replace(/[^\d]/g, ""), 10);
+        }
+        if (/^f(32|64)/.test(args[i + 1])) {
+          bits = parseInt(args[i + 1].replace(/[^\d]/g, ""), 10);
+        }
+      }
     }
-    // Placeholder for extra outputs (pipe:2, etc.)
-    // for (const {} of this.extraOutputs) {} // Not implemented
+
+    const onPipelineError = (err: Error | null) => {
+      if (!err) return;
+      if (
+        err.message &&
+        /premature close/i.test(err.message) &&
+        (this.hasFinished ||
+          this.isTerminating ||
+          this.config.suppressPrematureCloseWarning)
+      ) {
+        return;
+      }
+      if (err.message && /premature close/i.test(err.message)) {
+        if (this.config.debug) {
+          this.config.logger.warn?.(
+            `[${this.config.loggerTag}] Output pipeline warning: Premature close`,
+          );
+        }
+        return;
+      }
+      this.config.logger.error?.(
+        `[${this.config.loggerTag}] Output pipeline failed: ${err.message}`,
+      );
+      this.emit("error", err);
+      this._finalize(err);
+    };
+
+    if (this.process.stdout) {
+      if (applyThrottlePCM && isPCM) {
+        const throttle = this._createRealtimeThrottleStream(sampleRate, bits, channels);
+        pipeline(this.process.stdout, throttle, this.outputStream, onPipelineError);
+      } else {
+        pipeline(this.process.stdout, this.outputStream, onPipelineError);
+      }
+    }
+
+    // TODO: Support extraOutputs as independent pipelines
 
     this.process.stderr?.on("data", (chunk) => this._handleStderr(chunk));
   }
 
-  /**
-   * Binds process exit/error/close events.
-   * @private
-   */
+  /** Bind process-level events for cleanup and reporting. */
   private _bindProcessEvents(): void {
     this.process?.once("exit", (code, signal) =>
       this._onProcessExit(code, signal),
@@ -394,10 +532,7 @@ export class Processor extends EventEmitter {
     });
   }
 
-  /**
-   * Handles and buffers stderr data for diagnostics and progress tracking.
-   * @private
-   */
+  /** Handles progress-parsing and stderr buffer management. */
   private _handleStderr(chunk: Buffer): void {
     const text = chunk.toString("utf-8");
     if (this.stderrBuffer.length < this.config.maxStderrBuffer) {
@@ -422,10 +557,7 @@ export class Processor extends EventEmitter {
     }
   }
 
-  /**
-   * Handles the process exit logic.
-   * @private
-   */
+  /** Handles process exit, cleans up, and emits appropriate events. */
   private _onProcessExit(
     code: number | null,
     signal: NodeJS.Signals | null,
@@ -450,8 +582,7 @@ export class Processor extends EventEmitter {
   }
 
   /**
-   * Formats process exit error with code, signal and last stderr snippet.
-   * @private
+   * Create an Error describing FFmpeg process exit with useful stderr output included.
    */
   private _getProcessExitError(
     code: number | null,
@@ -467,9 +598,8 @@ export class Processor extends EventEmitter {
   }
 
   /**
-   * Finalizes the process state, cleans up, and resolves/rejects as needed.
-   * @param error Error, if any
-   * @private
+   * Final cleanup: stop timeouts, release streams, resolve/reject the done promise.
+   * @param error - Error to reject with (optional; otherwise will resolve).
    */
   private _finalize(error?: Error): void {
     if (this.hasFinished) return;
@@ -484,8 +614,7 @@ export class Processor extends EventEmitter {
   }
 
   /**
-   * Cleans up streams used by this process.
-   * @private
+   * Cleanup resources/streams. Always called on process completion.
    */
   private _cleanup(): void {
     this.process?.stdout?.destroy();
@@ -497,13 +626,9 @@ export class Processor extends EventEmitter {
   }
 
   /**
-   * Parses a single line of FFmpeg progress output.
-   * @param line FFmpeg progress line
-   * @returns Progress object or null
-   * @private
-   * @example
-   * // frame=882 fps=28.94 ... time=00:00:29.43
-   * const progress = processor._parseProgress('frame=100 fps=45.0 ...');
+   * Attempts to parse a single FFmpeg progress line into a FFmpegProgress object.
+   * @param line - FFmpeg stderr output line.
+   * @returns Partial FFmpegProgress info (or null if no recognized keys).
    */
   private _parseProgress(line: string): Partial<FFmpegProgress> | null {
     const progress: Partial<FFmpegProgress> = {};
@@ -560,14 +685,12 @@ export class Processor extends EventEmitter {
   }
 
   /**
-   * Creates a Processor instance using argument bag.
-   * @param params Processor options, args, inputStreams
-   * @returns Processor
+   * Create a Processor instance with quick-style options for convenience.
+   *
    * @example
-   * const p = Processor.create({
-   *   args: ['-i', 'a.mp4', 'b.mp3'],
-   *   inputStreams: [{ stream: s, index: 0 }],
-   *   timeout: 5000,
+   * Processor.create({
+   *   args: ["-i", "input.mp3", ...],
+   *   options: { ffmpegPath: "/usr/bin/ffmpeg" }
    * });
    */
   static create(
