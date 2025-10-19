@@ -1,25 +1,9 @@
-import { AudioPluginBaseOptions, AudioPlugin } from "./Filters.js";
+import {
+  AudioPluginBaseOptions,
+  AudioPlugin,
+  PluginFactory,
+} from "../Types/index.js";
 import { FluentChain } from "./FluentChain.js";
-
-/**
- * Type of a factory function for creating plugin instances.
- * @template Options - The type of options accepted by the plugin.
- *
- * @example
- * ```ts
- * interface GainOptions extends AudioPluginBaseOptions {
- *   gain: number;
- * }
- *
- * class GainPlugin implements AudioPlugin<GainOptions> { ... }
- *
- * const registry = new PluginRegistry();
- * registry.register("gain", (opts) => new GainPlugin(opts));
- * ```
- */
-export type PluginFactory<
-  Options extends AudioPluginBaseOptions = AudioPluginBaseOptions,
-> = (options: Required<Options>) => AudioPlugin<Options>;
 
 /**
  * Registry for registering and managing audio plugins.
@@ -28,14 +12,14 @@ export type PluginFactory<
  * @example <caption>Registering and using plugins</caption>
  * ```ts
  * import { PluginRegistry } from "./PluginRegistry";
- * 
+ *
  * // Assume GainPlugin and CompressorPlugin are implemented AudioPlugin classes.
  * registry.register("gain", (opts) => new GainPlugin(opts));
  * registry.register("compressor", (opts) => new CompressorPlugin(opts));
- * 
+ *
  * // Create a plugin instance directly
  * const gain = registry.create("gain", { sampleRate: 44100, channels: 2, gain: 1.25 });
- * 
+ *
  * // Compose a chain of plugins
  * const chain = registry.chain(
  *   { name: "gain", options: { gain: 1.5 } },
@@ -61,7 +45,9 @@ export class PluginRegistry {
     factory: PluginFactory<Options>,
   ): void {
     if (this.registry.has(name)) {
-      console.warn(`Plugin with name "${name}" is already registered. Overwriting.`);
+      console.warn(
+        `Plugin with name "${name}" is already registered. Overwriting.`,
+      );
     }
     this.registry.set(name, factory as PluginFactory);
   }

@@ -1,166 +1,260 @@
-import { PassThrough, Readable } from "stream";
+import { PassThrough, Readable, Transform } from "stream";
 
-// ====================== Logger ======================
+// ====================== Logging ======================
+
 /**
- * Logger interface for handling debug, warning, and error messages.
+ * Logger interface for debugging, warnings, and errors.
  */
 export interface Logger {
-  /**
-   * Logs a debug message.
-   * @param message - The message to log
-   * @param meta - Optional metadata associated with the log
-   */
   debug(message: string, meta?: Record<string, any>): void;
-
-  /**
-   * Logs a warning message.
-   * @param message - The message to log
-   * @param meta - Optional metadata associated with the log
-   */
   warn(message: string, meta?: Record<string, any>): void;
-
-  /**
-   * Logs an error message.
-   * @param message - The message to log
-   * @param meta - Optional metadata associated with the log
-   */
   error(message: string, meta?: Record<string, any>): void;
 }
 
-// ====================== SimpleFFmpeg ======================
+// ====================== ProcessorOptions ======================
+
 /**
- * Options for configuring a SimpleFFmpeg instance.
+ * Base options for configuring ProcessorOptions and the Processor core.
  */
-export interface SimpleFFmpegOptions {
-  /** Path to the ffmpeg executable (default: "ffmpeg") */
+export interface ProcessorOptions {
+  /** Path to ffmpeg (default: "ffmpeg") */
   ffmpegPath?: string;
-  /** Whether to fail fast on errors (default: false) */
+  /** Abort on first critical error */
   failFast?: boolean;
-  /** Additional global ffmpeg arguments */
+  /** Extra global arguments for ffmpeg (e.g., -hide_banner) */
   extraGlobalArgs?: string[];
-  /** Maximum execution time in milliseconds (0 = no timeout) */
+  /** Max process runtime in ms (0 = unlimited) */
   timeout?: number;
-  /** Maximum buffer size for stderr (default: 1MB) */
+  /** Maximum stderr buffer size (default: 1MB) */
   maxStderrBuffer?: number;
-  /** Enable progress tracking via the "progress" event */
+  /** Enable progress tracking (emits "progress" event) */
   enableProgressTracking?: boolean;
-  /** Logger implementation */
+  /** Custom logger */
   logger?: Logger;
-  /** Tag used in log messages */
+  /** Logger tag for log messages */
   loggerTag?: string;
-  /** Optional abort signal to terminate the process */
+  /** AbortSignal for process cancellation */
   abortSignal?: AbortSignal;
-  /** Suppress warning for output pipeline "premature close" (treat as benign). */
+  /** Suppress logging of "premature close" warning */
   suppressPrematureCloseWarning?: boolean;
   /**
-   * Optional HTTP headers to pass to ffmpeg for network requests.
-   * Either an object of key-value pairs, or the raw string as accepted by ffmpeg.
+   * HTTP headers for network requests by ffmpeg (as object or string).
    */
   headers?: Record<string, string> | string;
 }
 
 /**
- * Represents the current progress state of an ffmpeg process, as parsed
- * from key-value updates from ffmpeg's progress output.
+ * Current progress state of the ffmpeg process.
  *
- * All fields are optional and may be missing depending on ffmpeg's output.
+ * All fields are optional and may not always be present.
  */
 export interface FFmpegProgress {
-  /** Number of frames processed so far */
+  /** Number of frames processed */
   frame?: number;
-  /** Current processing frames per second */
+  /** Processing frames per second */
   fps?: number;
-  /** Current output bitrate (e.g., "1700kbits/s") */
+  /** Current bitrate (e.g. "1700kbits/s") */
   bitrate?: string;
-  /** Total size of output file so far, in bytes */
+  /** Output file size in bytes */
   totalSize?: number;
   /** Output time in microseconds */
   outTimeUs?: number;
-  /** Output timestamp as a time string (e.g., "00:01:30.05") */
+  /** Output time as string ("00:01:30.05") */
   outTime?: string;
-  /** Number of duplicate frames detected */
+  /** Number of duplicated frames */
   dupFrames?: number;
   /** Number of dropped frames */
   dropFrames?: number;
-  /** Current processing speed (e.g., 1 = real time) */
+  /** Processing speed (e.g. 1 = realtime) */
   speed?: number;
-  /** Progress marker string ("continue", "end") */
+  /** Progress stage ("continue", "end") */
   progress?: string;
+  /** Output size (parsed in Processor.parseProgress) */
+  size?: string;
+  /** Output time (parsed in Processor.parseProgress) */
+  time?: string;
+  /** Current packet number (parsed in Processor.parseProgress) */
+  packet?: number;
+  /** Current chapter number (parsed in Processor.parseProgress) */
+  chapter?: number;
 }
 
 /**
- * Represents statistics about an ffmpeg process execution.
- *
- * @property {Date} startTime - The timestamp when the ffmpeg process started.
- * @property {Date} [endTime] - The timestamp when the ffmpeg process ended (optional).
- * @property {number} [duration] - The total duration of the ffmpeg process in milliseconds (optional).
- * @property {number} [exitCode] - The exit code returned by the ffmpeg process (optional).
- * @property {string} [signal] - The signal that caused the ffmpeg process to terminate, if any (optional).
- * @property {number} stderrLines - The number of lines output to stderr.
- * @property {number} bytesProcessed - The number of bytes processed during execution.
+ * Statistics about the ffmpeg process run.
  */
 export interface FFmpegStats {
-  /** The timestamp when the ffmpeg process started. */
   startTime: Date;
-  /** The timestamp when the ffmpeg process ended (optional). */
   endTime?: Date;
-  /** The total duration of the ffmpeg process in milliseconds (optional). */
   duration?: number;
-  /** The exit code returned by the ffmpeg process (optional). */
   exitCode?: number;
-  /** The signal that caused the ffmpeg process to terminate, if any (optional). */
   signal?: string;
-  /** The number of lines output to stderr. */
   stderrLines: number;
-  /** The number of bytes processed during execution. */
   bytesProcessed: number;
 }
 
 /**
- * Result returned from running ffmpeg.
+ * The result of the ffmpeg run.
  */
 export interface FFmpegRunResult {
-  /** Output stream of ffmpeg */
+  /** Main output stream (stdout) */
   output: PassThrough;
-  /** Promise that resolves when ffmpeg finishes */
+  /** Promise resolving when the process ends */
   done: Promise<void>;
-  /** Function to stop the ffmpeg process */
+  /** Function to stop the process */
   stop: () => void;
 }
 
 /**
- * Options for ffmpeg jobs that can take a string or stream as input.
+ * Options for an ffmpeg task supporting both string and stream inputs.
  */
-export interface StreamableFFmpegOptions extends SimpleFFmpegOptions {
-  /** Input source, either a file path or a readable stream */
+export interface StreamableFFmpegOptions extends ProcessorOptions {
   input?: string | Readable;
 }
 
 /**
- * Represents a single ffmpeg job in the manager queue.
+ * Representation of a single ffmpeg job in the queue.
  */
 export interface FFmpegJob {
-  /** Name of the job */
   name: string;
-  /** Options for the job */
   options: StreamableFFmpegOptions;
-  /** Callback invoked on successful completion */
   resolve: (result: FFmpegRunResult) => void;
-  /** Callback invoked on error */
   reject: (err: Error) => void;
 }
 
 /**
- * Configuration options for FFmpegManager.
+ * Configuration for the ffmpeg job manager.
  */
 export interface FFmpegManagerOptions {
+  /** Maximum number of allowed restarts */
   maxRestarts?: number;
-  /** Maximum number of concurrent ffmpeg jobs (default: 2) */
+  /** Maximum number of parallel ffmpeg jobs */
   concurrency?: number;
-  /** Logger implementation */
   logger?: Logger;
-  /** Number of retry attempts for failed jobs (default: 1) */
+  /** Number of retry attempts on failure */
   retry?: number;
-  /** Whether to automatically restart failed jobs (default: false) */
+  /** Whether to auto-restart jobs on failure */
   autoRestart?: boolean;
 }
+
+/**
+ * Basic options shared by all audio plugins.
+ * Can be extended in specific plugin implementations.
+ *
+ * @example <caption>Extending base options</caption>
+ * interface MyPluginOptions extends AudioPluginBaseOptions {
+ *   gain: number;
+ * }
+ *
+ * @example <caption>Using in a plugin registration</caption>
+ * const options: AudioPluginBaseOptions = { sampleRate: 44100, channels: 2 };
+ */
+export interface AudioPluginBaseOptions {
+  sampleRate?: number;
+  channels?: number;
+  [key: string]: any; // Allows plugins to accept additional custom options.
+}
+
+/**
+ * Generic interface for an audio plugin.
+ * Should be implemented by all custom audio plugin transforms.
+ *
+ * @template Options - Type of options specific to the plugin.
+ *
+ * @example <caption>Minimal custom plugin implementing AudioPlugin</caption>
+ * import { Transform } from "stream";
+ *
+ * interface GainOptions extends AudioPluginBaseOptions {
+ *   gain: number;
+ * }
+ *
+ * class GainPlugin implements AudioPlugin<GainOptions> {
+ *   readonly name = "gain";
+ *   private options: Required<GainOptions>;
+ *   constructor(opts: Required<GainOptions>) {
+ *     this.options = opts;
+ *   }
+ *   createTransform(options: Required<GainOptions>): Transform {
+ *     // Return a Transform that applies gain.
+ *     return new Transform({
+ *       transform(chunk, encoding, callback) {
+ *         // ... audio gain logic here ...
+ *         callback(null, chunk);
+ *       }
+ *     });
+ *   }
+ *   setOptions(options: Partial<GainOptions>): void {
+ *     this.options = { ...this.options, ...options };
+ *   }
+ *   getOptions(): Required<GainOptions> {
+ *     return this.options;
+ *   }
+ * }
+ */
+export interface AudioPlugin<
+  Options extends AudioPluginBaseOptions = AudioPluginBaseOptions,
+> {
+  /**
+   * Plugin name, used for registration and logging.
+   */
+  readonly name?: string;
+
+  /**
+   * Creates a Transform stream to process audio.
+   * Optional: If not implemented, the plugin must provide a "getTransform" method instead.
+   * @param options The complete set of options (with defaults applied).
+   * @returns {Transform} Stream for processing audio.
+   *
+   * @example
+   * const plugin = new GainPlugin({ gain: 2, sampleRate: 44100, channels: 2 });
+   * const audioTransform = plugin.createTransform
+   *   ? plugin.createTransform(plugin.getOptions())
+   *   : plugin.getTransform(); // fallback for plugins that only provide getTransform
+   */
+  createTransform?(options: Required<Options>): Transform;
+
+  /**
+   * (Legacy/compatibility) Some plugins may only provide getTransform().
+   * This method should be used as a fallback if createTransform is not present.
+   * @returns {Transform} Stream for processing audio.
+   */
+  getTransform?(): Transform;
+
+  /**
+   * Optional. Dynamically update plugin options "on the fly".
+   * @param options Partial set of options to update.
+   *
+   * @example
+   * plugin.setOptions({ gain: 1.5 });
+   */
+  setOptions?(options: Partial<Options>): void;
+
+  /**
+   * Optional. Get the plugin's current (complete) options.
+   * @returns {Required<Options>} The current full options object.
+   *
+   * @example
+   * const opts = plugin.getOptions();
+   * console.log(opts.sampleRate, opts.gain);
+   */
+  getOptions?(): Required<Options>;
+}
+
+/**
+ * Type of a factory function for creating plugin instances.
+ * @template Options - The type of options accepted by the plugin.
+ *
+ * @example
+ * ```ts
+ * interface GainOptions extends AudioPluginBaseOptions {
+ *   gain: number;
+ * }
+ *
+ * class GainPlugin implements AudioPlugin<GainOptions> { ... }
+ *
+ * const registry = new PluginRegistry();
+ * registry.register("gain", (opts) => new GainPlugin(opts));
+ * ```
+ */
+export type PluginFactory<
+  Options extends AudioPluginBaseOptions = AudioPluginBaseOptions,
+> = (options: Required<Options>) => AudioPlugin<Options>;
