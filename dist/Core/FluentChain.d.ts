@@ -3,50 +3,31 @@ import PluginRegistry from "./PluginRegistry.js";
 import { AudioPlugin } from "fluent-streamer";
 import { AudioPluginBaseOptions } from "../Types/index.js";
 /**
- * FluentChain
+ * Represents a chain of audio plugins, each implemented as a stream.Transform.
+ * Provides utilities for assembling, updating, and connecting plugin pipelines.
  *
- * Class for sequentially chaining multiple audio plugins as Transform streams.
+ * @template P AudioPlugin type (default: AudioPlugin)
  *
- * Features:
- * - Correct error handling, propagating errors to source and destination
- * - Safe chaining using pipeline()
- * - Dynamic chain updating via updatePlugins()
- * - Strong typing through generics (for plugin-specific usage)
- * - Optional async support for createTransform
+ * @example
+ * // Example: Create a chain of plugins and pipe a stream through them
+ * const registry = new PluginRegistry();
+ * registry.register("gain", (opts) => new GainPlugin(opts));
+ * registry.register("compressor", (opts) => new CompressorPlugin(opts));
  *
- * @template P Type of plugins used (for stricter typing)
+ * const chain = new FluentChain(
+ *   registry,
+ *   [
+ *     { name: "gain", options: { gain: 1.5 } },
+ *     { name: "compressor", options: { threshold: -10 } }
+ *   ],
+ *   { sampleRate: 44100, channels: 2 } // default options
+ * );
  *
- * @example <caption>Basic chaining with Buffers</caption>
- * ```ts
- * import { Readable, Writable } from "stream";
- * import { FluentChain } from "./FluentChain";
- * import PluginRegistry from "./PluginRegistry";
+ * chain.pipe(fs.createReadStream('in.wav'), fs.createWriteStream('out.wav'));
  *
- * const myRegistry = new PluginRegistry();
- * // Register plugins "gain", "compressor"
- * // ...
- * const chain = new FluentChain(myRegistry, [
- *   { name: "gain", options: { gain: 1.5 } },
- *   { name: "compressor", options: { threshold: -10 } }
- * ], { sampleRate: 48000, channels: 2, bitDepth: 16 });
- *
- * const source = Readable.from(Buffer.from([* ... PCM samples ... *]));
- * const dest = new Writable({ write(chunk, enc, cb) { * ... * cb(); } });
- * chain.pipe(source, dest);
- * ```
- *
- * @example <caption>Multi-input (Split streams)</caption>
- * For advanced use, implement fan-in/fan-out manually by piping to multiple chains:
- * ```ts
- * // See chain.pipe() signature for inspiration;
- * // You can create multiple chains and send data to each as needed.
- * ```
- *
- * @example <caption>As a Transform for pipeline()</caption>
- * ```ts
- * import { pipeline } from "stream";
- * pipeline(source, chain.getTransform(), destination, err => { ... });
- * ```
+ * @example
+ * // Example: Asynchronously build chain with plugins returning promises
+ * await chain.buildChainAsync();
  */
 export declare class FluentChain<P extends AudioPlugin = AudioPlugin> {
     private registry;
@@ -55,103 +36,80 @@ export declare class FluentChain<P extends AudioPlugin = AudioPlugin> {
     private transforms;
     private controllers;
     /**
-     * Create a new plugin chain.
-     * @param registry Plugin registry with available plugins
-     * @param pluginConfigs Array of { name, options }
-     * @param defaultOptions Default options for all plugins in the chain
+     * Construct a FluentChain of plugins.
+     * @param registry The PluginRegistry instance.
+     * @param pluginConfigs Array of plugins to use in the chain, each with a name and optional options.
+     * @param defaultOptions Default options applied to each plugin (overridden by pluginConfigs options).
      */
     constructor(registry: PluginRegistry, pluginConfigs: Array<{
         name: string;
         options?: Partial<AudioPluginBaseOptions>;
     }>, defaultOptions: Required<AudioPluginBaseOptions>);
     /**
-     * Create or rebuild the plugin chain.
-     * Supports both sync and async createTransform functions.
-     * If any plugin uses an async createTransform, use buildChainAsync() instead.
+     * Build/rebuild the plugin chain synchronously.
+     * Throws if a plugin is missing or does not return a valid Transform.
+     * For async plugins (e.g. using async createTransform), use buildChainAsync().
      * @private
      */
     private buildChain;
     /**
-     * Asynchronously build (or rebuild) the plugin chain.
-     * Call this if you know your plugins use async createTransform methods.
+     * Asynchronously build/rebuild the plugin chain.
+     * Used for plugins whose createTransform returns a Promise.
      *
-     * @returns {Promise<void>}
+     * @returns Promise<void>
+     * @throws If a plugin is missing or does not return a valid Transform.
      *
      * @example
-     * ```ts
      * await chain.buildChainAsync();
-     * ```
      */
     buildChainAsync(): Promise<void>;
     /**
-     * Update the plugin chain with a new set of plugins and/or options without recreating the FluentChain instance.
+     * Update the plugin chain with a new list of plugin configurations.
+     * Chain will be rebuilt synchronously.
      *
-     * @param pluginConfigs New array of {name, options}
+     * @param pluginConfigs Array of plugin descriptors { name, options }
      *
      * @example
-     * ```ts
      * chain.updatePlugins([
-     *   { name: "newPlugin", options: { ... } },
-     *   { name: "anotherPlugin" }
+     *   { name: "normalize" },
+     *   { name: "limiter", options: { threshold: -3 } }
      * ]);
-     * ```
      */
     updatePlugins(pluginConfigs: Array<{
         name: string;
         options?: Partial<AudioPluginBaseOptions>;
     }>): void;
     /**
-     * Pipe through the entire plugin chain, connecting source → ...transforms... → destination.
+     * Pipe a source stream through the plugin chain to a destination.
+     * Any errors on transforms are forwarded to both source and destination.
      *
-     * - All transform errors are propagated to both source and destination.
-     * - The pipeline is safely closed on error.
-     *
-     * @param source {Readable} The source readable stream (e.g., Readable.from(Buffer))
-     * @param destination {Writable} Any writable stream (stdout, File, PassThrough, etc.)
+     * @param source Readable stream (input)
+     * @param destination Writable stream (output)
      *
      * @example
-     * ```ts
-     * const chain = new FluentChain(...);
-     * chain.pipe(
-     *   Readable.from(Buffer.from([* PCM data *])),
-     *   fs.createWriteStream("out.raw")
-     * );
-     * ```
+     * chain.pipe(fs.createReadStream("input.wav"), fs.createWriteStream("output.wav"));
      */
     pipe(source: Readable, destination: Writable): void;
     /**
-     * Get a single consolidated Transform stream for the entire chain.
+     * Get a duplex Transform for the entire plugin chain.
+     * If no plugins, returns PassThrough; if one, returns its transform,
+     * else wires all transforms together and wraps ends with a PassThrough.
      *
-     * - Use chain.getTransform() in a pipeline, and data piped in will be processed sequentially through all plugins.
-     * - Returns a PassThrough if there are no plugins; returns the first plugin's transform if there's only one.
-     *
-     * All plugin errors are re-emitted on the returned Transform.
-     *
-     * @returns {Transform} A transform stream combining all plugins.
+     * @returns Duplex Transform stream for use in piping (`.pipe(chain.getTransform()).pipe(...)`).
      *
      * @example
-     * ```ts
-     * import { pipeline } from "stream";
-     * pipeline(
-     *   Readable.from(Int16Array),
-     *   chain.getTransform(),
-     *   fs.createWriteStream("output.raw"),
-     *   err => { if (err) console.error(err); }
-     * );
-     * ```
+     * const duplex = chain.getTransform();
+     * fs.createReadStream("input.wav").pipe(duplex).pipe(fs.createWriteStream("output.wav"));
      */
     getTransform(): Transform;
     /**
-     * Get the array of plugin controller instances.
-     * Use this for runtime parameter change, plugin introspection, etc.
+     * Get the instantiated plugin controllers in order.
      *
-     * @returns {P[]} Array of plugin controller instances.
+     * @returns Array of plugin instances (controllers)
      *
      * @example
-     * ```ts
      * const controllers = chain.getControllers();
-     * controllers[0].setGain?.(2.0);
-     * ```
+     * controllers.forEach(ctrl => ctrl.setBypass(true));
      */
     getControllers(): P[];
 }

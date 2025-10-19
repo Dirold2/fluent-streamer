@@ -4,6 +4,8 @@ import { PassThrough, Readable, Transform } from "stream";
  */
 export interface Logger {
     debug(message: string, meta?: Record<string, any>): void;
+    info(message: string, meta?: Record<string, any>): void;
+    log(message: string, meta?: Record<string, any>): void;
     warn(message: string, meta?: Record<string, any>): void;
     error(message: string, meta?: Record<string, any>): void;
 }
@@ -25,6 +27,8 @@ export interface ProcessorOptions {
     enableProgressTracking?: boolean;
     /** Custom logger */
     logger?: Logger;
+    /** Debug logger */
+    debug?: boolean;
     /** Logger tag for log messages */
     loggerTag?: string;
     /** AbortSignal for process cancellation */

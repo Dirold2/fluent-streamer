@@ -2,39 +2,37 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const stream_1 = require("stream");
 /**
- * PluginHotSwap
+ * @class PluginHotSwap
+ * @extends Transform
  *
- * Advanced hot-swappable Transform chain for audio/video plugin pipelines.
+ * @classdesc
+ * A hot-swappable Transform stream, designed for dynamically replacing the internal plugin
+ * pipeline (another Transform stream, or a chain of them) in an audio/video processing flow
+ * at runtime, without losing data or requiring a pipeline reset.
  *
- * Allows runtime (hot) replacement of the internal Transform stream (plugin or chain of plugins),
- * with minimal or zero pause in streaming (soft swap), or instant replace (hard swap).
- * Designed to safely switch audio/video plugin pipelines in Node.js, preserving stream
- * state and ensuring compatibility with Node.js Transform contracts.
+ * It supports two types of swap:
+ *  - Soft swap (default): Seamless handoff with minimal/no pause; both old and new process data briefly.
+ *  - Hard swap: Immediately destroys the old, swaps in the new without extra coordination.
  *
- * **Features:**
- * - Hot (runtime) plugin swap (soft/hard variants)
- * - Zero-pause data flow with soft swap (seamless handoff)
- * - State transfer between compatible plugin transforms
- * - Safe listener attach/detach to prevent memory/resource leaks
- * - Full compatibility with Node.js streams
+ * Safely manages stream listeners to prevent memory/resource leaks and ensures all event
+ * forwarding is handled cleanly.
  *
- * @example <caption>Basic usage</caption>
+ * @example <caption>Basic Usage (soft swap, default)</caption>
  * ```ts
  * import PluginHotSwap from "./PluginHotSwap";
- * const transform1 = plugin1.createTransform();
- * const transform2 = plugin2.createTransform();
+ * const chainA = pluginA.createTransform();
+ * const chainB = pluginB.createTransform();
  *
- * const hotSwap = new PluginHotSwap(transform1);
+ * const hotSwap = new PluginHotSwap(chainA);
+ * input.pipe(hotSwap).pipe(output);
  *
- * someInputStream.pipe(hotSwap).pipe(someOutputStream);
- *
- * // Swap in a new plugin pipeline at runtime (soft swap - default)
- * await hotSwap.swap(transform2);
+ * // At runtime, hot-swap the plugin chain
+ * await hotSwap.swap(chainB);
  * ```
  *
- * @example <caption>Hard swap (immediate replacement)</caption>
+ * @example <caption>Hard swap (instant replace)</caption>
  * ```ts
- * await hotSwap.swap(transform3, { soft: false });
+ * await hotSwap.swap(chainC, { soft: false });
  * ```
  */
 class PluginHotSwap extends stream_1.Transform {
@@ -43,183 +41,181 @@ class PluginHotSwap extends stream_1.Transform {
     swapping = false;
     destroyed = false;
     /**
-     * Construct a PluginHotSwap instance.
-     * @param initial The initial Transform stream (plugin chain) to use.
-     *
-     * @example
-     * ```ts
-     * const transform = myPlugin.createTransform();
-     * const hotSwap = new PluginHotSwap(transform);
-     * ```
+     * Create a new PluginHotSwap.
+     * @param initial The initial Transform stream (plugin or pipeline).
      */
     constructor(initial) {
         super();
         this.current = initial;
-        this.link(this.current);
+        this.attach(this.current);
     }
     /**
-     * Internally attach stream events from the given chain to the outer PluginHotSwap.
-     * Ensures 'data', 'error', and 'end' events are propagated or handled properly.
+     * Attach necessary listeners to the provided Transform to properly forward output
+     * and error events.
      * @private
+     * @param chain Transform to attach.
      */
-    link(chain) {
+    attach(chain) {
         chain.on("data", (chunk) => {
             if (!this.push(chunk))
                 chain.pause();
         });
-        chain.on("error", (err) => this.emit("error", err));
-        chain.on("end", () => {
+        chain.once("error", (err) => this.emit("error", err));
+        chain.once("end", () => {
             if (!this.swapping)
                 this.push(null);
         });
     }
     /**
-     * Detach all event listeners for the given Transform,
-     * preventing memory/resource leaks when swapping.
+     * Remove only our attached event listeners from a Transform.
+     * Does not tamper with user listeners.
      * @private
+     * @param chain Transform to detach.
      */
-    unlink(chain) {
+    detach(chain) {
         chain.removeAllListeners("data");
         chain.removeAllListeners("error");
         chain.removeAllListeners("end");
     }
     /**
-     * Internal stream transform logic.
-     * Forwards writes to the current or both current and next (during swap) transforms.
-     * @private
+     * @inheritdoc
+     * Handles main transform logic, forwarding data to the current and (when swapping)
+     * next transform. Ensures at-most-once callback for each written chunk.
      */
-    _transform(chunk, _enc, cb) {
+    _transform(chunk, encoding, callback) {
         if (this.next && this.swapping) {
-            // During soft swap: write to both next and current
-            this.next.write(chunk);
-            this.current.write(chunk, _enc, cb);
+            // During a soft swap, feed both transforms to pre-warm next
+            this.next.write(chunk, encoding);
+            this.current.write(chunk, encoding, callback);
         }
         else {
-            if (!this.current.write(chunk)) {
-                this.current.once("drain", cb);
+            // Ensure 'drain' is respected for proper backpressure
+            if (!this.current.write(chunk, encoding)) {
+                this.current.once("drain", callback);
             }
-            else
-                cb();
+            else {
+                callback();
+            }
         }
     }
     /**
-     * Called when stream end is requested; forwards to internal Transform.
-     * @private
+     * @inheritdoc
+     * Forwards end/flush call to the current Transform.
      */
-    _flush(cb) {
-        this.current.end(cb);
+    _flush(callback) {
+        this.current.end(callback);
     }
     /**
-     * Swap the internal Transform to a new plugin chain, at runtime.
+     * Hot-swap to a new internal Transform plugin/pipeline.
      *
-     * - If soft swap (`opts.soft !== false`): does a seamless handoff between the current and new plugin chain,
-     *   with essentially no lost or repeated data.
-     * - If hard swap (`opts.soft === false`): immediately replaces and destroys the current transform.
-     * - If the plugin transforms are "compatible" (see below),
-     *   the new state's options are migrated before the swap.
+     * If the two chains are compatible (same class, support options transfer),
+     * it performs a fast options/state sync and does not actually replace the stream.
      *
-     * @param newChain The new Transform to swap in.
-     * @param opts Options for swap:
-     *   - soft: If true (default), perform a seamless handoff (soft swap). If false, instantly destroy and replace (hard swap).
+     * Soft swap (default) hands off to the new transform smoothly before removing the old.
+     * Hard swap instantly destroys the old one.
      *
+     * @param newChain The new Transform to use.
+     * @param [opts] Swap options.
+     * @param [opts.soft=true] Whether to use soft swapping (default=true).
      * @returns Promise<void>
-     * @example <caption>Soft (default) swap:</caption>
+     *
+     * @example
      * ```ts
-     * await hotSwap.swap(newTransform);
-     * ```
-     * @example <caption>Hard swap:</caption>
-     * ```ts
-     * await hotSwap.swap(newTransform, { soft: false });
+     * await hotSwap.swap(newTransform); // soft swap (smooth handoff)
+     * await hotSwap.swap(otherTransform, { soft: false }); // hard swap (instant replace)
      * ```
      */
     async swap(newChain, opts = {}) {
         if (this.destroyed)
             return;
         const soft = opts.soft ?? true;
-        // Reuse compatible plugin by transferring options/state.
-        if (this.isCompatible(this.current, newChain)) {
-            this.applyState(this.current, newChain);
+        // Fast state sync without stream replace if compatible
+        if (this.areCompatible(this.current, newChain)) {
+            this.copyState(this.current, newChain);
             return;
         }
         if (!soft) {
-            this.hardSwap(newChain);
+            this.performHardSwap(newChain);
             return;
         }
-        // Soft swap: smooth handoff
+        // Soft swap process
         this.swapping = true;
         this.next = newChain;
-        this.link(this.next);
-        // After current tick, update to the new chain and clean up previous.
+        this.attach(this.next);
         setImmediate(() => {
             const old = this.current;
             this.current = this.next;
             this.next = undefined;
-            this.unlink(old);
+            this.detach(old);
             old.end();
             this.swapping = false;
         });
     }
     /**
-     * Immediately replace and destroy the current Transform (hard swap).
-     * Used for forced, fast plugin pipeline replacements.
-     *
-     * @param newChain The new Transform to swap in.
+     * Instantly swap out the current Transform for a new one (hard swap).
      * @private
+     * @param newChain The new Transform.
      */
-    hardSwap(newChain) {
+    performHardSwap(newChain) {
         const old = this.current;
-        this.unlink(old);
+        this.detach(old);
         old.destroy();
         this.current = newChain;
-        this.link(this.current);
+        this.attach(this.current);
     }
     /**
-     * Determine if two plugin Transform chains are compatible for a fast state transfer swap.
-     * This checks that they are of the same class and support getOptions/setOptions APIs.
-     *
-     * @param a Current Transform
-     * @param b New Transform
-     * @returns true if compatible, otherwise false.
+     * Determine if two Transforms are compatible for a fast state-only swap.
+     * Currently checks constructor and getOptions/setOptions methods.
      * @private
+     * @param a First transform
+     * @param b Second transform
+     * @returns {boolean}
      */
-    isCompatible(a, b) {
+    areCompatible(a, b) {
         return (a.constructor === b.constructor &&
             typeof a.setOptions === "function" &&
             typeof b.getOptions === "function");
     }
     /**
-     * Transfers options/state between two compatible plugin transforms.
-     * Calls source.getOptions() and applies via target.setOptions().
-     *
-     * @param target Transform to set state on (existing).
-     * @param source Transform to get state from (new).
+     * Synchronize options/state from source to the target transform, if possible.
      * @private
+     * @param target Transform to apply state
+     * @param source Transform to read state from
      */
-    applyState(target, source) {
+    copyState(target, source) {
         if (typeof source.getOptions === "function" &&
             typeof target.setOptions === "function") {
-            const opts = source.getOptions();
-            target.setOptions(opts);
+            try {
+                const opts = source.getOptions();
+                target.setOptions(opts);
+            }
+            catch (e) {
+                // If option transfer goes wrong, do nothing but avoid crash
+            }
         }
     }
     /**
-     * Destroy this PluginHotSwap instance and all internal resources and streams.
-     * Safely detaches/destroys any underlying plugin transforms.
-     *
-     * @param err Optional error to emit with the destroy operation.
+     * Destroy this PluginHotSwap instance and all internal transforms.
+     * Idempotent. Unwires listeners and frees resources.
+     * @param err Optional error
      * @returns this
      *
-     * @example <caption>Manual destruction</caption>
+     * @example
      * ```ts
      * hotSwap.destroy();
      * ```
      */
     destroy(err) {
+        if (this.destroyed)
+            return this;
         this.destroyed = true;
-        this.unlink(this.current);
+        this.detach(this.current);
         this.current.destroy();
-        this.next?.destroy();
-        return super.destroy(err);
+        if (this.next) {
+            this.detach(this.next);
+            this.next.destroy();
+        }
+        return super.destroy(err ?? undefined);
     }
 }
 exports.default = PluginHotSwap;
