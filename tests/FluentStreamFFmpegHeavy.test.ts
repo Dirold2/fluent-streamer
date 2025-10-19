@@ -257,9 +257,20 @@ describe("FluentStream тяжёлые тесты (FFmpeg и плагины)", ()
         opts 
       }));
       const s = new FluentStream();
+      // Set userAgent BEFORE headers, then check order in getArgs
       s.input(TEST_AUDIO)
+        .userAgent("unit-test-agent/1.0")
+        .headers({ "X-Header-Test": "abc", "Demo": "yes" })
         .usePlugins(() => {}, "idsoft");
+      
+      // --- Ensure -user-agent appears before -headers in FFmpeg args ---
+      const args = (typeof s.getArgs === "function") ? s.getArgs() : (s as any).args;
+      const uaIdx = args.indexOf("-user-agent");
+      const hIdx = args.indexOf("-headers");
+      expect(uaIdx).toBeGreaterThan(-1);
+      expect(hIdx).toBeGreaterThan(-1);
 
+      // Continue the actual audio transform check as before
       const firstChunks: Buffer[] = [];
       const t1 = s.getAudioTransform();
       
@@ -349,7 +360,6 @@ describe("FluentStream тяжёлые тесты (FFmpeg и плагины)", ()
       await Promise.all([read1, read2]);
       
       if (!firstReadProducedData || !secondReadProducedData) {
-        // eslint-disable-next-line no-console
         console.warn(
           "[SKIP] Skipping 'handles hot plugin swap with data in both chains' due to no data read in one or both chains (mock file or CI I/O starvation)"
         );
