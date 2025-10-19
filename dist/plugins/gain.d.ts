@@ -1,4 +1,4 @@
-import { AudioPlugin, AudioPluginBaseOptions } from "src/Core";
+import { AudioPlugin, AudioPluginBaseOptions } from "src/Types/index.js";
 import { Transform } from "stream";
 export interface GainPluginOptions extends AudioPluginBaseOptions {
     gain: number;

@@ -1,305 +1,400 @@
-import { EventEmitter } from "eventemitter3";
-import { type Readable, Transform } from "stream";
-import { type AudioPlugin, type AudioPluginBaseOptions } from "./Filters.js";
+import { EventEmitter } from "node:events";
+import { Readable, Transform } from "node:stream";
 import PluginRegistry from "./PluginRegistry.js";
-import { type SimpleFFmpegOptions, type FFmpegRunResult } from "../Types/index.js";
-type EncoderBuilder = (encoder: FluentStream) => void;
+import { type FFmpegRunResult, type ProcessorOptions, type AudioPluginBaseOptions, type AudioPlugin } from "../Types/index.js";
 /**
- * The FluentStream class provides a convenient, fluent API wrapper around a low-level `Processor` for working with FFmpeg.
- * Allows you to easily configure FFmpeg commands, manage inputs/outputs, and build advanced audio processing pipelines using plugins.
- * Supports building complex transcoding and media processing pipelines through chained methods, including handling user-defined audio plugins.
- *
- * @example <caption>Basic file conversion</caption>
- * const stream = new FluentStream()
- *   .input("input.mp3")
- *   .audioCodec("aac")
- *   .audioBitrate("192k")
- *   .output("output.aac");
- *
- * const { output, done } = stream.run();
- * output.pipe(fs.createWriteStream("output.aac"));
- * await done;
- *
- * @example <caption>Using audio effect plugins</caption>
- * // Register a custom plugin
- * FluentStream.registerPlugin("gain", opts => new GainPlugin(opts));
- *
- * // Using a registered plugin
- * const stream = new FluentStream()
- *   .input(fs.createReadStream("raw.wav"))
- *   .usePlugins(
- *     enc => enc.audioCodec("aac").output("final.m4a"),
- *     { name: "gain", options: { gainDb: 6 } }
- *   );
- *
- * const { output, done } = stream.run();
- * output.pipe(fs.createWriteStream("final.m4a"));
- * await done;
- *
- * @example <caption>Dynamically update plugins during processing</caption>
- * await stream.updatePlugins({ name: "compressor", options: { threshold: -20 } });
- *
- * @see run
+ * Plugin configuration object or string identifier.
  */
-export declare class FluentStream extends EventEmitter {
-    private static _globalRegistry;
-    private static HUMANITY_HEADER;
+export type PluginConfig = string | {
+    name: string;
+    options?: Partial<AudioPluginBaseOptions>;
+};
+/**
+ * Encoder builder function signature.
+ */
+export type EncoderBuilder = (encoder: FluentStream) => void;
+/**
+ * FluentStream: main fluent API for building FFmpeg pipelines.
+ * Supports plugins, advanced chains, and hot plugin swapping.
+ *
+ * @example
+ * // Basic usage:
+ * const fs = new FluentStream();
+ * fs.input("input.mp3")
+ *   .audioCodec("aac")
+ *   .output("output.aac")
+ *   .run();
+ */
+export default class FluentStream extends EventEmitter {
+    static registry: PluginRegistry;
+    static _globalRegistry: PluginRegistry | null;
+    static HUMANITY_HEADER: {
+        "X-Human-Intent": string;
+        "X-Request-Attention": string;
+        "User-Agent": string;
+    };
+    /**
+     * Returns the global (singleton) plugin registry.
+     *
+     * @example
+     * FluentStream.globalRegistry.register("myPlugin", myFactory);
+     */
     static get globalRegistry(): PluginRegistry;
     /**
-     * Register a plugin for later use by name across all FluentStream instances.
-     * @param name Plugin name.
-     * @param factory Factory function to create a plugin instance given options.
+     * Registers a plugin globally for all FluentStream instances.
+     *
+     * @param name The plugin name.
+     * @param factory Factory function returning a plugin instance.
      * @example
-     * FluentStream.registerPlugin("normalize", opts => new NormalizePlugin(opts));
+     * FluentStream.registerPlugin("custom", opts => new CustomPlugin(opts));
      */
     static registerPlugin<O extends AudioPluginBaseOptions>(name: string, factory: (options: Required<O>) => AudioPlugin<O>): void;
     /**
-     * Check if a plugin is registered globally by name.
+     * Checks if a plugin is registered in the global registry.
+     *
      * @param name Plugin name.
-     * @returns true if the plugin is registered globally.
+     * @returns true if plugin exists.
+     * @example
+     * if (FluentStream.hasPlugin("loudnorm")) { ... }
      */
     static hasPlugin(name: string): boolean;
     /**
-     * Clear all globally registered plugins.
+     * Clears all plugins from the global registry.
+     * @example
+     * FluentStream.clearPlugins();
      */
     static clearPlugins(): void;
     private args;
     private inputStreams;
     private complexFilters;
-    readonly options: SimpleFFmpegOptions;
+    readonly options: ProcessorOptions;
+    private _headers;
     private audioTransform;
     private pluginHotSwap;
     private pcmOptions;
     private encoderBuilder;
-    private _pluginControllers;
+    private pluginControllers;
     /**
-     * FluentStream constructor.
-     * @param options Optional configuration for the FFmpeg/Processor.
+     * Creates a new FluentStream instance.
+     * @param options Optional processor options. You can specify a `headers` key to override default headers.
+     *
+     * @example
+     * const fs = new FluentStream({ failFast: true });
      */
-    constructor(options?: SimpleFFmpegOptions);
-    getAudioTransform(): Transform;
+    constructor(options?: ProcessorOptions);
+    /**
+     * Sets custom HTTP headers to be used for the ffmpeg process.
+     * Overrides any headers configured in constructor or set before.
+     * If headers is undefined or null, default FluentStream.HUMANITY_HEADER will be used.
+     *
+     * @param headers Object with header fields, or undefined/null to use default.
+     * @returns this
+     * @example
+     * fs.setHeaders({'Authorization': 'Bearer ...'})
+     */
+    setHeaders(headers?: Record<string, string> | null): this;
+    /**
+     * Returns the headers that will be used for the ffmpeg process.
+     * Will return either custom, empty, or default headers.
+     *
+     * @returns A copy of the HTTP headers.
+     * @example
+     * const headers = fs.getHeaders();
+     */
+    getHeaders(): Record<string, string>;
+    /**
+     * Resets this FluentStream instance's state for re-use.
+     * Keeps any custom headers.
+     *
+     * @example
+     * fs.clear();
+     */
     clear(): void;
     /**
-     * Add an input file or stream to the FFmpeg command.
-     * Multiple calls allowed for files (only one for streams).
-     * Throws if called after .usePlugins().
-     * @param input File path or a Readable stream.
+     * Adds an input for the ffmpeg process. Supports file path or stream.
+     * Must be called before plugins are used.
+     *
+     * @param input Input file path or readable stream.
+     * @returns this
      * @example
-     * stream.input("input.mp3");
-     * stream.input(fs.createReadStream("foo.wav"));
+     * fs.input("audio.mp3")
+     *    .input(fs.createReadStream('track.wav'));
      */
     input(input: string | Readable): this;
     /**
-     * Set the output file for FFmpeg.
-     * @param output Output file path.
+     * Adds an output for the ffmpeg process.
+     *
+     * @param output Output file path, writable stream, numeric fd, or undefined/null for stdout.
+     * @returns this
      * @example
-     * stream.output("output.mp3")
+     * fs.output("output.wav")
+     * fs.output(1) // for stdout
      */
-    output(output: string): this;
+    output(output: string | Readable | number | undefined | null): this;
     /**
-     * Add global FFmpeg options (before inputs).
-     * @param opts Array of FFmpeg options (e.g. "-hide_banner", "-y").
+     * Adds global ffmpeg options (before all input/output).
+     *
+     * @param opts One or more ffmpeg arguments.
+     * @returns this
      * @example
-     * stream.globalOptions("-y", "-hide_banner");
+     * fs.globalOptions('-hide_banner', '-loglevel', 'error')
      */
     globalOptions(...opts: string[]): this;
     /**
-     * Add FFmpeg options for the last input.
-     * @param opts Options for the corresponding input (e.g. "-ss", "30").
+     * Adds input options (must be before the last -i).
+     *
+     * @param opts One or more ffmpeg arguments.
+     * @returns this
      * @example
-     * stream.inputOptions("-ss", "10");
+     * fs.inputOptions('-ss', '5')
      */
     inputOptions(...opts: string[]): this;
     /**
-     * Add FFmpeg output options.
-     * @param opts Output options (e.g. "-map", "0:a").
+     * Adds output options after all outputs.
+     *
+     * @param opts One or more ffmpeg arguments.
+     * @returns this
      * @example
-     * stream.outputOptions("-map", "0:a");
+     * fs.outputOptions('-movflags', 'faststart')
      */
     outputOptions(...opts: string[]): this;
     /**
-     * Set the video codec.
-     * Skips if codec is falsy/empty.
-     * @param codec Codec name (e.g. "libx264").
+     * Sets the video codec to use.
+     *
+     * @param codec Video codec name.
+     * @returns this
      * @example
-     * stream.videoCodec("libx264")
+     * fs.videoCodec('libx264')
      */
     videoCodec(codec: string): this;
     /**
-     * Set the audio codec.
-     * Skips if codec is falsy/empty.
-     * @param codec Audio codec name (e.g. "aac").
+     * Sets the audio codec to use.
+     *
+     * @param codec Audio codec name.
+     * @returns this
      * @example
-     * stream.audioCodec("aac")
+     * fs.audioCodec('aac')
      */
     audioCodec(codec: string): this;
     /**
-     * Set the video bitrate.
-     * @param bitrate Bitrate string (e.g. "1M").
+     * Sets the video bitrate.
+     *
+     * @param bitrate Bitrate string, e.g., "1000k"
+     * @returns this
      * @example
-     * stream.videoBitrate("1M")
+     * fs.videoBitrate('1200k')
      */
     videoBitrate(bitrate: string): this;
     /**
-     * Set the audio bitrate.
-     * @param bitrate Bitrate string (e.g. "192k").
+     * Sets the audio bitrate.
+     *
+     * @param bitrate Bitrate string, e.g., "192k"
+     * @returns this
      * @example
-     * stream.audioBitrate("192k")
+     * fs.audioBitrate('192k')
      */
     audioBitrate(bitrate: string): this;
     /**
-     * Specify the output format for FFmpeg.
-     * Calling multiple times replaces the previous format.
-     * @param format Format string (e.g. "mp3").
+     * Sets the output format.
+     *
+     * @param format Format name, e.g. "mp3"
+     * @returns this
      * @example
-     * stream.format("mp3")
+     * fs.format('flac')
      */
     format(format: string): this;
     /**
-     * Set the duration limit.
-     * @param time Time in seconds or FFmpeg time string (e.g. "00:00:30").
+     * Sets a maximum duration (seconds or time string).
+     *
+     * @param time Duration (e.g. 120, "00:02:00")
+     * @returns this
      * @example
-     * stream.duration(20)
-     * stream.duration("00:01:10")
+     * fs.duration(60)
      */
     duration(time: string | number): this;
     /**
-     * Disable video stream in the output.
+     * Disables video streams in the output.
+     *
+     * @returns this
      * @example
-     * stream.noVideo()
+     * fs.noVideo()
      */
     noVideo(): this;
     /**
-     * Disable audio stream in the output.
+     * Disables audio streams in the output.
+     *
+     * @returns this
      * @example
-     * stream.noAudio();
+     * fs.noAudio()
      */
     noAudio(): this;
     /**
-     * Set the audio sample rate.
-     * @param freq Sample rate (e.g. 44100)
+     * Sets audio sample rate (frequency).
+     *
+     * @param freq Frequency e.g. 44100
+     * @returns this
      * @example
-     * stream.audioFrequency(48000)
+     * fs.audioFrequency(48000)
      */
     audioFrequency(freq: number): this;
     /**
-     * Copy all codecs without transcoding.
-     * Ensures only one "-c copy" is present.
+     * Sets number of audio channels.
+     *
+     * @param channels Number of channels e.g. 2
+     * @returns this
      * @example
-     * stream.copyCodecs()
+     * fs.audioChannels(2)
+     */
+    audioChannels(channels: number): this;
+    /**
+     * Use codec copy mode for all streams.
+     *
+     * @returns this
+     * @example
+     * fs.copyCodecs()
      */
     copyCodecs(): this;
     /**
-     * Allow overwriting the output file (-y).
+     * Adds one or more complex filter graphs.
+     *
+     * @param graph String or array of filter graph strings.
+     * @returns this
      * @example
-     * stream.overwrite()
-     */
-    overwrite(): this;
-    /**
-     * Use FFmpeg -map to map input streams to output.
-     * @param label Map label string.
-     * @example
-     * stream.map("0:a:0")
-     */
-    map(label: string): this;
-    /**
-     * Seek to a specified input time using -ss.
-     * @param time Time in seconds or FFmpeg time string.
-     * @example
-     * stream.seekInput(30)
-     */
-    seekInput(time: string | number): this;
-    /**
-     * Add a FFmpeg filter_complex graph to the pipeline.
-     * Can be called multiple times.
-     * Ignores empty strings.
-     * @param graph Filter string or array of strings.
-     * @example
-     * stream.complexFilter("[0:a]loudnorm[aout]");
+     * fs.complexFilter('[0:a][1:a]acrossfade')
      */
     complexFilter(graph: string | string[]): this;
     /**
-     * Adds an audio crossfade (acrossfade) filter between two audio streams to the filter_complex graph.
-     * Throws if number of inputs is not exactly 2.
-     * @param duration Duration in seconds.
-     * @param options Optional channel labels.
+     * Adds audio crossfade (acrossfade filter) between two inputs.
+     *
+     * @param duration Crossfade duration (seconds)
+     * @param opts Additional options
+     * @returns this
      * @example
-     * stream.crossfadeAudio(2.5, { inputA: '[0:a]', inputB: '[1:a]', outputLabel: 'acrossfaded' })
+     * fs.input('a.mp3').input('b.mp3').crossfadeAudio(4)
      */
-    crossfadeAudio(duration: number, options?: {
-        inputA?: string;
-        inputB?: string;
+    crossfadeAudio(duration: number, opts?: {
+        c1?: string;
+        c2?: string;
+        curve1?: string;
+        curve2?: string;
+        additional?: string;
+        input2?: string | Readable;
+        nb_samples?: number;
+        overlap?: boolean;
+        inputLabels?: string[];
         outputLabel?: string;
+        inputs?: number;
     }): this;
     /**
-     * Alias for usePlugins for a single plugin.
-     * @param buildEncoder Function that configures the output FluentStream encoder.
-     * @param pluginConfig Plugin string or object with its options.
+     * Alias for usePlugins. Adds a single plugin and sets up plugin pipeline.
+     *
+     * @param buildEncoder Function that configures the final encoder.
+     * @param pluginConfig Single plugin configuration.
+     * @returns this
      * @example
-     * stream.usePlugin(enc => enc.output("out.ogg"), "normalize");
+     * fs.usePlugin(enc => enc.audioCodec('mp3'), "loudnorm")
      */
-    usePlugin(buildEncoder: EncoderBuilder, pluginConfig: string | {
-        name: string;
-        options?: Partial<AudioPluginBaseOptions>;
-    }): this;
+    usePlugin(buildEncoder: EncoderBuilder, pluginConfig: PluginConfig): this;
     /**
-     * Switch the pipeline into plugin-processing mode.
-     * Multiple plugins (chained) can be specified.
-     * @param buildEncoder Function receiving a FluentStream for configuring the encoder (output process).
-     * @param pluginConfigs One or more plugins: either a name string or an object { name, options }
+     * Adds one or more plugins and sets up the plugin pipeline. Enables transform chain.
+     *
+     * @param buildEncoder Function to configure the encoder instance (output).
+     * @param pluginConfigs List of plugin configurations.
+     * @returns this
      * @example
-     * stream.input("in.wav").usePlugins(
-     *   enc => enc.audioBitrate("192k").output("out.ogg"),
-     *   "normalize", { name: "compressor" }
-     * );
+     * fs.usePlugins(enc => enc.audioCodec('aac'), "eq", {name:"loudnorm"})
      */
-    usePlugins(buildEncoder: EncoderBuilder, ...pluginConfigs: Array<string | {
-        name: string;
-        options?: Partial<AudioPluginBaseOptions>;
-    }>): this;
+    usePlugins(buildEncoder: EncoderBuilder, ...pluginConfigs: PluginConfig[]): this;
     /**
-     * Returns the plugin controllers, for usePlugins-style interface.
-     * When called as a property on the result of usePlugins, is bound.
-     */
-    getControllers(): AudioPlugin[];
-    /**
-     * Hot-swap (update) the plugin chain at runtime without stopping the pipeline.
-     * ONLY after calling usePlugins().
-     * @param pluginConfigs New configuration(s) for plugin(s).
+     * Hot-swap plugin chain during processing.
+     *
+     * @param pluginConfigs New plugin configuration(s).
+     * @returns Promise<void>
      * @example
-     * await stream.updatePlugins("compressor", { name: "custom", options: {...} });
+     * await fs.updatePlugins("highpass", {name: "loudnorm"})
      */
-    updatePlugins(...pluginConfigs: Array<string | {
-        name: string;
-        options?: Partial<AudioPluginBaseOptions>;
-    }>): Promise<void>;
+    updatePlugins(...pluginConfigs: PluginConfig[]): Promise<void>;
     /**
-     * Get the array of plugin controller instances currently in use.
-     * @returns An array of AudioPlugin instances.
+     * Gets the current plugin controller instances.
+     *
+     * @returns Array of AudioPlugin controllers.
+     * @example
+     * const controllers = fs.getPluginControllers();
      */
     getPluginControllers(): AudioPlugin[];
     /**
-     * Run the constructed FFmpeg pipeline.
-     * If plugins are used: spawns both a decoder, plugin-processing chain, and encoder (dual process).
-     * Returns an object with output Readable stream, a done promise, and a stop function.
+     * Returns a copy of ffmpeg argument list that will be used.
      *
+     * @returns Array of string arguments.
      * @example
-     * const { output, done, stop } = stream.run();
-     * output.pipe(fs.createWriteStream("foo.ogg"));
-     * await done;
-     */
-    run(): FFmpegRunResult;
-    /**
-     * Get the current array of arguments for the ffmpeg process.
-     * @returns FFmpeg argument array.
-     * @example
-     * const args = stream.getArgs();
+     * console.log(fs.getArgs())
      */
     getArgs(): string[];
     private assembleArgs;
+    /**
+     * Used internally to merge user, default, and no headers logic.
+     * If headers were set by setHeaders or in constructor, use them;
+     * If not, use the default HUMANITY_HEADER.
+     * If headers is empty object, use none.
+     */
+    private getMergedHeaders;
     private addHumanityHeadersToProcessorOptions;
+    private createProcessor;
+    private collectStreams;
+    /**
+     * Starts execution of the ffmpeg pipeline.
+     * Selects plugin-based mode if plugins in use, else single process.
+     *
+     * @returns FFmpegRunResult object {output, done, stop}
+     * @example
+     * const { output, done } = fs.run();
+     */
+    run(): FFmpegRunResult;
     private runSingleProcess;
     private runWithPlugins;
-    private setupProcessorEvents;
+    /**
+     * Overwrites output files (-y flag).
+     *
+     * @returns this
+     * @example
+     * fs.overwrite()
+     */
+    overwrite(): this;
+    /**
+     * Adds a -map ffmpeg option to select specific streams.
+     *
+     * @param mapSpec Map specifier string.
+     * @returns this
+     * @example
+     * fs.map('0:a:0')
+     */
+    map(mapSpec: string): this;
+    /**
+     * Seeks to a position in the input.
+     *
+     * @param position Time position (seconds or timestamp).
+     * @returns this
+     * @example
+     * fs.seekInput(10)
+     * fs.seekInput('00:01:00')
+     */
+    seekInput(position: number | string): this;
+    /**
+     * Gets the current audio transform pipeline (Transform stream).
+     * Only available after usePlugins() was called.
+     *
+     * @returns Transform stream representing audio pipeline.
+     * @throws Error if used before usePlugins()
+     * @example
+     * const transform = fs.getAudioTransform();
+     */
+    getAudioTransform(): Transform;
+    /**
+     * Gets the current plugin controllers (same as getPluginControllers).
+     *
+     * @returns Array of AudioPlugin controllers.
+     * @example
+     * fs.getControllers().forEach(ctrl => ...)
+     */
+    getControllers(): AudioPlugin[];
 }
-export { FluentStream as default };
