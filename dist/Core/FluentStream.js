@@ -151,6 +151,7 @@ class FluentStream extends eventemitter3_1.EventEmitter {
     }
     /**
      * Add or replace the `-headers` argument for FFmpeg.
+     * Escapes semicolons as \; per ffmpeg command line requirements.
      * @param headers - Custom headers.
      * @returns this
      */
@@ -166,19 +167,24 @@ class FluentStream extends eventemitter3_1.EventEmitter {
         }
         if (headers && Object.keys(headers).length > 0) {
             const headerString = Object.entries(headers)
-                .map(([k, v]) => `${k}: ${v}`)
+                .map(([k, v]) => {
+                // Escape semicolons as required by ffmpeg
+                const keyEsc = String(k).replace(/;/g, "\\;");
+                const valEsc = String(v).replace(/;/g, "\\;");
+                return `${keyEsc}: ${valEsc}`;
+            })
                 .join("\r\n") + "\r\n";
             this.args.unshift("-headers", headerString);
         }
         return this;
     }
     /**
-     * Add or replace the `-user-agent` argument for an input file.
+     * Add or replace the `-user_agent` argument for an input file.
      * @param userAgent - HTTP User-Agent string.
      */
     userAgent(userAgent) {
         for (let i = 0; i < this.args.length;) {
-            if (this.args[i] === "-user-agent" &&
+            if (this.args[i] === "-user_agent" &&
                 typeof this.args[i + 1] === "string") {
                 this.args.splice(i, 2);
             }
@@ -186,7 +192,7 @@ class FluentStream extends eventemitter3_1.EventEmitter {
                 i++;
         }
         if (userAgent && userAgent.length > 0) {
-            this.args.unshift("-user-agent", userAgent);
+            this.args.unshift("-user_agent", userAgent);
         }
         return this;
     }

@@ -119,12 +119,13 @@ export default class FluentStream extends EventEmitter {
     getHeaders(): Record<string, string>;
     /**
      * Add or replace the `-headers` argument for FFmpeg.
+     * Escapes semicolons as \; per ffmpeg command line requirements.
      * @param headers - Custom headers.
      * @returns this
      */
     headers(headers?: Record<string, string> | null): this;
     /**
-     * Add or replace the `-user-agent` argument for an input file.
+     * Add or replace the `-user_agent` argument for an input file.
      * @param userAgent - HTTP User-Agent string.
      */
     userAgent(userAgent?: string | null): this;
