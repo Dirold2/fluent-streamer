@@ -265,7 +265,7 @@ describe("FluentStream тяжёлые тесты (FFmpeg и плагины)", ()
       
       // --- Ensure -user-agent appears before -headers in FFmpeg args ---
       const args = (typeof s.getArgs === "function") ? s.getArgs() : (s as any).args;
-      const uaIdx = args.indexOf("-user-agent");
+      const uaIdx = args.indexOf("-user_agent");
       const hIdx = args.indexOf("-headers");
       expect(uaIdx).toBeGreaterThan(-1);
       expect(hIdx).toBeGreaterThan(-1);
