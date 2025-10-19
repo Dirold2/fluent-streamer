@@ -610,6 +610,50 @@ export default class FluentStream extends EventEmitter {
     ) {
       finalArgs.push("-progress", "pipe:2");
     }
+    // ffmpeg_1760884412131: insert flags for low-latency/low-probe if used as input source
+    // Only add for pipe:0 or http/https input
+    // Heuristic: if input (args) includes "-i <url>" with http/https, or "-i pipe:0", prepend flags
+    let needsLowDelay = false;
+    for (let i = 0; i < finalArgs.length - 1; i++) {
+      if (
+        finalArgs[i] === "-i" &&
+        typeof finalArgs[i + 1] === "string" &&
+        (
+          finalArgs[i + 1].startsWith("http://") ||
+          finalArgs[i + 1].startsWith("https://") ||
+          finalArgs[i + 1] === "pipe:0"
+        )
+      ) {
+        needsLowDelay = true;
+        break;
+      }
+    }
+    if (needsLowDelay) {
+      // Avoid duplicates by filtering first
+      const lowDelayFlags = [
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-probesize", "32",
+        "-analyzeduration", "0"
+      ];
+
+      // Remove any pre-existing occurrence of these flags from finalArgs
+      let i = 0;
+      while (i < finalArgs.length) {
+        if (
+          (finalArgs[i] === "-fflags" && finalArgs[i + 1] === "nobuffer") ||
+          (finalArgs[i] === "-flags" && finalArgs[i + 1] === "low_delay") ||
+          (finalArgs[i] === "-probesize" && finalArgs[i + 1] === "32") ||
+          (finalArgs[i] === "-analyzeduration" && finalArgs[i + 1] === "0")
+        ) {
+          finalArgs.splice(i, 2);
+        } else {
+          i++;
+        }
+      }
+      // Prepend to beginning for maximal effect (before all -i <input>)
+      finalArgs.unshift(...lowDelayFlags);
+    }
     return finalArgs;
   }
 
@@ -704,7 +748,38 @@ export default class FluentStream extends EventEmitter {
       throw new Error("No encoderBuilder provided for plugin pipeline.");
     }
     this.encoderBuilder(encoder);
-    const encArgs = encoder.assembleArgs();
+    // ---- ffmpeg_1760884412131 START: Insert low-latency flags to encoder if needed ----
+    // When setting up encoder process (s16le → ...), also add the same flags if input is pipe:0
+    let encArgs = encoder.assembleArgs();
+    // Remove global -i ... for encoder, since we're supplying ["-f", "s16le", "-i", "pipe:0", ...encArgs]
+    // But useful: check if encArgs already has those flags, avoid duplicates
+    // But let's be sure: if the input ("-i", "pipe:0") exists, add the same flags in front
+    // We can't know for certain if encoder actually needs low_delay, but it's harmless for PCM.
+    const lowDelayFlags = [
+      "-fflags", "nobuffer",
+      "-flags", "low_delay",
+      "-probesize", "32",
+      "-analyzeduration", "0",
+    ];
+
+    // Remove any pre-existing occurrence of these flags from encArgs
+    let ei = 0;
+    while (ei < encArgs.length) {
+      if (
+        (encArgs[ei] === "-fflags" && encArgs[ei + 1] === "nobuffer") ||
+        (encArgs[ei] === "-flags" && encArgs[ei + 1] === "low_delay") ||
+        (encArgs[ei] === "-probesize" && encArgs[ei + 1] === "32") ||
+        (encArgs[ei] === "-analyzeduration" && encArgs[ei + 1] === "0")
+      ) {
+        encArgs.splice(ei, 2);
+      } else {
+        ei++;
+      }
+    }
+    // Always prepend low-latency flags to encoder's arguments for s16le/pcm scenarios
+    encArgs = [...lowDelayFlags, ...encArgs];
+    // ---- ffmpeg_1760884412131 END ----
+
     const encProc = encoder.createProcessor(
       undefined,
       ["-f", "s16le", "-i", "pipe:0", ...encArgs],
