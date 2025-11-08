@@ -1,13 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import FluentStream from "../src/Core/FluentStream.js";
-import { PassThrough } from "stream";
 import path from "path";
 import fs from "fs";
 
 const TEST_AUDIO = path.resolve(__dirname, "320.mp3");
 const __outDir = path.resolve(__dirname, ".tmp");
 
-function fakeChecksum(file: string): string {
+function fakeChecksum(_file: string): string {
   return "cafebabe".padEnd(64, "0");
 }
 
@@ -19,7 +18,9 @@ async function prepareDir() {
 async function cleanupDir() {
   if (fs.existsSync(__outDir)) {
     for (const file of fs.readdirSync(__outDir)) {
-      try { fs.unlinkSync(path.join(__outDir, file)); } catch {}
+      try { fs.unlinkSync(path.join(__outDir, file)); } catch {
+        // Ignore cleanup errors
+      }
     }
   }
 }

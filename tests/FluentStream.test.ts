@@ -4,8 +4,6 @@ import { Readable } from "stream";
 
 // NOTE: These tests reflect the current FluentStream API contract (architecture).
 
-const TEMP_AUDIO_URL = "https://strm-spbmiran-22.strm.yandex.net/music-v2/raw/ysign1=557a0d33abe5a398353e6825a2cd287a76880216a4e83e8053580c5a03da2dbd,lid=268,pfx,secret_version=ver-1,sfx,source=mds,ts=6902a135/0/51261/bf4f6ea7.204480811.7.139929546/320.mp3";
-
 
 describe("FluentStream API", () => {
   let stream: FluentStream;
@@ -138,8 +136,9 @@ describe("FluentStream API", () => {
     stream.input("a.wav").output("b.wav");
     stream.clear();
     expect(stream.getArgs()).toEqual([]);
-    expect(stream["inputStreams"] ?? []).toEqual([]);
-    expect(stream["complexFilters"] ?? []).toEqual([]);
+    // Verify that clear actually resets by checking that new inputs work
+    stream.input("c.wav").output("d.wav");
+    expect(stream.getArgs()).toEqual(["-i", "c.wav", "d.wav"]);
   });
 
   it("globalOptions accumulates in reverse", () => {
@@ -159,11 +158,6 @@ describe("FluentStream API", () => {
 
   it("constructor logger is accepted", () => {
     const logs: string[] = [];
-    const logger = {
-      debug: (msg: string) => logs.push(msg),
-      warn: (msg: string) => logs.push(msg),
-      error: (msg: string) => logs.push(msg),
-    };
     const s = new FluentStream({ debug: true });
     s.input("a.wav").output("b.wav").getArgs();
     expect(logs.length).toBe(0);
@@ -288,17 +282,17 @@ describe("FluentStream API", () => {
   });
 
   it("object headers in options serialize properly", () => {
-    const headers = { foo: "bar", baz: "quux" };
+    const _headers = { foo: "bar", baz: "quux" };
     const humanityHeader = {
       "X-Human-Intent": "true",
       "X-Request-Attention": "just-want-to-do-my-best",
       "User-Agent": "FluentStream/1.0 (friendly bot)"
     };
-    const allHeaders = { ...headers, ...humanityHeader };
+    const allHeaders = { ..._headers, ...humanityHeader };
     const origGetArgs = stream.getArgs.bind(stream);
     stream.getArgs = function () {
       const baseArgs = origGetArgs();
-      const mergedHeaders = { ...headers, ...humanityHeader };
+      const mergedHeaders = { ..._headers, ...humanityHeader };
       const hdrString = Object.entries(mergedHeaders).map(([k, v]) => `${k}: ${v}`).join("\r\n") + "\r\n";
       return [...baseArgs, "-headers", hdrString];
     };
@@ -367,9 +361,9 @@ describe("FluentStream API", () => {
     stream.input("in1.mp3").output("out1.aac").globalOptions("-na");
     stream.clear();
     expect(stream.getArgs()).toEqual([]);
-    expect(stream["args"] ?? []).toEqual([]);
-    expect(stream["inputStreams"] ?? []).toEqual([]);
-    expect(stream["complexFilters"] ?? []).toEqual([]);
+    // Verify clear resets by checking that new operations work
+    stream.input("new.mp3").output("new.aac");
+    expect(stream.getArgs()).toEqual(["-i", "new.mp3", "new.aac"]);
   });
 
   it("duration negative doesn't throw", () => {
@@ -377,7 +371,7 @@ describe("FluentStream API", () => {
   });
 
   it("output(index, file) only uses first arg if not supported", () => {
-    // @ts-ignore
+    // @ts-expect-error Testing deprecated output signature
     stream.input("a.wav").output(0, "b.wav");
     const args = stream.getArgs();
     expect(args).toContain("0");
@@ -408,13 +402,13 @@ describe("FluentStream API", () => {
     stream.clear();
     expect(() => stream.clear()).not.toThrow();
     expect(stream.getArgs()).toEqual([]);
-    expect(stream["inputStreams"] ?? []).toEqual([]);
-    expect(stream["complexFilters"] ?? []).toEqual([]);
+    // Verify clear works by checking new operations
+    stream.input("test.wav").output("test.ogg");
+    expect(stream.getArgs()).toEqual(["-i", "test.wav", "test.ogg"]);
   });
 
   it("custom user-agent via headers", () => {
     const ua = "MyCoolAgent/88.2";
-    const headers = { "User-Agent": ua };
     const origGetArgs = stream.getArgs.bind(stream);
     stream.getArgs = function () {
       const baseArgs = origGetArgs();
@@ -448,5 +442,40 @@ describe("FluentStream API", () => {
     const a2 = stream.getArgs();
     expect(a1).not.toBe(a2);
     expect(a1).toEqual(a2);
+  });
+
+  it("effects persist after process end for next run", async () => {
+    const stream = new FluentStream({ useAudioProcessor: true });
+    stream.input("tests/320.mp3").output("pipe:1");
+
+    // First run
+    const result1 = stream.run();
+    await result1.done;
+
+    // Change effects after first run ended
+    stream.setBass(10);
+    stream.setTreble(5);
+    stream.setCompressor(true);
+
+    // Second run with same input
+    stream.clear()
+      .input("tests/320.mp3")
+      .audioCodec("pcm_s16le")
+      .outputOptions(
+        "-f", "s16le",
+        "-ar", "48000",
+        "-ac", "2",
+        "-af", "volume=0.1"
+      ).output("pipe:1");
+    const result2 = stream.run();
+
+    // Check that effects are applied in second run
+    expect(result2.audioProcessor?.bass).toBe(0.5); // normalized value for 10
+    expect(result2.audioProcessor?.treble).toBe(0.25); // normalized value for 5
+    expect(result2.audioProcessor?.compressor).toBe(true);
+
+    // Cleanup
+    result2.stop();
+    try { await result2.done; } catch {}
   });
 });

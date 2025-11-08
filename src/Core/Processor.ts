@@ -4,29 +4,30 @@ import { execa, type Subprocess } from "execa";
 import type {
   Logger,
   FFmpegProgress,
-  FFmpegRunResultExtended,
+  ProcessorDebugInfo,
 } from "../Types/index.js";
 import { ProcessorOptions } from "../Types/index.js";
+import { ThrottleStream } from "./ThrottleStream.js";
+import { AudioProcessor } from './AudioProcessor.js';
 
-/** 
- * Утилита экранирования параметров для фильтров FFmpeg 
- */
+interface PassThroughWithDrain extends PassThrough {
+  _ffmpegDrainAttached?: boolean;
+}
+
+// Utils
 function escapeParam(val: string | number | undefined): string | number | undefined {
   if (typeof val !== "string") return val;
   return val.replace(/[:=]/g, (m) => "\\" + m);
 }
 
-/**
- * Processor - управляет жизненным циклом ffmpeg-процесса, потоками ввода/вывода,
- * гарантирует корректное закрытие output для предотвращения "Premature close",
- * позволяет управлять треком (skip/stop).
- *
- * Исправление: после завершения ffmpeg доступен вызов run() ещё раз.
- */
+function getTimeString(): string {
+  return new Date().toLocaleTimeString('ru-RU', { hour12: false });
+}
+
 export class Processor extends EventEmitter {
   private process: Subprocess | null = null;
-  private passthrough: PassThrough | null = null;
-  private outputStream: PassThrough | null = null;
+  private passthrough: PassThroughWithDrain | null = null;
+  private outputStream: PassThroughWithDrain | null = null;
   private blackholeStream: Writable | null = null;
   private inputStreams: Array<{ stream: Readable; index: number }> = [];
   private extraOutputs: Array<{ stream: Writable; index: number }> = [];
@@ -36,6 +37,8 @@ export class Processor extends EventEmitter {
   private isClosed = false;
   private timeoutHandle?: NodeJS.Timeout;
   private progress: Partial<FFmpegProgress> = {};
+  private currentBitrate: number = 128; // Default 128kbps
+  private currentDuration: number = 180; // Default 3 minutes in seconds
 
   private doneResolve!: () => void;
   private doneReject!: (err: Error) => void;
@@ -45,16 +48,27 @@ export class Processor extends EventEmitter {
     abortSignal?: AbortSignal;
     logger: Logger;
     verbose?: boolean;
+    useAudioProcessor: boolean;
+    audioProcessorOptions?: import("../Types/index.js").AudioProcessingOptions;
+    disableThrottling?: boolean;
   };
 
   private args: string[] = [];
   private extraGlobalArgs: string[] = [];
 
-  // Run-state
   private _runEnded: boolean = false;
   private _runEmittedEnd: boolean = false;
-  private _doEndSequence: (() => void) | null = null;
   private _pendingProcessExitLog: (() => void) | null = null;
+
+  private useAudioProcessor: boolean = false;
+  private endSequenceFn: (() => void) | null = null;
+  private throttledOutput: PassThrough | ThrottleStream | null = null;
+
+  // Current audio processing settings for dynamic effects
+  private currentVolume: number = 1;
+  private currentBass: number = 0;
+  private currentTreble: number = 0;
+  private currentCompressor: boolean = false;
 
   public get pid(): number | null {
     return this.process?.pid ?? null;
@@ -76,18 +90,27 @@ export class Processor extends EventEmitter {
       timeout: options.timeout ?? 0,
       maxStderrBuffer: options.maxStderrBuffer ?? 1024 * 1024,
       enableProgressTracking: options.enableProgressTracking ?? false,
-      logger: (options.logger as Logger) ?? console,
+      logger: options.logger ?? console,
       debug: options.debug ?? false,
-      verbose: (options as any).verbose ?? false,
+      verbose: options.verbose ?? false,
       suppressPrematureCloseWarning: options.suppressPrematureCloseWarning ?? false,
       abortSignal: options.abortSignal,
       headers: options.headers ?? {},
+      disableThrottling: options.disableThrottling ?? false,
+      useAudioProcessor: typeof options.useAudioProcessor === "boolean" ? options.useAudioProcessor : false,
+      audioProcessorOptions: options.audioProcessorOptions ?? { volume: 1, bass: 0, treble: 0, compressor: false, normalize: false },
     };
 
     this.extraGlobalArgs = [...this.config.extraGlobalArgs];
+    this.useAudioProcessor = !!(options.useAudioProcessor);
+
+    // Initialize current audio processing settings
+    this.currentVolume = this.config.audioProcessorOptions?.volume ?? 1;
+    this.currentBass = this.config.audioProcessorOptions?.bass ?? 0;
+    this.currentTreble = this.config.audioProcessorOptions?.treble ?? 0;
+    this.currentCompressor = this.config.audioProcessorOptions?.compressor ?? false;
 
     this._initPromise();
-
     this._handleAbortSignal();
   }
 
@@ -97,10 +120,6 @@ export class Processor extends EventEmitter {
       this.doneReject = reject;
     });
   }
-
-  // -----------------------------------------------
-  // Публичные методы управления
-  // -----------------------------------------------
 
   public setArgs(args: string[]): this {
     this.args = Array.isArray(args) ? [...args] : [];
@@ -117,7 +136,6 @@ export class Processor extends EventEmitter {
   }
 
   public getInputStream(): NodeJS.WritableStream | undefined {
-    // Correct return type: never return null, only undefined or the stream
     return this.process?.stdin ?? undefined;
   }
 
@@ -135,199 +153,358 @@ export class Processor extends EventEmitter {
     return [...this.extraGlobalArgs, ...this.args];
   }
 
-  /**
-   * Проверка, выполняется ли процесс в данный момент.
-   * @returns {boolean}
-   */
+  public enableAudioProcessor(enable: boolean): this {
+    this.useAudioProcessor = enable;
+    return this;
+  }
+
   public isRunning(): boolean {
     return !!this.process && !this.hasFinished;
   }
 
-  /** Вернуть текущий прогресс ffmpeg (для UI). */
   public getProgress(): Partial<FFmpegProgress> {
     return { ...this.progress };
   }
 
-  /** Public reset: полностью сбросить внутреннее состояние процессора, позволяя повторный запуск. */
   public reset(): void {
     this._resetRunState();
   }
 
-  /**
-   * Запустить новый процесс ffmpeg. Логирует старт процесса при debug/verbose.
-   * Повторные вызовы run() гарантировано очищают активные потоки и таймеры.
-   * Тип результата: FFmpegRunResultExtended.
-   */
-  public run(): FFmpegRunResultExtended {
+  public run(): import("../Types/index.js").FFmpegRunResultExtended {
     if (this.process) throw new Error("FFmpeg process is already running");
 
-    // Перед запуском - гарантированное уничтожение предыдущих потоков и тайм-аутов.
     this._resetRunState();
     this._initPromise();
 
-    // Логгер
-    if (this.config.debug || this.config.verbose) {
-      this.config.logger.debug?.(
-        `[${this.config.loggerTag}] Starting ffmpeg process: ${this.config.ffmpegPath} ${this.getFullArgs().join(" ")}`
-      );
+    const fullArgs = this.getFullArgs();
+    if (this.config.onBeforeChildProcessSpawn) {
+      try { this.config.onBeforeChildProcessSpawn(this.config.ffmpegPath, fullArgs); } catch {
+        // Ignore errors from user callback
+      }
     }
 
-    // Сбор аргументов, запуск сабпроцесса (try/catch для синхронных эксепшнов)
-    const fullArgs = this.getFullArgs();
+    if (this.config.debug || this.config.verbose) {
+      this.config.logger.debug?.(
+        `[${getTimeString()}] [${this.config.loggerTag}] Starting ffmpeg process: ${this.config.ffmpegPath} ${fullArgs.join(" ")}`
+      );
+    }
 
     try {
       this.process = execa(this.config.ffmpegPath, fullArgs, {
         reject: false,
         stdin: "pipe",
         stdout: "pipe",
-        stderr: "pipe"
+        stderr: "pipe",
       });
     } catch (ex) {
-      // Синхронная ошибка запуска (например, ffmpeg не найден)
       this.config.logger.error?.(
-        `[${this.config.loggerTag}] Failed to spawn ffmpeg: ${(ex as Error).message}`
+        `[${getTimeString()}] [${this.config.loggerTag}] Failed to spawn ffmpeg: ${(ex as Error).message}`
       );
       this._finalize(ex as Error);
       throw ex;
     }
 
     this._handleTimeout();
-    this._bindInputStream();
 
-    // Tee для мульти-аутов, passthrough для API
-    let output: PassThrough = this.process.stdout
-      ? (this.extraOutputs.length ? new PassThrough() : (this.process.stdout as PassThrough))
-      : new PassThrough();
-
-    if (this.extraOutputs.length) {
-      const teeHub = new PassThrough();
-      pipeline(this.process.stdout!, teeHub, (err) => {
-        if (err && !/premature close/i.test(err.message)) this.emit("error", err);
-      });
-      for (const { stream } of this.extraOutputs) {
-        if (stream && typeof stream.write === "function") teeHub.pipe(stream, { end: false });
+    // Bind only index=0 to stdin, others to blackhole
+    if (this.process.stdin && this.inputStreams.length) {
+      const primary = this.inputStreams
+        .slice()
+        .sort((a, b) => a.index - b.index)[0];
+      if (primary) {
+        const throttled = primary.stream.pipe(new ThrottleStream(32_000));
+        pipeline(throttled, this.process.stdin, (err) => {
+          if (err) {
+            // Ignore EPIPE if we're terminating/finished
+            const code = (err as NodeJS.ErrnoException)?.code;
+            if (code === "EPIPE" && (this.hasFinished || this.isTerminating)) return;
+            this.emit("error", err);
+            this._finalize(err as Error);
+          }
+        });
       }
-      output = teeHub;
+      // Drain other inputs (if any), but don't feed to ffmpeg stdin
+      for (const s of this.inputStreams) {
+        if (s !== primary) {
+          pipeline(s.stream, this._getBlackholeStream(), () => {});
+        }
+      }
     }
 
-    const passthrough = new PassThrough();
-    this.outputStream = output;
-    this.passthrough = passthrough;
-    this._ensureOutputDrained();
+    const finalPassthrough = new PassThrough({ highWaterMark: 16384 }) as PassThroughWithDrain;
 
-    if (this.process.stderr) {
-      this.process.stderr.on("data", (chunk) => this._handleStderr(chunk));
+    // PCM s16le 48kHz stereo: 48000 * 2 * 2 = 192000 bytes/second
+    const BYTES_PER_SECOND = 48000 * 2 * 2;
+
+    // Always build an AudioProcessor with current settings
+    const audioProcessor = new AudioProcessor({
+      volume: this.currentVolume,
+      bass: this.currentBass,
+      treble: this.currentTreble,
+      compressor: this.currentCompressor,
+      normalize: false,
+      sampleRate: 48000,
+      channels: 2,
+    });
+
+    if (!this.useAudioProcessor) {
+      audioProcessor.setVolume(1);
+      audioProcessor.setEqualizer(0, 0, false);
+      // Без фейдов/обработки — прямая передача данных (bypass активируется автоматически)
     }
+
+    // Create throttled output for real-time playback
+    this.throttledOutput = this.config.disableThrottling
+      ? new PassThrough()
+      : new ThrottleStream(BYTES_PER_SECOND);
+
+    // Use pipeline for smooth audio flow: process.stdout -> audioProcessor -> throttledOutput -> finalPassthrough
+    if (this.process.stdout) {
+      let stdoutChunks = 0;
+      let audioProcessorChunks = 0;
+      let throttledChunks = 0;
+      let outputChunks = 0;
+
+      // Add logging to process.stdout
+      this.process.stdout.on("data", (chunk) => {
+        stdoutChunks++;
+        if (this.config.debug || this.config.verbose) {
+          if (stdoutChunks % 500 === 0) {
+            this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] FFmpeg stdout chunk ${stdoutChunks}: ${chunk.length} bytes`);
+          }
+        }
+      });
+
+      this.process.stdout.on("end", () => {
+        this._runEnded = true;
+        if (this.config.debug || this.config.verbose) {
+          this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] FFmpeg stdout ended: total chunks=${stdoutChunks}`);
+        }
+        // Don't call endSequence here, let pipeline finish naturally
+      });
+
+      this.process.stdout.on("error", (err) => {
+        if (!this.hasFinished) {
+          this.emit("error", err);
+          this._finalize(err);
+        }
+      });
+
+      // Add logging to audioProcessor output
+      audioProcessor.on("data", (chunk) => {
+        audioProcessorChunks++;
+        if (this.config.debug || this.config.verbose) {
+          if (audioProcessorChunks % 500 === 0) {
+            this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] AudioProcessor chunk ${audioProcessorChunks}: ${chunk.length} bytes`);
+          }
+        }
+      });
+
+      audioProcessor.on("end", () => {
+        if (this.config.debug || this.config.verbose) {
+          this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] AudioProcessor ended: total chunks=${audioProcessorChunks}`);
+        }
+        // AudioProcessor ended, but we don't call endSequence here anymore
+      });
+
+      audioProcessor.on("error", (err) => {
+        if (!this.hasFinished) {
+          this.emit("error", err);
+          this._finalize(err);
+        }
+      });
+
+      // Add logging to throttledOutput
+      this.throttledOutput.on("data", (chunk) => {
+        throttledChunks++;
+        if (this.config.debug || this.config.verbose) {
+          if (throttledChunks % 500 === 0) {
+            this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] Throttled chunk ${throttledChunks}: ${chunk.length} bytes`);
+          }
+        }
+      });
+
+      this.throttledOutput.on("error", (err) => {
+        if (!this.hasFinished) {
+          this.emit("error", err);
+          this._finalize(err);
+        }
+      });
+
+      // Add logging to final output
+      finalPassthrough.on("data", (chunk) => {
+        outputChunks++;
+        if (this.config.debug || this.config.verbose) {
+          if (outputChunks % 500 === 0) {
+            this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] Output chunk ${outputChunks}: ${chunk.length} bytes`);
+          }
+        }
+      });
+
+      finalPassthrough.on("end", () => {
+        if (this.config.debug || this.config.verbose) {
+          this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] Output ended: total chunks=${outputChunks}`);
+        }
+      });
+
+      // Use pipeline for smooth flow
+      pipeline(this.process.stdout, audioProcessor, this.throttledOutput, finalPassthrough, (err) => {
+        if (err && !this.hasFinished) {
+          this.emit("error", err);
+          this._finalize(err);
+        }
+      });
+    } else {
+      // ffmpeg не отдал stdout — пустой поток
+      finalPassthrough.end();
+    }
+
+    // We'll monitor/drain the final output to avoid back-pressure if consumer is late
+    this.passthrough = finalPassthrough;
+    this.outputStream = finalPassthrough;
+    this._ensureFinalOutputDrained(finalPassthrough);
+
+    this.process.stderr?.on("data", (chunk) => this._handleStderr(chunk));
+    this.process.stderr?.on("data", (chunk) => {
+      try {
+        this.config.stderrLogHandler?.(chunk.toString("utf8"));
+      } catch {
+        // Ignore errors from user stderr handler
+      }
+    });
 
     this.process.once("exit", (code, signal) => {
       this._pendingProcessExitLog = () => {
         if (this.config.debug || this.config.verbose) {
           this.config.logger.debug?.(
-            `[${this.config.loggerTag}] Process exited with code ${code}, signal ${signal}`
+            `[${getTimeString()}] [${this.config.loggerTag}] Process exited with code ${code}, signal ${signal}`
           );
         }
       };
       this._onProcessExit(code, signal);
     });
+
     this.process.once("error", (err: Error) => {
-      this.config.logger.error?.(
-        `[${this.config.loggerTag}] Process error: ${err.message}`
-      );
+      this.config.logger.error?.(`[${getTimeString()}] [${this.config.loggerTag}] Process error: ${err.message}`);
       this.emit("error", err);
       this._finalize(err);
     });
 
-    output.on("data", (chunk) => passthrough.write(chunk));
-
-    output.on("end", () => {
-      this._runEnded = true;
-      if (this._doEndSequence && !this._runEmittedEnd) {
-        this._doEndSequence();
-      }
-    });
-
-    output.on("close", () => {
-      if (!this._runEnded && this._doEndSequence && !this._runEmittedEnd) {
-        this._runEnded = true;
-        setImmediate(() => {
-          if (this._doEndSequence && !this._runEmittedEnd) {
-            this._doEndSequence();
-          }
-        });
-      }
-    });
-
-    // Финализация через _doEndSequence: он будет вызван только если НЕ было close() или завершения
-    this._doEndSequence = () => {
-      if (this._runEmittedEnd) return;
-      if (this.hasFinished || this.isClosed) return;
-      this._runEmittedEnd = true;
-
-      const buffer = this.createSilenceBuffer(100, undefined, undefined);
-
-      const finalize = () => {
-        passthrough.end();
-        setImmediate(() => {
-          this.emit('end');
-          if (this._pendingProcessExitLog) {
-            this._pendingProcessExitLog();
-            this._pendingProcessExitLog = null;
-          }
-          this._finalize();
-        });
-      };
-
-      try {
-        if (!this.hasFinished && !this.isClosed && this.passthrough && !this.passthrough.destroyed) {
-          const written = passthrough.write(buffer);
-          if (!written) {
-            passthrough.once('drain', finalize);
-          } else {
-            setImmediate(finalize);
-          }
-        } else {
-          setImmediate(finalize);
-        }
-      } catch (err) {
-        setImmediate(finalize);
-      }
-    };
+    // graceful end sequence
+    this.endSequenceFn = this._createEndSequence(audioProcessor, finalPassthrough);
 
     this.donePromise!.catch((err) => {
       this.emit("error", err);
-      if (!this._runEmittedEnd && this.passthrough && !this.passthrough.destroyed) {
-        this.passthrough.destroy(err);
+      if (!this._runEmittedEnd && finalPassthrough && !finalPassthrough.destroyed) {
+        finalPassthrough.destroy(err);
       }
     });
 
-    // Do NOT include passthrough in the return object: it's not part of FFmpegRunResultExtended
     return {
-      output: passthrough,
-      passthrough,
+      output: finalPassthrough,
+      passthrough: finalPassthrough,
       done: this.donePromise!,
       stop: () => this.kill(),
       close: () => this.close(),
+      audioProcessor,
+      setVolume: (v: number) => {
+        this.currentVolume = v;
+        if (this.config.debug || this.config.verbose) {
+          this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] setVolume(${v}) called, audioProcessor=${!!audioProcessor}, destroyed=${audioProcessor?.destroyed}, writableEnded=${audioProcessor?.writableEnded}`);
+        }
+        if (audioProcessor && !audioProcessor.destroyed && !audioProcessor.writableEnded) {
+          audioProcessor.setVolume(v);
+        }
+      },
+      setBass: (b: number) => {
+        this.currentBass = b;
+        if (this.config.debug || this.config.verbose) {
+          this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] setBass(${b}) called, audioProcessor=${!!audioProcessor}, destroyed=${audioProcessor?.destroyed}, writableEnded=${audioProcessor?.writableEnded}`);
+        }
+        if (audioProcessor && !audioProcessor.destroyed && !audioProcessor.writableEnded) {
+          audioProcessor.setEqualizer(b, audioProcessor.treble, audioProcessor.compressor);
+        }
+      },
+      setTreble: (t: number) => {
+        this.currentTreble = t;
+        if (this.config.debug || this.config.verbose) {
+          this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] setTreble(${t}) called, audioProcessor=${!!audioProcessor}, destroyed=${audioProcessor?.destroyed}, writableEnded=${audioProcessor?.writableEnded}`);
+        }
+        if (audioProcessor && !audioProcessor.destroyed && !audioProcessor.writableEnded) {
+          audioProcessor.setEqualizer(audioProcessor.bass, t, audioProcessor.compressor);
+        }
+      },
+      setCompressor: (c: boolean) => {
+        this.currentCompressor = c;
+        if (this.config.debug || this.config.verbose) {
+          this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] setCompressor(${c}) called, audioProcessor=${!!audioProcessor}, destroyed=${audioProcessor?.destroyed}, writableEnded=${audioProcessor?.writableEnded}`);
+        }
+        if (audioProcessor && !audioProcessor.destroyed && !audioProcessor.writableEnded) {
+          audioProcessor.setCompressor(c);
+        }
+      },
+      setEqualizer: (b: number, t: number, c: boolean) => {
+        this.currentBass = b;
+        this.currentTreble = t;
+        this.currentCompressor = c;
+        if (this.config.debug || this.config.verbose) {
+          this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] setEqualizer(${b}, ${t}, ${c}) called, audioProcessor=${!!audioProcessor}, destroyed=${audioProcessor?.destroyed}, writableEnded=${audioProcessor?.writableEnded}`);
+        }
+        if (audioProcessor && !audioProcessor.destroyed && !audioProcessor.writableEnded) {
+          audioProcessor.setEqualizer(b, t, c);
+        }
+      },
+      startFade: (targetVolume: number, durationMs: number) => {
+        if (this.config.debug || this.config.verbose) {
+          this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] startFade(${targetVolume}, ${durationMs}) called, audioProcessor=${!!audioProcessor}, destroyed=${audioProcessor?.destroyed}, writableEnded=${audioProcessor?.writableEnded}`);
+        }
+        return audioProcessor?.startFade(targetVolume, durationMs);
+      },
     };
   }
 
-  /**
-   * Мягкое закрытие для раннего завершения (skip/stop/downstream close).
-   * Гарантирует безопасное завершение всех потоков.
-   *
-   * При close() — ставим _runEmittedEnd=true, чтобы _doEndSequence не писал tail.
-   */
+  private _createEndSequence(_audioProcessor: AudioProcessor, finalPassthrough: PassThrough) {
+    return () => {
+      if (this.config.debug || this.config.verbose) {
+        this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] _createEndSequence called: _runEmittedEnd=${this._runEmittedEnd}, hasFinished=${this.hasFinished}, isClosed=${this.isClosed}`);
+      }
+      if (this._runEmittedEnd || this.hasFinished || this.isClosed) return;
+      this._runEmittedEnd = true;
+
+      const finalize = () => {
+        if (this.config.debug || this.config.verbose) {
+          this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] Finalizing end sequence: finalPassthrough destroyed=${finalPassthrough.destroyed}, writableEnded=${finalPassthrough.writableEnded}`);
+        }
+        if (!finalPassthrough.destroyed && !finalPassthrough.writableEnded) {
+          finalPassthrough.end();
+        }
+        this.emit("end");
+        if (this._pendingProcessExitLog) {
+          this._pendingProcessExitLog();
+          this._pendingProcessExitLog = null;
+        }
+        this._finalize();
+      };
+
+      // Finalize immediately without adding silence to prevent consumer from closing on silence
+      setImmediate(finalize);
+    };
+  }
+
   public async close(): Promise<void> {
     if (this.isClosed) return;
     this.isClosed = true;
     this._runEmittedEnd = true;
+
     if (this.passthrough && !this.passthrough.destroyed) {
       this.passthrough.end();
       this.passthrough.destroy();
     }
     this.outputStream?.destroy();
+
     if (this.config.debug || this.config.verbose) {
       this.config.logger.debug?.(
-        `[${this.config.loggerTag}] Closed processor stream via .close()`
+        `[${getTimeString()}] [${this.config.loggerTag}] Closed processor stream via .close()`
       );
     }
     await this.kill();
@@ -335,44 +512,38 @@ export class Processor extends EventEmitter {
     this._finalize();
   }
 
-  /**
-   * Принудительное завершение процесса ffmpeg (например, skip/stop трека).
-   */
   public async kill(signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
     if (this.process && !this.isTerminating) {
       this.isTerminating = true;
       if (this.config.debug || this.config.verbose) {
         this.config.logger.debug?.(
-          `[${this.config.loggerTag}] Killing process with signal ${signal}`
+          `[${getTimeString()}] [${this.config.loggerTag}] Killing process with signal ${signal}`
         );
       }
-      this.process.kill(signal);
+      try {
+        this.process.kill(signal);
+      } catch {
+        // Ignore kill errors
+      }
     }
     if (this.donePromise) {
       try {
         await this.donePromise;
-      } catch (_) {
-        // проглотить ошибку для kill
+      } catch {
+        // ignore
       }
     }
   }
 
-  /**
-   * Принудительное уничтожение процесса и всех ресурсов. После destroy нельзя использовать экземпляр!
-   */
   public destroy(): void {
     this.config.logger?.warn?.(
-      `[${this.config.loggerTag}] Processor force destroy() called at ${new Date().toISOString()}`
+      `[${getTimeString()}] [${this.config.loggerTag}] Processor force destroy() called at ${new Date().toISOString()}`
     );
-    this.kill("SIGKILL");
+    void this.kill("SIGKILL");
     this._finalize(new Error("Destroyed by user"));
     this.removeAllListeners();
   }
 
-  /**
-   * Синтаксический сахар для кроссфейда (перспектива — вынести в отдельный utils).
-   * Параметры с : или = экранируются.
-   */
   public static buildAcrossfadeFilter(
     opts: {
       inputs?: number;
@@ -409,10 +580,7 @@ export class Processor extends EventEmitter {
     return `${this.config.ffmpegPath} ${this.getFullArgs().join(" ")}`;
   }
 
-  /**
-   * Дамп состояния процессора для отладки/логирования.
-   */
-  public debugDump() {
+  public debugDump(): ProcessorDebugInfo {
     return {
       pid: this.pid,
       args: this.getArgs(),
@@ -433,15 +601,9 @@ export class Processor extends EventEmitter {
     };
   }
 
-  // ----------------------------------
-  // PRIVATE utils & helpers
-  // ----------------------------------
-
   private _resetRunState() {
-    // Сбросить состояниe для возможности повторных запусков
-    // Очистить старый output drain флаг, если был поток
-    if (this.outputStream && (this.outputStream as any)._ffmpegDrainAttached) {
-      delete (this.outputStream as any)._ffmpegDrainAttached;
+    if (this.outputStream && (this.outputStream as PassThroughWithDrain)._ffmpegDrainAttached) {
+      delete (this.outputStream as PassThroughWithDrain)._ffmpegDrainAttached;
     }
 
     this._runEnded = false;
@@ -452,11 +614,13 @@ export class Processor extends EventEmitter {
     this.isTerminating = false;
     this.stderrBuffer = "";
     this.progress = {};
-    // streams будут пересозданы в run()
     this.process = null;
     this.outputStream = null;
     this.passthrough = null;
     this.blackholeStream = null;
+    this.endSequenceFn = null;
+    this.throttledOutput = null;
+
     if (this.timeoutHandle) {
       clearTimeout(this.timeoutHandle);
       this.timeoutHandle = undefined;
@@ -473,78 +637,47 @@ export class Processor extends EventEmitter {
     return this.blackholeStream;
   }
 
-  /**
-   * Обеспечивает drian output-потока для избежания “Broken pipe”,
-   * если потребитель output не читает stream.
-   * Не подключает blackholeStream, если поток уже читается.
-   */
-  private _ensureOutputDrained() {
-    if (!this.outputStream) return;
-    if ((this.outputStream as any)._ffmpegDrainAttached) return;
+  private _ensureFinalOutputDrained(output: PassThroughWithDrain) {
+    if (!output || output._ffmpegDrainAttached) return;
 
-    let actuallyRead = false;
+    let consumerAttached = false;
+
     const markRead = () => {
-      actuallyRead = true;
-      (this.outputStream as any)._ffmpegDrainAttached = true;
+      if (!output || output.destroyed || output.writableEnded) return;
+      consumerAttached = true;
+      output._ffmpegDrainAttached = true;
+      if (this.config.debug || this.config.verbose) {
+        this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] Consumer attached to output stream`);
+      }
     };
 
     const events = ["data", "readable", "end", "close"];
-    let timer: NodeJS.Timeout | undefined;
-    const isBeingRead = () => {
-      const listeners = (this.outputStream as any).listeners?.("data") ?? [];
-      // если есть пользовательские обработчики (кроме наших служебных)
-      return listeners.length > 1;
-    };
+    const isBeingRead = () =>
+      output && !output.destroyed && !output.writableEnded && output.listeners("data").length > 0;
 
     const maybeDrain = () => {
-      if (
-        !actuallyRead &&
-        this.outputStream &&
-        !(this.outputStream as any)._ffmpegDrainAttached &&
-        !isBeingRead()
-      ) {
-        (this.outputStream as any)._ffmpegDrainAttached = true;
-        this.outputStream.pipe(this._getBlackholeStream());
+      if (!consumerAttached && output && !output._ffmpegDrainAttached && !isBeingRead()) {
+        output._ffmpegDrainAttached = true;
+        output.pipe(this._getBlackholeStream(), { end: false });
         if (this.config.debug || this.config.verbose) {
           this.config.logger.debug?.(
-            `[${this.config.loggerTag}] Output PassThrough drained to blackhole to prevent Broken pipe`
+            `[${getTimeString()}] [${this.config.loggerTag}] Final output drained to blackhole to prevent backpressure`
           );
         }
       }
     };
 
-    events.forEach((ev) => this.outputStream!.once(ev, markRead));
-    this.outputStream.once("newListener", (event: string) => {
+    events.forEach((ev) => output.once(ev, markRead));
+    output.once("newListener", (event: string) => {
       if (events.includes(event)) {
         markRead();
-        if (timer) clearTimeout(timer);
+        clearTimeout(timer);
       }
     });
-    // Увеличить таймер до 100мс
-    timer = setTimeout(maybeDrain, 100);
+
+    const timer = setTimeout(maybeDrain, 100);
   }
 
-  /** Создаёт Readable с тишиной — для совместимости */
-  public createSilenceMs(durationMs = 100, sampleRate = 48000, channels = 2) {
-    const buffer = this.createSilenceBuffer(durationMs, sampleRate, channels);
-    return new Readable({
-      read() {
-        this.push(buffer);
-        this.push(null);
-      },
-    });
-  }
-
-  /** Создаёт Buffer silence для короткого tail в конец потока */
-  public createSilenceBuffer(durationMs = 100, sampleRate = 48000, channels = 2): Buffer {
-    const bytesPerSample = 2;
-    const totalBytes = Math.floor(
-      (durationMs / 1000) * sampleRate * channels * bytesPerSample
-    );
-    return Buffer.alloc(totalBytes, 0);
-  }
-
-  /** Обработка abortSignal — cancels процесс */
   private _handleAbortSignal(): void {
     const { abortSignal } = this.config;
     if (!abortSignal) return;
@@ -556,68 +689,54 @@ export class Processor extends EventEmitter {
     }
   }
 
-  /** Таймаут жизни процесса */
   private _handleTimeout(): void {
     if (!this.config.timeout) return;
     this.timeoutHandle = setTimeout(() => {
       if (this.config.debug || this.config.verbose) {
         this.config.logger.warn?.(
-          `[${this.config.loggerTag}] Process timeout after ${this.config.timeout}ms. Terminating.`
+          `[${getTimeString()}] [${this.config.loggerTag}] Process timeout after ${this.config.timeout}ms. Terminating.`
         );
       }
       this.kill("SIGKILL");
     }, this.config.timeout);
   }
 
-  /** Привязка всех input-потоков из this.inputStreams. index=0 -> stdin, прочие — blackhole */
-  private _bindInputStream(): void {
-    if (!this.inputStreams.length || !this.process?.stdin) return;
+  public createSilenceMs(durationMs = 100, sampleRate = 48000, channels = 2) {
+    const bytesPerSecond = sampleRate * channels * 2; // 2 bytes per sample
+    const silenceBytes = Math.floor((durationMs / 1000) * bytesPerSecond);
+    // Adaptive chunk size based on bitrate: 128kbps -> 256 bytes, 320kbps -> 512 bytes
+    const adaptiveChunkSize = Math.min(512, Math.max(128, (this.currentBitrate / 128) * 256));
+    const chunkSize = Math.min(adaptiveChunkSize, silenceBytes); // Generate chunks based on bitrate for smoother streaming
+    let silenceSent = 0;
 
-    // Для index === 0 привязываем к stdin, остальные pipe в blackhole для скорости drain
-    for (const { stream, index } of this.inputStreams) {
-      if (!stream) continue;
-      stream.on("error", (err) => {
-        this.config.logger.error?.(
-          `[${this.config.loggerTag}] Input stream error [index=${index}]: ${(err as Error).message}`
-        );
-        this.emit("error", err);
-        this._finalize(err as Error);
-      });
-
-      stream.on("end", () => {
-        if (this.config.debug || this.config.verbose) {
-          this.config.logger.debug?.(
-            `[${this.config.loggerTag}] Input stream ended [index=${index}]`
-          );
+    return new Readable({
+      highWaterMark: 4096,
+      read() {
+        if (silenceSent >= silenceBytes) {
+          this.push(null); // End of stream
+          return;
         }
-      });
 
-      if (index === 0) {
-        pipeline(stream, this.process.stdin, (err) => {
-          if (err) {
-            if (
-              (err as any).code === "EPIPE" &&
-              (this.hasFinished || this.isTerminating)
-            ) {
-              return;
-            }
-            this.config.logger.error?.(
-              `[${this.config.loggerTag}] Input pipeline failed [index=0]: ${(err as Error).message}`
-            );
-            this.emit("error", err);
-            this._finalize(err as Error);
-          }
-        });
-      } else {
-        // Просто дреним дополнительные input-ы
-        pipeline(stream, this._getBlackholeStream(), () => {});
-      }
-    }
+        const remaining = silenceBytes - silenceSent;
+        const sendSize = Math.min(chunkSize, remaining);
+        const chunk = Buffer.alloc(sendSize, 0); // Silence = all zeros
+        this.push(chunk);
+        silenceSent += sendSize;
+      },
+    });
   }
 
-  /** Обработка stderr ffmpeg, трекинг прогресса */
+  public createSilenceBuffer(durationMs = 100, sampleRate = 48000, channels = 2): Buffer {
+    const bytesPerSample = 2;
+    const totalBytes = Math.floor(
+      (durationMs / 1000) * sampleRate * channels * bytesPerSample
+    );
+    return Buffer.alloc(totalBytes, 0);
+  }
+
   private _handleStderr(chunk: Buffer): void {
     const text = chunk.toString("utf-8");
+
     if (this.stderrBuffer.length < this.config.maxStderrBuffer) {
       this.stderrBuffer += text;
       if (this.stderrBuffer.length > this.config.maxStderrBuffer) {
@@ -626,6 +745,36 @@ export class Processor extends EventEmitter {
         );
       }
     }
+
+    // Parse duration from stderr
+    const durationMatch = text.match(/Duration:\s*(\d{2}):(\d{2}):(\d{2})\.(\d+)/);
+    if (durationMatch) {
+      const hours = parseInt(durationMatch[1], 10);
+      const minutes = parseInt(durationMatch[2], 10);
+      const seconds = parseInt(durationMatch[3], 10);
+      const milliseconds = parseInt(durationMatch[4].substring(0, 3), 10); // Take first 3 digits for ms
+      const totalSeconds = hours * 3600 + minutes * 60 + seconds + milliseconds / 1000;
+      this.currentDuration = Math.max(1, Math.min(3600, totalSeconds)); // Clamp to 1-3600 seconds
+      if (this.config.debug || this.config.verbose) {
+        this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] Detected duration: ${this.currentDuration} seconds`);
+      }
+    }
+
+    // Parse bitrate from stderr
+    const bitrateMatch = text.match(/bitrate=\s*(\d+(?:\.\d+)?)\s*(k(?:b\/s)?|M(?:b\/s)?)/i);
+    if (bitrateMatch) {
+      const value = parseFloat(bitrateMatch[1]);
+      const unit = bitrateMatch[2].toLowerCase();
+      let bitrateKbps = value;
+      if (unit.startsWith('m')) {
+        bitrateKbps = value * 1000; // Convert Mbps to kbps
+      }
+      this.currentBitrate = Math.max(32, Math.min(320, bitrateKbps)); // Clamp to reasonable range
+      if (this.config.debug || this.config.verbose) {
+        this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] Detected bitrate: ${this.currentBitrate} kbps`);
+      }
+    }
+
     if (this.config.enableProgressTracking) {
       const lines = text.split(/[\r\n]+/);
       for (const line of lines) {
@@ -640,29 +789,39 @@ export class Processor extends EventEmitter {
     }
   }
 
-  /** Хендлер выхода процесса */
   private _onProcessExit(code: number | null, signal: NodeJS.Signals | null): void {
+    if (this.config.debug || this.config.verbose) {
+      this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] _onProcessExit called: code=${code}, signal=${signal}, hasFinished=${this.hasFinished}, _runEmittedEnd=${this._runEmittedEnd}`);
+    }
     if (this.hasFinished) return;
     if (code === 0 || (signal !== null && this.isTerminating)) {
       if (this.isTerminating) {
         this.emit("terminated", signal ?? "SIGTERM");
       }
-      // DX: Логгируем успешное завершение (info)
       this.config.logger.info?.(
-        `[${this.config.loggerTag}] Process exited normally with code ${code}, signal ${signal} at ${new Date().toISOString()}`
+        `[${getTimeString()}] [${this.config.loggerTag}] Process exited normally with code ${code}, signal ${signal} at ${new Date().toISOString()}`
       );
 
       if (!this._runEmittedEnd) {
         this._runEnded = true;
-        setImmediate(() => this._doEndSequence && !this._runEmittedEnd && this._doEndSequence());
+        if (this.config.debug || this.config.verbose) {
+          this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] Scheduling end sequence, endSequenceFn=${!!this.endSequenceFn}`);
+        }
+        setImmediate(() => {
+          if (this.endSequenceFn && !this._runEmittedEnd) {
+            if (this.config.debug || this.config.verbose) {
+              this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] Calling end sequence`);
+            }
+            this.endSequenceFn();
+          }
+        });
       }
     } else {
-      // Логировать tail stderr через logger.error при ошибке выхода процесса
       const error = this._getProcessExitError(code, signal);
       const tail = this.stderrBuffer.trim().slice(-4000);
       if (tail && (this.config.debug || this.config.verbose)) {
         this.config.logger.error?.(
-          `[${this.config.loggerTag}] Process exited abnormally, stderr tail:\n${tail}`
+          `[${getTimeString()}] [${this.config.loggerTag}] Process exited abnormally, stderr tail:\n${tail}`
         );
       }
       this.emit("error", error);
@@ -670,7 +829,6 @@ export class Processor extends EventEmitter {
     }
   }
 
-  /** Создание ошибки по exit процесса */
   private _getProcessExitError(
     code: number | null,
     signal: NodeJS.Signals | null
@@ -684,23 +842,28 @@ export class Processor extends EventEmitter {
     return new Error(message);
   }
 
-  /** Финализация и cleanup. Обязательно обнуляет поля даже при ошибках. 
-   * Безопасен к двойному вызову (guard по hasFinished).
-   */
   private _finalize(error?: Error): void {
-    if (this.hasFinished) return; // Guard: do not finalize twice!
+    if (this.config.debug || this.config.verbose) {
+      this.config.logger.debug?.(`[${getTimeString()}] [${this.config.loggerTag}] _finalize called: hasFinished=${this.hasFinished}, error=${!!error}`);
+    }
+    if (this.hasFinished) return;
     this.hasFinished = true;
     try {
       if (this.timeoutHandle) clearTimeout(this.timeoutHandle);
       this._cleanup();
+
+      // Only emit "end" and end() the stream if we haven't been destroyed by consumer
+      if (this.outputStream && !this.outputStream.destroyed && !this.outputStream.writableEnded) {
+        this.outputStream.end();
+        this.emit("end");
+      }
+
       if (error) {
-        // Только при первом вызове трогаем промис
         this.doneReject(error);
       } else {
         this.doneResolve();
       }
     } finally {
-      // Всегда обнуляем поля даже при ошибках
       this.process = null;
       this.outputStream = null;
       this.passthrough = null;
@@ -709,15 +872,29 @@ export class Processor extends EventEmitter {
     }
   }
 
-  /** Очистка потоков и ресурсов, включая timeoutHandle. */
   private _cleanup(): void {
-    this.process?.stdout?.destroy();
-    this.process?.stderr?.destroy();
-    this.outputStream?.destroy();
-    this.passthrough?.destroy();
-    this.blackholeStream?.destroy();
+    try { this.process?.stdout?.destroy(); } catch {
+      // Ignore cleanup errors
+    }
+    try { this.process?.stderr?.destroy(); } catch {
+      // Ignore cleanup errors
+    }
+    try { this.outputStream?.destroy(); } catch {
+      // Ignore cleanup errors
+    }
+    try { this.passthrough?.destroy(); } catch {
+      // Ignore cleanup errors
+    }
+    try { this.blackholeStream?.destroy(); } catch {
+      // Ignore cleanup errors
+    }
+    try { this.throttledOutput?.destroy(); } catch {
+      // Ignore cleanup errors
+    }
     for (const { stream } of this.extraOutputs) {
-      stream.destroy();
+      try { stream.destroy(); } catch {
+        // Ignore cleanup errors
+      }
     }
     if (this.timeoutHandle) {
       clearTimeout(this.timeoutHandle);
@@ -725,7 +902,6 @@ export class Processor extends EventEmitter {
     }
   }
 
-  /** Унифицированный парсер прогресса ffmpeg: все числовые поля приводятся к number. */
   private _parseProgress(line: string): Partial<FFmpegProgress> | null {
     const progress: Partial<FFmpegProgress> = {};
     const pairs = line.trim().split(/\s+/);
@@ -734,92 +910,65 @@ export class Processor extends EventEmitter {
       if (!key || value == null) continue;
       switch (key) {
         case "frame":
-          (progress as any)["frame"] = Number(value);
+          progress.frame = Number(value);
           break;
         case "total_size":
-          (progress as any)["totalSize"] = Number(value);
+          progress.totalSize = Number(value);
           break;
         case "out_time_us":
-          (progress as any)["outTimeUs"] = Number(value);
+          progress.outTimeUs = Number(value);
           break;
         case "dup_frames":
-          (progress as any)["dupFrames"] = Number(value);
+          progress.dupFrames = Number(value);
           break;
         case "drop_frames":
-          (progress as any)["dropFrames"] = Number(value);
+          progress.dropFrames = Number(value);
           break;
         case "packet":
-          (progress as any)["packet"] = Number(value);
+          progress.packet = Number(value);
           break;
         case "chapter":
-          (progress as any)["chapter"] = Number(value);
+          progress.chapter = Number(value);
           break;
         case "fps":
-          (progress as any)["fps"] = parseFloat(value.replace("x", ""));
+          progress.fps = parseFloat(value.replace("x", ""));
           break;
         case "speed":
-          (progress as any)["speed"] = parseFloat(value.replace("x", ""));
+          progress.speed = parseFloat(value.replace("x", ""));
           break;
         case "bitrate":
-          (progress as any)["bitrate"] = value;
+          progress.bitrate = value;
           break;
         case "size":
-          (progress as any)["size"] = value;
+          progress.size = value;
           break;
         case "out_time":
-          (progress as any)["outTime"] = value;
+          progress.outTime = value;
           break;
         case "progress":
-          (progress as any)["progress"] = value;
+          progress.progress = value;
           break;
         case "time":
-          (progress as any)["time"] = value;
+          progress.time = value;
           break;
       }
     }
     return Object.keys(progress).length > 0 ? progress : null;
   }
 
-  // ----------------------------------
-  // STATIC 생성 & helpers
-  // ----------------------------------
-
-  /**
-   * Быстрое создание экземпляра Processor для пайплайна.
-   *
-   * Пример:
-   *   const proc = Processor.create({
-   *     args: ["-i", "file.mp3", "-filter:a", "volume=0.5", "out.wav"],
-   *     inputStreams: [],
-   *     options: { ffmpegPath: "/usr/bin/ffmpeg" }
-   *   });
-   */
   static create(params?: {
     args?: string[];
     inputStreams?: Array<{ stream: Readable; index: number }>;
     options?: ProcessorOptions;
-  } & ProcessorOptions): Processor {
+  } & Partial<ProcessorOptions>): Processor {
     if (!params || typeof params !== "object") return new Processor();
 
-    // Защитное копирование и типизация, без мутаций исходных объектов
-    let workerArgs: string[] | undefined;
-    let workerInputStreams: Array<{ stream: Readable; index: number }> | undefined;
-    let optionsObj: ProcessorOptions | undefined;
-    // 'rest' variable removed, as it's never used.
-
-    if (Array.isArray(params.args)) {
-      workerArgs = [...params.args];
-    }
-    if (Array.isArray(params.inputStreams)) {
-      workerInputStreams = params.inputStreams.map(({ stream, index }) => ({ stream, index }));
-    }
-    // Попробовать аккуратно вынуть остальные поля и "options"
-    const { args, inputStreams, options: extraOptions, ...restParams } = params as any;
-    optionsObj = { ...(typeof extraOptions === "object" ? extraOptions : {}), ...restParams };
+    const { options: extraOptions, args: workerArgs, inputStreams: workerInputStreams, ...restParams } = params;
+    const optionsObj = { ...(typeof extraOptions === "object" ? extraOptions : {}), ...restParams };
 
     const worker = new Processor(optionsObj);
     if (workerArgs) worker.setArgs(workerArgs);
-    if (workerInputStreams) worker.inputStreams = workerInputStreams;
+    if (workerInputStreams) worker.inputStreams = workerInputStreams.map(({ stream, index }) => ({ stream, index }));
     return worker;
   }
 }

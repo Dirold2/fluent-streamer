@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import FluentStream from "../src/Core/FluentStream.js";
-import { PassThrough } from "stream";
 import fs from "fs";
 import path from "path";
 
@@ -160,7 +159,7 @@ describe("FluentStream Unit Tests", () => {
       let didThrow = false;
       try {
         s.input(fs.createReadStream(TEST_AUDIO), { pipeIndex: 0 });
-      } catch (err: any) {
+      } catch (err: unknown) {
         didThrow = true;
         expect(String(err)).toMatch(/(multiple stream|already has a stream|duplicate pipe index|Multiple stream \(Readable\) inputs are not supported)/i);
       }

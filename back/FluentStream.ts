@@ -2,27 +2,27 @@ import { EventEmitter } from "eventemitter3";
 import { Readable, Transform, Duplex } from "node:stream";
 import Processor from "./Processor.js";
 import {
-  FFmpegRunResultExtended,
+  FFmpegRunResult,
   ProcessorOptions,
-  Logger,
-  AudioProcessingOptions,
-  LogMeta
+  Logger
 } from "../Types/index.js";
 
 const defaultLogger: Logger = {
   debug: () => {},
   info: () => {},
   log: () => {},
-  warn: (msg: string, opts?: { code?: string; stackTrace?: string }) => {
-    if (process?.emitWarning) process.emitWarning(msg, { code: opts?.code });
-    if (opts?.stackTrace) {
-      console.warn("Stack (context):", opts.stackTrace);
+  warn: (...args: any[]) => {
+    if (process?.emitWarning) process.emitWarning(args[0], { code: args[1]?.code });
+    if (args[1]?.stackTrace) {
+      // eslint-disable-next-line no-console
+      console.warn("Stack (context):", args[1]?.stackTrace);
     }
   },
-  error: (msg: string, opts?: { code?: string; stackTrace?: string }) => {
-    if (process?.emitWarning) process.emitWarning(msg, { code: opts?.code });
-    if (opts?.stackTrace) {
-      console.error("Stack (context):", opts.stackTrace);
+  error: (...args: any[]) => {
+    if (process?.emitWarning) process.emitWarning(args[0], { code: args[1]?.code });
+    if (args[1]?.stackTrace) {
+      // eslint-disable-next-line no-console
+      console.error("Stack (context):", args[1]?.stackTrace);
     }
   },
 };
@@ -81,7 +81,12 @@ export default class FluentStream extends EventEmitter {
     "User-Agent": "FluentStream/1.0 (friendly bot)",
   });
 
-  static logger: Logger = defaultLogger;
+  static logger: {
+    warn: (msg: string, opts?: Record<string, any>) => void;
+    info: (msg: string, opts?: Record<string, any>) => void;
+    error: (msg: string, opts?: Record<string, any>) => void;
+    debug: (msg: string, opts?: Record<string, any>) => void;
+  } = defaultLogger;
 
   static _reset(): void {}
 
@@ -95,172 +100,6 @@ export default class FluentStream extends EventEmitter {
     (this.constructor as typeof FluentStream).logger || defaultLogger;
   private customAudioTransform: Transform | Duplex | null = null;
   private _dirty = false;
-  private _volume: number = 1;
-  private _bass: number = 0;
-  private _treble: number = 0;
-  private _compressor: boolean = false;
-  private _useAudioProcessor: boolean = false;
-  public _processorRunResult: FFmpegRunResultExtended | null = null;
-
-  /** Получить/установить громкость (0..1) */
-  public get volume() { return this._volume; }
-  public set volume(val: number) {
-    this._volume = val;
-    if (this._processorRunResult?.setVolume) this._processorRunResult.setVolume(val);
-  }
-  /** Получить/установить плавную регулировку громкости (0..1) */
-  public get fade(): { target: number; duration?: number } | null {
-    return this._processorRunResult?.currentFade ?? null;
-  }
-  public set fade(params: { target: number; duration?: number }) {
-    const { target, duration = 1000 } = params;
-    this._volume = target;
-    if (this._processorRunResult?.startFade) this._processorRunResult.startFade(target, duration);
-  }
-  /** Получить/установить бас (-20..20) */
-  public get bass() { return this._bass; }
-  public set bass(val: number) {
-    this._bass = val;
-    if (this._processorRunResult?.setBass) this._processorRunResult.setBass(val);
-  }
-  /** Получить/установить верхние частоты (-20..20) */
-  public get treble() { return this._treble; }
-  public set treble(val: number) {
-    this._treble = val;
-    if (this._processorRunResult?.setTreble) this._processorRunResult.setTreble(val);
-  }
-  /** Получить/установить компрессор (true/false) */
-  public get compressor() { return this._compressor; }
-  public set compressor(val: boolean) {
-    this._compressor = val;
-    if (this._processorRunResult?.setCompressor) this._processorRunResult.setCompressor(val);
-  }
-  /** Флаг использования AudioProcessor-chain (можно задать до run). */
-  public get useAudioProcessor() { return this._useAudioProcessor; }
-  public set useAudioProcessor(val: boolean) {
-    this._useAudioProcessor = val;
-  }
-  /** Явно включить AudioProcessor-обработку (цепочка) */
-  public enableAudioProcessor(on: boolean = true) {
-    this._useAudioProcessor = on;
-    return this;
-  }
-
-  /** Установить громкость (цепочка) */
-  public setVolume(val: number) { this.volume = val; return this; }
-  /** Установить: плавную регулировку громкости */
-  public startFade(target: number, duration: number = 1000) {
-    this.fade = { target, duration };
-    return this;
-  }
-  /** Установить bass (цепочка) */
-  public setBass(val: number) { this.bass = val; return this; }
-  /** Установить treble (цепочка) */
-  public setTreble(val: number) { this.treble = val; return this; }
-  /** Установить compressor (цепочка) */
-  public setCompressor(val: boolean) { this.compressor = val; return this; }
-  /** Установить все эффекты разом (цепочка) */
-  public setEqualizer(bass: number, treble: number, compressor: boolean) {
-    this.bass = bass;
-    this.treble = treble;
-    this.compressor = compressor;
-    if (this._processorRunResult?.setEqualizer) this._processorRunResult.setEqualizer(bass, treble, compressor);
-    return this;
-  }
-
-  /** Изменить громкость на лету (работает после run) */
-  public changeVolume(val: number): boolean {
-    if (this._processorRunResult?.setVolume) {
-      this._processorRunResult.setVolume(val);
-      this._volume = val;
-      return true;
-    }
-    return false;
-  }
-
-  /** Изменить бас на лету (работает после run) */
-  public changeBass(val: number): boolean {
-    if (this._processorRunResult?.setBass) {
-      this._processorRunResult.setBass(val);
-      this._bass = val;
-      return true;
-    }
-    return false;
-  }
-
-  /** Изменить верхние частоты на лету (работает после run) */
-  public changeTreble(val: number): boolean {
-    if (this._processorRunResult?.setTreble) {
-      this._processorRunResult.setTreble(val);
-      this._treble = val;
-      return true;
-    }
-    return false;
-  }
-
-  /** Изменить компрессор на лету (работает после run) */
-  public changeCompressor(val: boolean): boolean {
-    if (this._processorRunResult?.setCompressor) {
-      this._processorRunResult.setCompressor(val);
-      this._compressor = val;
-      return true;
-    }
-    return false;
-  }
-
-  /** Изменить все эффекты на лету (работает после run) */
-  public changeEqualizer(bass: number, treble: number, compressor: boolean): boolean {
-    if (this._processorRunResult?.setEqualizer) {
-      this._processorRunResult.setEqualizer(bass, treble, compressor);
-      this._bass = bass;
-      this._treble = treble;
-      this._compressor = compressor;
-      return true;
-    }
-    return false;
-  }
-
-  /** Запустить плавное затухание на лету (работает после run) */
-  public fadeOut(duration: number = 1000): boolean {
-    if (this._processorRunResult?.startFade) {
-      this._processorRunResult.startFade(0, duration);
-      this._volume = 0;
-      return true;
-    }
-    return false;
-  }
-
-  /** Запустить плавное появление на лету (работает после run) */
-  public fadeIn(targetVolume: number = 1, duration: number = 1000): boolean {
-    if (this._processorRunResult?.startFade) {
-      this._processorRunResult.startFade(targetVolume, duration);
-      this._volume = targetVolume;
-      return true;
-    }
-    return false;
-  }
-
-  // Cache for audio processor options to avoid repeated object creation
-  private _cachedAudioProcessorOptions: AudioProcessingOptions | null = null;
-  private _lastOptionsHash = "";
-
-  /** Сконструировать актуальные опции для AudioProcessor */
-  private buildAudioProcessorOptions() {
-    const currentHash = `${this._volume}-${this._bass}-${this._treble}-${this._compressor}`;
-    if (this._cachedAudioProcessorOptions && this._lastOptionsHash === currentHash) {
-      return this._cachedAudioProcessorOptions;
-    }
-
-    this._cachedAudioProcessorOptions = {
-      volume: this._volume,
-      bass: this._bass,
-      treble: this._treble,
-      compressor: this._compressor,
-      normalize: false // можно сделать configurable
-    };
-    this._lastOptionsHash = currentHash;
-    return this._cachedAudioProcessorOptions;
-  }
 
   constructor(options: ProcessorOptions = {}) {
     super();
@@ -272,13 +111,6 @@ export default class FluentStream extends EventEmitter {
     } else {
       this._headers = {};
     }
-
-    // Initialize audio processor settings from options
-    this._useAudioProcessor = options.useAudioProcessor ?? false;
-    this._volume = options.audioProcessorOptions?.volume ?? 1;
-    this._bass = options.audioProcessorOptions?.bass ?? 0;
-    this._treble = options.audioProcessorOptions?.treble ?? 0;
-    this._compressor = options.audioProcessorOptions?.compressor ?? false;
   }
 
   /**
@@ -290,7 +122,7 @@ export default class FluentStream extends EventEmitter {
   private emitLog(
     level: "warn" | "error" | "info" | "debug",
     msg: string,
-    opts?: LogMeta
+    opts?: Record<string, any>
   ): void {
     const logger = this._logger;
     const options = { ...(opts || {}) };
@@ -338,7 +170,7 @@ export default class FluentStream extends EventEmitter {
     } catch (err) {
       this.customAudioTransform = prev.custom;
       this.audioTransform = prev.audio;
-      this.emitLog("error", "[FluentStream] withAudioTransform user error", { err: err as Error });
+      this.emitLog("error", "[FluentStream] withAudioTransform user error", { err });
       throw err;
     }
 
@@ -948,8 +780,6 @@ export default class FluentStream extends EventEmitter {
     const opts = this.addHumanityHeadersToProcessorOptions({
       ...this.options,
       ...extraOpts,
-      useAudioProcessor: this._useAudioProcessor,
-      audioProcessorOptions: this.buildAudioProcessorOptions()
     });
     if (inputStreams && inputStreams.length > 0) {
       (opts).inputStreams = inputStreams;
@@ -966,7 +796,7 @@ export default class FluentStream extends EventEmitter {
    * Запустить ffmpeg с текущими аргументами/потоками.
    * После вызова становится dirty, повторное использование невозможно — нужно clear()!
    */
-  public run(extraOpts: Partial<ProcessorOptions> = {}): FFmpegRunResultExtended {
+  public async run(extraOpts: Partial<ProcessorOptions> = {}): Promise<FFmpegRunResult> {
     if (this._dirty) {
       throw new FluentStreamValidationError(
         "FluentStream instance is dirty: .clear() must be called before next .run()!"
@@ -974,8 +804,7 @@ export default class FluentStream extends EventEmitter {
     }
     const proc = this.createProcessor(extraOpts);
     this._dirty = true;
-    this._processorRunResult = proc.run();
-    return this._processorRunResult;
+    return await proc.run();
   }
 
   /**
@@ -1031,11 +860,7 @@ export default class FluentStream extends EventEmitter {
         "No audio transform pipeline exists: .setAudioTransform() must be called before getAudioTransform()."
       );
     }
-    const t = this.audioTransform as Transform & {
-      _backpressureWarned?: boolean;
-      _writableState?: { highWaterMark?: number };
-      _readableState?: { highWaterMark?: number };
-    };
+    const t = this.audioTransform as Transform & { _backpressureWarned?: boolean; _writableState?: any; _readableState?: any };
     if (
       typeof t._backpressureWarned === "undefined"
       && typeof t._writableState === "object"
@@ -1043,7 +868,7 @@ export default class FluentStream extends EventEmitter {
     ) {
       t._backpressureWarned = true;
       const readableState = t._readableState;
-      if (readableState && readableState.highWaterMark && readableState.highWaterMark > 128 * 1024) {
+      if (readableState && readableState.highWaterMark > 128 * 1024) {
         this.emitLog(
           "warn",
           `getAudioTransform(): Potentially large stream buffer (highWaterMark: ${readableState.highWaterMark}). If running multiple big inputs or complex crossfade, monitor node memory/latency.`,

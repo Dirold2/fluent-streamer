@@ -1,15 +1,48 @@
 import { PassThrough, Readable } from "stream";
+import { AudioProcessor } from "../Core/AudioProcessor.js";
 
-/** Logger interface for debugging, warnings, errors. */
+/** Unified logging interface used across Processor and FluentStream. */
 export interface Logger {
-  debug(message: string, meta?: Record<string, any>): void;
-  info(message: string, meta?: Record<string, any>): void;
-  log(message: string, meta?: Record<string, any>): void;
-  warn(message: string, meta?: Record<string, any>): void;
-  error(message: string, meta?: Record<string, any>): void;
+  debug(message: string, meta?: LogMeta): void;
+  info(message: string, meta?: LogMeta): void;
+  log(message: string, meta?: LogMeta): void;
+  warn(message: string, meta?: LogMeta): void;
+  error(message: string | Error, meta?: LogMeta): void;
 }
 
-/** Options for configuring the Processor and its core behavior. */
+/** Metadata for logging operations */
+export interface LogMeta {
+  code?: string;
+  stackTrace?: string;
+  detail?: unknown;
+  err?: Error;
+  currentArgs?: string[];
+  complexFilters?: string[];
+}
+
+/**
+ * Configuration for audio post-processing chain (AudioProcessor).
+ * All numeric values are normalized (0–1 or dB ranges where applicable).
+ */
+export interface AudioProcessingOptions {
+  volume: number;
+  bass: number;
+  treble: number;
+  compressor: boolean;
+  normalize: boolean;
+  headers?: Record<string, string>;
+  lowPassFrequency?: number;
+  lowPassQ?: number;
+  fade?: {
+    fadein: number;
+    fadeout: number;
+  };
+}
+
+/**
+ * Global ffmpeg & processor configuration.
+ * Defines runtime behavior, logging, error handling and integration flags.
+ */
 export interface ProcessorOptions {
   ffmpegPath?: string;
   failFast?: boolean;
@@ -29,15 +62,21 @@ export interface ProcessorOptions {
   headers?: Record<string, string> | string;
   inputStreams?: Array<{ stream: Readable; index: number }>;
   verbose?: boolean;
+  disableThrottling?: boolean;
+  
+  /** Enables AudioProcessor usage and configures its chain. */
+  useAudioProcessor?: boolean;
+  audioProcessorOptions?: AudioProcessingOptions;
 }
 
-/** Progress-reporting interface for ffmpeg. */
+/** Real-time ffmpeg progress structure (parsed from stderr). */
 export interface FFmpegProgress {
   frame?: number;
   fps?: number;
   bitrate?: string;
   totalSize?: number;
   outTimeUs?: number;
+  outTimeMs?: number;
   outTime?: string;
   dupFrames?: number;
   dropFrames?: number;
@@ -49,7 +88,7 @@ export interface FFmpegProgress {
   chapter?: number;
 }
 
-/** Statistics on a single ffmpeg process run. */
+/** Statistics about a single ffmpeg execution session. */
 export interface FFmpegStats {
   startTime: Date;
   endTime?: Date;
@@ -60,26 +99,38 @@ export interface FFmpegStats {
   bytesProcessed: number;
 }
 
-/** The main result object describing the ffmpeg run. */
+/** Minimal result of a Processor run (used for basic chaining). */
 export interface FFmpegRunResult {
   output: PassThrough;
   done: Promise<void>;
   stop: () => void;
-  on?(event: string, listener: (...args: any[]) => void): this;
 }
 
+/** Extended Processor result with full audio control and lifecycle management. */
 export interface FFmpegRunResultExtended extends FFmpegRunResult {
   passthrough: PassThrough;
-  close: () => void;
+  close: () => Promise<void> | void;
+  /** AudioProcessor instance, if enabled. */
+  audioProcessor?: AudioProcessor;
+  /** Current fade state, if any. */
+  currentFade?: { target: number; duration?: number };
+  /**
+   * Audio effects control API (only present if AudioProcessor enabled).
+   */
+  setVolume?: (volume: number) => void;
+  setBass?: (bass: number) => void;
+  setTreble?: (treble: number) => void;
+  setCompressor?: (enabled: boolean) => void;
+  setEqualizer?: (bass: number, treble: number, compressor: boolean) => void;
+  startFade?: (targetVolume: number, durationMs: number) => void;
 }
 
-
-/** ffmpeg options type that permits string or stream input. */
+/** ffmpeg execution configuration (input can be stream or string). */
 export interface StreamableFFmpegOptions extends ProcessorOptions {
   input?: string | Readable;
 }
 
-/** Information about a queued ffmpeg job. */
+/** Job queued for execution by the ProcessorManager. */
 export interface FFmpegJob {
   name: string;
   options: StreamableFFmpegOptions;
@@ -87,7 +138,7 @@ export interface FFmpegJob {
   reject: (err: Error) => void;
 }
 
-/** Manager/global configuration for ffmpeg job processing. */
+/** Global settings for managing ffmpeg jobs (retry, concurrency, etc). */
 export interface FFmpegManagerOptions {
   maxRestarts?: number;
   concurrency?: number;
@@ -96,7 +147,27 @@ export interface FFmpegManagerOptions {
   autoRestart?: boolean;
 }
 
-/** "Processor" interface for core processor public API. */
+/** Debug information returned by Processor.debugDump() */
+export interface ProcessorDebugInfo {
+  pid: number | null;
+  args: string[];
+  fullArgs: string[];
+  isClosed: boolean;
+  hasFinished: boolean;
+  isTerminating: boolean;
+  running: boolean;
+  runEnded: boolean;
+  runEmittedEnd: boolean;
+  extraGlobalArgs: string[];
+  stderrBufferLength: number;
+  timeoutHandle: boolean;
+  progress: Partial<FFmpegProgress>;
+  inputStreamsCount: number;
+  extraOutputsCount: number;
+  timestamp: string;
+}
+
+/** Processor public API (low-level ffmpeg orchestration). */
 export interface Processor {
   config: Required<Omit<ProcessorOptions, "abortSignal">> & {
     abortSignal?: AbortSignal;
@@ -104,12 +175,31 @@ export interface Processor {
     verbose?: boolean;
     debug?: boolean;
     enableProgressTracking?: boolean;
+    useAudioProcessor?: boolean;
+    audioProcessorOptions?: AudioProcessingOptions;
   };
 
-  get pid(): number | null;
-  get isRunning(): boolean;
-  get isTerminated(): boolean;
+  /** Lifecycle & state getters */
+  readonly pid: number | null;
+  readonly isRunning: boolean;
+  readonly isTerminated: boolean;
+
+  /** ffmpeg argument management */
   setArgs(args: string[]): void;
   getArgs(): string[];
-  run(): FFmpegRunResult;
+
+  /** Audio processor configuration */
+  setAudioProcessorOptions(opts: AudioProcessingOptions): this;
+  enableAudioProcessor(enable: boolean): this;
+
+  /** Start ffmpeg + optional AudioProcessor chain */
+  run(): FFmpegRunResultExtended;
+
+  /** Graceful shutdown and cleanup */
+  close(): Promise<void>;
+  kill(signal?: NodeJS.Signals): Promise<void>;
+  destroy(): void;
+
+  /** Debug helpers */
+  debugDump(): ProcessorDebugInfo;
 }
