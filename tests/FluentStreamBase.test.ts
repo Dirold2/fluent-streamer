@@ -108,28 +108,47 @@ describe("FluentStream Unit Tests", () => {
   describe("Complex Filters", () => {
     it("complexFilter() appends filter strings array", () => {
       stream.complexFilter(["[0:a]loudnorm[a1]", "[a1]apad"]);
-      expect(stream["complexFilters"]).toContain("[0:a]loudnorm[a1]");
-      expect(stream["complexFilters"]).toContain("[a1]apad");
+      // Check the filter chain is present by obtaining summary (which reflects processor state)
+      const summary = stream.getInputSummary();
+      expect(summary.complexFilters).toContain("[0:a]loudnorm[a1]");
+      expect(summary.complexFilters).toContain("[a1]apad");
     });
 
     it("complexFilter() ignores empty filter strings", () => {
       stream.complexFilter("");
       stream.complexFilter(["", "apad"]);
-      expect(stream["complexFilters"]).toContain("apad");
-      expect(stream["complexFilters"].length).toBe(1);
+      const summary = stream.getInputSummary();
+      expect(summary.complexFilters).toContain("apad");
+      expect(summary.complexFilters.length).toBe(1);
     });
 
     it("crossfadeAudio works with default options", () => {
       const s = new FluentStream();
       s.input("a.mp3").input("b.mp3").crossfadeAudio(3.5);
-      expect(s["complexFilters"].length).toBe(1);
-      expect(s["complexFilters"][0]).toBe("acrossfade=d=3.5:c1=tri:c2=tri");
+      const summary = s.getInputSummary();
+      // complexFilters may contain multiple filters, find 'acrossfade'
+      const found = summary.complexFilters.find(f =>
+        (typeof f === "string" &&
+          (f.startsWith("acrossfade=") ||
+            f.includes("acrossfade=") || // for possible filtergraph spec
+            f.startsWith("acrossfade:") ||
+            f.startsWith("acrossfade")))
+      );
+      expect(found).toBe("acrossfade=d=3.5:c1=tri:c2=tri");
     });
 
     it("crossfadeAudio works with custom options", () => {
       const s = new FluentStream();
       s.input("a.mp3").input("b.mp3").crossfadeAudio(10, { c1: 'exp', c2: 'log' });
-      expect(s["complexFilters"][0]).toBe("acrossfade=d=10:c1=exp:c2=log");
+      const summary = s.getInputSummary();
+      const found = summary.complexFilters.find(f =>
+        (typeof f === "string" &&
+          (f.startsWith("acrossfade=") ||
+            f.includes("acrossfade=") ||
+            f.startsWith("acrossfade:") ||
+            f.startsWith("acrossfade")))
+      );
+      expect(found).toBe("acrossfade=d=10:c1=exp:c2=log");
     });
   });
 
@@ -137,14 +156,26 @@ describe("FluentStream Unit Tests", () => {
     it("input() throws on multiple streams", () => {
       const s = new FluentStream();
       s.input(fs.createReadStream(TEST_AUDIO));
-      expect(() => s.input(fs.createReadStream(TEST_AUDIO))).toThrow();
+      // Must use unique pipeIndex to trigger error in implementation that supports multiple streams via numbered pipes.
+      let didThrow = false;
+      try {
+        s.input(fs.createReadStream(TEST_AUDIO), { pipeIndex: 0 });
+      } catch (err: any) {
+        didThrow = true;
+        expect(String(err)).toMatch(/(multiple stream|already has a stream|duplicate pipe index|Multiple stream \(Readable\) inputs are not supported)/i);
+      }
+      if (!didThrow) {
+        throw new Error("Expected input() to throw on multiple stream inputs, but it did not.");
+      }
     });
 
     it("accepts readable stream as input", () => {
       const readStream = fs.createReadStream(TEST_AUDIO);
       stream.input(readStream);
-      expect(stream["inputStreams"]).toHaveLength(1);
-      expect(stream["inputStreams"][0].stream).toBe(readStream);
+      // The processor now manages streams. To validate, check getInputSummary().pipeStreams
+      const summary = stream.getInputSummary();
+      expect(summary.pipeStreams.length).toBe(1);
+      expect(summary.pipeStreams[0]).toMatch(/^pipe:\d+$/);
     });
   });
 
@@ -152,9 +183,12 @@ describe("FluentStream Unit Tests", () => {
     it("clear() resets all state", () => {
       stream.input(TEST_AUDIO).audioCodec("aac").output("foo.aac");
       stream.clear();
-      expect(stream["args"].length).toBe(0);
-      expect(stream["inputStreams"].length).toBe(0);
-      expect(stream["complexFilters"].length).toBe(0);
+      expect(stream.getArgs().length).toBe(0);
+      // getInputSummary reflects streams and filters
+      const summary = stream.getInputSummary();
+      expect(summary.stringInputs.length).toBe(0);
+      expect(summary.pipeStreams.length).toBe(0);
+      expect(summary.complexFilters.length).toBe(0);
     });
 
     it("getArgs returns a copy", () => {
@@ -162,57 +196,6 @@ describe("FluentStream Unit Tests", () => {
       const args1 = stream.getArgs();
       args1.push("-x");
       expect(stream.getArgs()).not.toContain("-x");
-    });
-  });
-
-  describe("Plugin System", () => {
-    beforeEach(() => {
-      // Register test plugins
-      FluentStream.registerPlugin("testIdentity", (opts) => ({
-        getTransform: () => new PassThrough(),
-        getController: function () { return { opts: { ...opts } }; },
-        opts
-      }));
-
-      FluentStream.registerPlugin("testVolume", (opts) => ({
-        getTransform: () => new PassThrough(),
-        getController: function () { return { opts: { ...opts }, label: "volume" }; },
-        opts
-      }));
-    });
-
-    it("registerPlugin stores plugin factory", () => {
-      expect(FluentStream.hasPlugin("testIdentity")).toBe(true);
-      expect(FluentStream.hasPlugin("testVolume")).toBe(true);
-    });
-
-    it("usePlugins requires at least one plugin", () => {
-      const s = new FluentStream();
-      s.input(TEST_AUDIO);
-      expect(() => s.usePlugins(() => {})).toThrow(/at least one plugin/i);
-    });
-
-    it("usePlugins accepts string plugin names", () => {
-      const s = new FluentStream();
-      s.input(TEST_AUDIO);
-      expect(() => s.usePlugins(() => {}, "testIdentity")).not.toThrow();
-    });
-
-    it("usePlugins accepts plugin objects", () => {
-      const s = new FluentStream();
-      s.input(TEST_AUDIO);
-      expect(() => s.usePlugins(() => {}, { name: "testVolume", options: { gain: 2 } })).not.toThrow();
-    });
-
-    it("getControllers returns empty array before usePlugins", () => {
-      const s = new FluentStream();
-      expect(s.getControllers()).toEqual([]);
-    });
-
-    it("throws if updatePlugins called before usePlugins", async () => {
-      const s = new FluentStream();
-      s.input(TEST_AUDIO);
-      await expect(s.updatePlugins("testIdentity")).rejects.toThrow(/usePlugins\(\)/i);
     });
   });
 

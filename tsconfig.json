@@ -9,9 +9,10 @@
     "allowSyntheticDefaultImports": true,
     "importHelpers": true,
     "strict": true,
+    "strictBindCallApply": true,
     "sourceMap": true,
     "declaration": true,
-    "declarationMap": false,
+    "declarationMap": true,
     "forceConsistentCasingInFileNames": true,
     "noFallthroughCasesInSwitch": true,
     "noImplicitReturns": true,
@@ -27,19 +28,24 @@
     "baseUrl": ".",
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "types": ["vitest/globals", "node"]
+    "types": ["vitest/globals", "node"],
+    "incremental": true
   },
   "include": [
-    "src/**/*",
+    "src/**/*.ts",
+    "src/**/*.tsx",
     "pla.ts"
   ],
   "exclude": [
     "node_modules",
     "build",
-    "**/*.spec.ts"
+    "dist",
+    "**/*.spec.ts",
+    "**/*.test.ts"
   ],
   "ts-node": {
     "esm": true,
-    "experimentalSpecifierResolution": "node"
+    "experimentalSpecifierResolution": "node",
+    "files": true
   }
 }
