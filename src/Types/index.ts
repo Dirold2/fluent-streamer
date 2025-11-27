@@ -1,122 +1,219 @@
 import { PassThrough, Readable, Transform } from "stream";
-
-// ====================== Logging ======================
+import { AudioProcessor } from "../Core/AudioProcessor.js";
 
 /**
- * Logger interface for debugging, warnings, and errors.
+ * Unified logging interface used across Processor and any higher-level wrappers.
  */
 export interface Logger {
-  debug(message: string, meta?: Record<string, any>): void;
-  info(message: string, meta?: Record<string, any>): void;
-  log(message: string, meta?: Record<string, any>): void;
-  warn(message: string, meta?: Record<string, any>): void;
-  error(message: string, meta?: Record<string, any>): void;
+  debug(message: string, meta?: LogMeta): void;
+  info(message: string, meta?: LogMeta): void;
+  log(message: string, meta?: LogMeta): void;
+  warn(message: string, meta?: LogMeta): void;
+  error(message: string | Error, meta?: LogMeta): void;
 }
 
-// ====================== ProcessorOptions ======================
+/**
+ * Optional structured metadata sent with log messages.
+ */
+export interface LogMeta {
+  code?: string;
+  stackTrace?: string;
+  detail?: unknown;
+  err?: Error;
+  currentArgs?: string[];
+  complexFilters?: string[];
+}
 
 /**
- * Base options for configuring ProcessorOptions and the Processor core.
+ * Configuration for audio post‑processing chain (AudioProcessor).
+ * Все значения в «юзерских» единицах (0–1 или условные dB‑слайдеры),
+ * нормализация в реальные коэффициенты происходит внутри AudioProcessor.
+ */
+export interface AudioProcessingOptions {
+  volume: number; // 0–1
+  bass: number; // -1..1 (или любая твоя шкала, маппится через normalizeBass)
+  treble: number; // -1..1
+  compressor: boolean;
+  normalize: boolean;
+
+  headers?: Record<string, string>;
+  lowPassFrequency?: number;
+  lowPassQ?: number;
+
+  fade?: {
+    fadein: number; // ms
+    fadeout: number; // ms
+  };
+}
+
+/**
+ * Input source type: stream or URL
+ * Тип входного источника: поток или URL
+ */
+export type InputSource =
+  | { type: "stream"; stream: Readable; index: number }
+  | {
+      type: "url";
+      url: string;
+      index: number;
+      headers?: Record<string, string>;
+    };
+
+/**
+ * Global ffmpeg & processor configuration.
+ * Определяет путь к ffmpeg, логирование, лимиты и т.д.
  */
 export interface ProcessorOptions {
-  /** Path to ffmpeg (default: "ffmpeg") */
   ffmpegPath?: string;
-  /** Abort on first critical error */
+
   failFast?: boolean;
-  /** Extra global arguments for ffmpeg (e.g., -hide_banner) */
   extraGlobalArgs?: string[];
-  /** Max process runtime in ms (0 = unlimited) */
+
   timeout?: number;
-  /** Maximum stderr buffer size (default: 1MB) */
   maxStderrBuffer?: number;
-  /** Enable progress tracking (emits "progress" event) */
   enableProgressTracking?: boolean;
-  /** Custom logger */
+
   logger?: Logger;
-  /** Debug logger */
   debug?: boolean;
-  /** Logger tag for log messages */
+  verbose?: boolean;
+  stdoutlog?: boolean;
   loggerTag?: string;
-  /** AbortSignal for process cancellation */
+
   abortSignal?: AbortSignal;
-  /** Suppress logging of "premature close" warning */
   suppressPrematureCloseWarning?: boolean;
-  /**
-   * HTTP headers for network requests by ffmpeg (as object or string).
-   */
+
+  wallTimeLimit?: number;
+  executionId?: string;
+
+  onBeforeChildProcessSpawn?: (
+    ffmpegPath: string,
+    ffmpegArgs: string[],
+  ) => void | Promise<void>;
+
+  stderrLogHandler?: (line: string) => void;
+
   headers?: Record<string, string> | string;
+  userAgent?: string;
+  inputStreams?: Array<{ stream: Readable; index: number }>;
+  inputSources?: InputSource[];
+
+  disableThrottling?: boolean;
+
+  ffmpegLogLevel?:
+    | "quiet"
+    | "panic"
+    | "fatal"
+    | "error"
+    | "warning"
+    | "info"
+    | "verbose"
+    | "debug"
+    | "trace";
+
+  /**
+   * Длительность «хвостовой тишины» в конце стрима (ms) для чистого завершения.
+   * Реализовано в Processor через tailSilenceMs.
+   */
+  tailSilenceMs?: number;
+
+  /** Включает использование AudioProcessor и его начальную конфигурацию. */
+  useAudioProcessor?: boolean;
+  audioProcessorOptions?: AudioProcessingOptions;
 }
 
 /**
- * Current progress state of the ffmpeg process.
- *
- * All fields are optional and may not always be present.
+ * Real‑time ffmpeg progress (parsed from stderr).
  */
 export interface FFmpegProgress {
-  /** Number of frames processed */
   frame?: number;
-  /** Processing frames per second */
   fps?: number;
-  /** Current bitrate (e.g. "1700kbits/s") */
   bitrate?: string;
-  /** Output file size in bytes */
   totalSize?: number;
-  /** Output time in microseconds */
+
   outTimeUs?: number;
-  /** Output time as string ("00:01:30.05") */
+  outTimeMs?: number;
   outTime?: string;
-  /** Number of duplicated frames */
+
   dupFrames?: number;
-  /** Number of dropped frames */
   dropFrames?: number;
-  /** Processing speed (e.g. 1 = realtime) */
+
   speed?: number;
-  /** Progress stage ("continue", "end") */
   progress?: string;
-  /** Output size (parsed in Processor.parseProgress) */
+
   size?: string;
-  /** Output time (parsed in Processor.parseProgress) */
   time?: string;
-  /** Current packet number (parsed in Processor.parseProgress) */
+
   packet?: number;
-  /** Current chapter number (parsed in Processor.parseProgress) */
   chapter?: number;
 }
 
 /**
- * Statistics about the ffmpeg process run.
+ * Statistics about a single ffmpeg execution session.
  */
 export interface FFmpegStats {
   startTime: Date;
   endTime?: Date;
   duration?: number;
+
   exitCode?: number;
   signal?: string;
+
   stderrLines: number;
   bytesProcessed: number;
 }
 
 /**
- * The result of the ffmpeg run.
+ * Minimal result of a Processor run (base for chaining).
  */
 export interface FFmpegRunResult {
-  /** Main output stream (stdout) */
+  /** Основной выходной поток (PCM / то, что идёт в Discord и т.п.). */
   output: PassThrough;
-  /** Promise resolving when the process ends */
+
+  /** Promise, который резолвится при нормальном завершении и реджектится при ошибке. */
   done: Promise<void>;
-  /** Function to stop the process */
+
+  /** Мягкая остановка процесса (SIGTERM/kill внутри Processor). */
   stop: () => void;
 }
 
 /**
- * Options for an ffmpeg task supporting both string and stream inputs.
+ * Extended Processor result with full audio control and lifecycle management.
+ */
+export interface FFmpegRunResultExtended extends FFmpegRunResult {
+  /** Тот же PassThrough, что и output; оставлен для обратной совместимости. */
+  passthrough: PassThrough;
+
+  /** Грейсфул‑закрытие пайплайна (end + kill + ожидание done). */
+  close: () => Promise<void> | void;
+
+  /** AudioProcessor instance, если включён useAudioProcessor. */
+  audioProcessor?: AudioProcessor;
+
+  /** Поток после ThrottleStream (ограничение байтов/сек для реального времени). */
+  throttledOutput?: Transform;
+
+  /** Текущее состояние fade (если запущен). */
+  currentFade?: { target: number; duration?: number };
+
+  /** Audio effects control API (если AudioProcessor активен). */
+  setVolume?: (volume: number) => void;
+  setBass?: (bass: number) => void;
+  setTreble?: (treble: number) => void;
+  setCompressor?: (enabled: boolean) => void;
+  setEqualizer?: (bass: number, treble: number, compressor: boolean) => void;
+  startFade?: (targetVolume: number, durationMs: number) => void;
+}
+
+/**
+ * ffmpeg execution options where input can be либо URL/путь, либо Readable‑стрим.
+ * Если используешь наш Processor, обычно передаёшь только inputStreams, а не input.
  */
 export interface StreamableFFmpegOptions extends ProcessorOptions {
   input?: string | Readable;
 }
 
 /**
- * Representation of a single ffmpeg job in the queue.
+ * Job queued for execution by some внешнего FFmpegManager.
  */
 export interface FFmpegJob {
   name: string;
@@ -126,139 +223,134 @@ export interface FFmpegJob {
 }
 
 /**
- * Configuration for the ffmpeg job manager.
+ * Global settings for managing ffmpeg jobs (retry, concurrency, etc).
+ * Сам менеджер у тебя пока не реализован — это интерфейс под будущее.
  */
 export interface FFmpegManagerOptions {
-  /** Maximum number of allowed restarts */
   maxRestarts?: number;
-  /** Maximum number of parallel ffmpeg jobs */
   concurrency?: number;
   logger?: Logger;
-  /** Number of retry attempts on failure */
   retry?: number;
-  /** Whether to auto-restart jobs on failure */
   autoRestart?: boolean;
 }
 
 /**
- * Basic options shared by all audio plugins.
- * Can be extended in specific plugin implementations.
- *
- * @example <caption>Extending base options</caption>
- * interface MyPluginOptions extends AudioPluginBaseOptions {
- *   gain: number;
- * }
- *
- * @example <caption>Using in a plugin registration</caption>
- * const options: AudioPluginBaseOptions = { sampleRate: 44100, channels: 2 };
+ * Debug information returned by Processor.debugDump().
  */
-export interface AudioPluginBaseOptions {
-  sampleRate?: number;
-  channels?: number;
-  [key: string]: any; // Allows plugins to accept additional custom options.
+export interface ProcessorDebugInfo {
+  pid: number | null;
+  args: string[];
+  fullArgs: string[];
+
+  isClosed: boolean;
+  hasFinished: boolean;
+  isTerminating: boolean;
+
+  running: boolean;
+  runEnded: boolean;
+  runEmittedEnd: boolean;
+
+  extraGlobalArgs: string[];
+  stderrBufferLength: number;
+  timeoutHandle: boolean;
+
+  progress: Partial<FFmpegProgress>;
+
+  inputStreamsCount: number;
+  extraOutputsCount: number;
+
+  timestamp: string;
 }
 
 /**
- * Generic interface for an audio plugin.
- * Should be implemented by all custom audio plugin transforms.
- *
- * @template Options - Type of options specific to the plugin.
- *
- * @example <caption>Minimal custom plugin implementing AudioPlugin</caption>
- * import { Transform } from "stream";
- *
- * interface GainOptions extends AudioPluginBaseOptions {
- *   gain: number;
- * }
- *
- * class GainPlugin implements AudioPlugin<GainOptions> {
- *   readonly name = "gain";
- *   private options: Required<GainOptions>;
- *   constructor(opts: Required<GainOptions>) {
- *     this.options = opts;
- *   }
- *   createTransform(options: Required<GainOptions>): Transform {
- *     // Return a Transform that applies gain.
- *     return new Transform({
- *       transform(chunk, encoding, callback) {
- *         // ... audio gain logic here ...
- *         callback(null, chunk);
- *       }
- *     });
- *   }
- *   setOptions(options: Partial<GainOptions>): void {
- *     this.options = { ...this.options, ...options };
- *   }
- *   getOptions(): Required<GainOptions> {
- *     return this.options;
- *   }
- * }
+ * Публичный API Processor на уровне типов.
+ * Реальная реализация находится в ../Core/Processor.js.
  */
-export interface AudioPlugin<
-  Options extends AudioPluginBaseOptions = AudioPluginBaseOptions,
-> {
-  /**
-   * Plugin name, used for registration and logging.
-   */
-  readonly name?: string;
+export interface Processor {
+  /** Итоговая склеенная конфигурация (с дефолтами). */
+  config: Required<Omit<ProcessorOptions, "logger">> & {
+    abortSignal?: AbortSignal;
+    logger: Logger;
+    verbose?: boolean;
+    debug?: boolean;
+    enableProgressTracking?: boolean;
+    useAudioProcessor: boolean;
+    audioProcessorOptions?: AudioProcessingOptions;
+  };
 
-  /**
-   * Creates a Transform stream to process audio.
-   * Optional: If not implemented, the plugin must provide a "getTransform" method instead.
-   * @param options The complete set of options (with defaults applied).
-   * @returns {Transform} Stream for processing audio.
-   *
-   * @example
-   * const plugin = new GainPlugin({ gain: 2, sampleRate: 44100, channels: 2 });
-   * const audioTransform = plugin.createTransform
-   *   ? plugin.createTransform(plugin.getOptions())
-   *   : plugin.getTransform(); // fallback for plugins that only provide getTransform
-   */
-  createTransform?(options: Required<Options>): Transform;
+  /** Lifecycle & state getters */
+  readonly pid: number | null;
+  isRunning(): boolean;
 
-  /**
-   * (Legacy/compatibility) Some plugins may only provide getTransform().
-   * This method should be used as a fallback if createTransform is not present.
-   * @returns {Transform} Stream for processing audio.
-   */
-  getTransform?(): Transform;
+  /** ffmpeg argument management */
+  setArgs(args: string[]): void;
+  getArgs(): string[];
 
-  /**
-   * Optional. Dynamically update plugin options "on the fly".
-   * @param options Partial set of options to update.
-   *
-   * @example
-   * plugin.setOptions({ gain: 1.5 });
-   */
-  setOptions?(options: Partial<Options>): void;
+  /** Input / output management */
+  setExtraGlobalArgs(args: string[]): void;
 
-  /**
-   * Optional. Get the plugin's current (complete) options.
-   * @returns {Required<Options>} The current full options object.
-   *
-   * @example
-   * const opts = plugin.getOptions();
-   * console.log(opts.sampleRate, opts.gain);
-   */
-  getOptions?(): Required<Options>;
+  /** Audio processor configuration */
+  enableAudioProcessor(enable: boolean): this;
+
+  /** Start ffmpeg + optional AudioProcessor chain */
+  run(): FFmpegRunResultExtended;
+
+  /** Graceful shutdown and cleanup */
+  close(): Promise<void>;
+  kill(signal?: NodeJS.Signals): Promise<void>;
+  destroy(): void;
+
+  /** Debug helpers */
+  debugDump(): ProcessorDebugInfo;
 }
 
 /**
- * Type of a factory function for creating plugin instances.
- * @template Options - The type of options accepted by the plugin.
- *
- * @example
- * ```ts
- * interface GainOptions extends AudioPluginBaseOptions {
- *   gain: number;
- * }
- *
- * class GainPlugin implements AudioPlugin<GainOptions> { ... }
- *
- * const registry = new PluginRegistry();
- * registry.register("gain", (opts) => new GainPlugin(opts));
- * ```
+ * Options for crossfadeAudio helper.
+ * Опции для helper-функции crossfadeAudio.
  */
-export type PluginFactory<
-  Options extends AudioPluginBaseOptions = AudioPluginBaseOptions,
-> = (options: Required<Options>) => AudioPlugin<Options>;
+export interface CrossfadeAudioOptions {
+  /** Second input URL or Readable stream */
+  secondInput?: string | Readable;
+
+  /** Number of inputs to crossfade (default: 2) */
+  inputs?: number;
+
+  /**
+   * Curve for fading out first stream (default: 'tri')
+   * Valid values: tri, qsin, esin, hsin, log, ipar, qua, cub, squ, cbr, par, exp, iqsin, ihsin, dese, desi, losi, nofade
+   */
+  curve1?: string;
+
+  /**
+   * Curve for fading in second stream (default: 'tri')
+   * Valid values: tri, qsin, esin, hsin, log, ipar, qua, cub, squ, cbr, par, exp, iqsin, ihsin, dese, desi, losi, nofade
+   */
+  curve2?: string;
+
+  /** Custom input labels (e.g., ['0:a', '1:a']) */
+  inputLabels?: string[];
+
+  /** Output label for the crossfaded audio (default: 'acf') */
+  outputLabel?: string;
+
+  /** Extra filters to apply after crossfade (as separate filter chain) */
+  extra?: string;
+}
+
+/**
+ * Реальный класс Processor (значение) из Core.
+ * В TypeScript можно импортировать его как значение:
+ *
+ *   import { Processor } from "fluent-streamer";
+ *
+ * а тип инстанса получить как:
+ *
+ *   import type { Processor as ProcessorType } from "fluent-streamer";
+ */
+export { default as ProcessorClass } from "../Core/Processor.js";
+
+/**
+ * Экспортируем AudioProcessor, чтобы можно было использовать его напрямую,
+ * если кто‑то хочет собрать свою цепочку без Processor.
+ */
+export { AudioProcessor };

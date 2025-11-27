@@ -2,96 +2,115 @@ import { EventEmitter } from "eventemitter3";
 import { Readable, Writable, PassThrough, pipeline } from "stream";
 import { execa, type Subprocess } from "execa";
 import type {
-  FFmpegRunResult,
   Logger,
   FFmpegProgress,
+  ProcessorDebugInfo,
 } from "../Types/index.js";
 import { ProcessorOptions } from "../Types/index.js";
+import { ThrottleStream } from "./ThrottleStream.js";
+import { AudioProcessor } from "./AudioProcessor.js";
 
+// ============================================================================
+// TYPES & INTERFACES
+// ============================================================================
+
+export type InputSource =
+  | { type: "stream"; stream: Readable; index: number }
+  | {
+      type: "url";
+      url: string;
+      index: number;
+      headers?: Record<string, string>;
+    };
+
+interface PassThroughWithDrain extends PassThrough {
+  _ffmpegDrainAttached?: boolean;
+}
+
+// ============================================================================
+// UTILS
+// ============================================================================
+function getTimeString(): string {
+  return new Date().toLocaleTimeString("ru-RU", { hour12: false });
+}
+
+// ============================================================================
+// PROCESSOR CLASS
+// ============================================================================
 /**
- * A class for spawning and managing FFmpeg processes, including progress,
- * lifecycle, killing by signal, and stream throttling for realtime output simulation.
+ * FFmpeg Stream Processor with Audio Effects
  *
- * ### Features
- * - Stream input and output support
- * - Progress reporting and buffer management
- * - Realtime throttling for PCM/raw output formats (for "broadcast" simulation)
- * - Custom logger support
- * - AbortSignal-based cancellation and timeouts
- *
- * ### Usage Example
- * ```ts
- * import Processor from "./Core/Processor";
- * import { createReadStream } from "fs";
- *
- * const proc = new Processor({
- *   ffmpegPath: "/usr/bin/ffmpeg",
- *   enableProgressTracking: true,
- *   debug: true,
- *   timeout: 10000,
- * });
- *
- * proc.setArgs([
- *   "-f", "mp3",
- *   "-i", "pipe:0",
- *   "-f", "s16le",
- *   "-ar", "44100",
- *   "-ac", "2",
- *   "pipe:1"
- * ]);
- *
- * proc.setInputStreams([{ stream: createReadStream("input.mp3"), index: 0 }]);
- *
- * const { output, done, stop } = proc.run();
- * output.pipe(process.stdout);
- *
- * proc.on("progress", (info) => {
- *   console.log("FFmpeg progress", info);
- * });
- *
- * done
- *   .then(() => {
- *     console.log("Process finished.");
- *   })
- *   .catch((err) => {
- *     console.error("Process error:", err);
- *   });
- * ```
+ * Универсальный процессор потоков FFmpeg с поддержкой:
+ * - Real-time аудио-обработки (громкость, EQ, компрессия)
+ * - Управления жизненным циклом процесса
+ * - Progress tracking и error handling
+ * - Graceful shutdown с хвостовой тишиной
+ * - URL входов (HTTP/HTTPS/RTMP/RTMPS/RTSP)
  */
 export class Processor extends EventEmitter {
   private process: Subprocess | null = null;
-  private outputStream: PassThrough | null = null;
+  private passthrough: PassThroughWithDrain | null = null;
+  private outputStream: PassThroughWithDrain | null = null;
+  private blackholeStream: Writable | null = null;
   private inputStreams: Array<{ stream: Readable; index: number }> = [];
   private extraOutputs: Array<{ stream: Writable; index: number }> = [];
   private stderrBuffer = "";
   private isTerminating = false;
   private hasFinished = false;
+  private isClosed = false;
   private timeoutHandle?: NodeJS.Timeout;
   private progress: Partial<FFmpegProgress> = {};
-
+  private currentBitrate: number = 128;
+  private currentDuration: number = 180;
   private doneResolve!: () => void;
   private doneReject!: (err: Error) => void;
-  private readonly donePromise: Promise<void>;
-
-  private readonly config: Required<Omit<ProcessorOptions, "abortSignal">> & {
-    abortSignal?: AbortSignal;
-    logger: Logger;
-  };
-
+  private donePromise: Promise<void> | null = null;
   private args: string[] = [];
   private extraGlobalArgs: string[] = [];
+  private _runEnded: boolean = false;
+  private _runEmittedEnd: boolean = false;
+  private _pendingProcessExitLog: (() => void) | null = null;
+  private useAudioProcessor: boolean = false;
+  private endSequenceFn: (() => void) | null = null;
+  private throttledOutput: PassThrough | ThrottleStream | null = null;
+  private currentVolume: number = 1;
+  private currentBass: number = 0;
+  private currentTreble: number = 0;
+  private currentCompressor: boolean = false;
+  private _bitrateDetected: boolean = false;
+  private _startTime: number = 0;
+  private _totalChunks: number = 0;
+  private _skipInProgress: boolean = false;
+  private _lastSkipTime: number = 0;
+  private readonly SKIP_DEBOUNCE_MS: number = 500;
 
-  /**
-   * Returns the PID of the FFmpeg process, or null if not running.
-   */
+  private readonly config: Required<
+    Omit<
+      ProcessorOptions,
+      | "abortSignal"
+      | "logger"
+      | "verbose"
+      | "useAudioProcessor"
+      | "audioProcessorOptions"
+      | "disableThrottling"
+    >
+  > & {
+    abortSignal?: AbortSignal;
+    logger: Logger;
+    verbose?: boolean;
+    useAudioProcessor: boolean;
+    audioProcessorOptions?: import("../Types/index.js").AudioProcessingOptions;
+    disableThrottling?: boolean;
+
+    onBeforeChildProcessSpawn?: (ffmpegPath: string, args: string[]) => void;
+    stderrLogHandler?: (chunk: string) => void;
+    inputStreams: Array<{ stream: Readable; index: number }>;
+  };
+
   public get pid(): number | null {
     return this.process?.pid ?? null;
   }
 
-  /**
-   * Constructs a Processor instance.
-   * @param options - FFmpeg related options and configuration.
-   */
   constructor(options: ProcessorOptions = {}) {
     super();
     this.config = {
@@ -99,285 +118,862 @@ export class Processor extends EventEmitter {
       failFast: options.failFast ?? false,
       extraGlobalArgs: options.extraGlobalArgs ?? [],
       loggerTag: options.loggerTag ?? `ffmpeg_${Date.now()}`,
+      inputStreams: options.inputStreams ?? [],
+      onBeforeChildProcessSpawn:
+        options.onBeforeChildProcessSpawn ?? (() => {}),
+      stderrLogHandler: options.stderrLogHandler ?? (() => {}),
+      executionId:
+        options.executionId ?? Math.random().toString(36).slice(2) + Date.now(),
+      wallTimeLimit: options.wallTimeLimit ?? 0,
       timeout: options.timeout ?? 0,
       maxStderrBuffer: options.maxStderrBuffer ?? 1024 * 1024,
       enableProgressTracking: options.enableProgressTracking ?? false,
-      logger: (options.logger as Logger) ?? console,
+      logger: options.logger ?? console,
       debug: options.debug ?? false,
+      verbose: options.verbose ?? false,
+      stdoutlog: options.stdoutlog ?? false,
       suppressPrematureCloseWarning:
         options.suppressPrematureCloseWarning ?? false,
       abortSignal: options.abortSignal,
       headers: options.headers ?? {},
+      userAgent:
+        options.userAgent ?? "Mozilla/5.0 (compatible; FFmpegProcessor/1.0)",
+      disableThrottling: options.disableThrottling ?? true,
+      ffmpegLogLevel: options.ffmpegLogLevel ?? "info",
+      tailSilenceMs: options.tailSilenceMs ?? 0,
+      useAudioProcessor:
+        typeof options.useAudioProcessor === "boolean"
+          ? options.useAudioProcessor
+          : false,
+      inputSources: [],
+      audioProcessorOptions: options.audioProcessorOptions ?? {
+        volume: 1,
+        bass: 0,
+        treble: 0,
+        compressor: false,
+        normalize: false,
+      },
     };
+
     this.extraGlobalArgs = [...this.config.extraGlobalArgs];
+    this.useAudioProcessor = !!options.useAudioProcessor;
 
-    this.donePromise = new Promise<void>((resolve, reject) => {
-      this.doneResolve = resolve;
-      this.doneReject = reject;
-    });
+    this.currentVolume = this.config.audioProcessorOptions?.volume ?? 1;
+    this.currentBass = this.config.audioProcessorOptions?.bass ?? 0;
+    this.currentTreble = this.config.audioProcessorOptions?.treble ?? 0;
+    this.currentCompressor =
+      this.config.audioProcessorOptions?.compressor ?? false;
 
+    this._initPromise();
     this._handleAbortSignal();
   }
 
-  /**
-   * Set the arguments for FFmpeg process (excluding global extra args).
-   * @param args - Arguments array for FFmpeg.
-   */
-  setArgs(args: string[]): this {
+  private _initPromise() {
+    this.donePromise = new Promise((resolve, reject) => {
+      this.doneResolve = resolve;
+      this.doneReject = reject;
+    });
+  }
+
+  public setArgs(args: string[]): this {
     this.args = Array.isArray(args) ? [...args] : [];
     return this;
   }
 
-  /**
-   * Returns a copy of the current argument list (excluding extra global args).
-   */
-  getArgs(): string[] {
+  public getArgs(): string[] {
     return [...this.args];
   }
 
-  /**
-   * Set one or more input streams for FFmpeg. Pass an array of
-   * `{ stream: Readable, index: number }` (index is used for complex FFmpeg invocations).
-   *
-   * @param streams - Array describing the input streams for FFMpeg.
-   */
-  setInputStreams(streams: Array<{ stream: Readable; index: number }>): this {
+  public setInputStreams(
+    streams: Array<{ stream: Readable; index: number }>,
+  ): this {
     this.inputStreams = Array.isArray(streams) ? [...streams] : [];
     return this;
   }
 
-  /**
-   * Returns the running process's stdin writable stream, if available.
-   */
-  getInputStream(): NodeJS.WritableStream | undefined {
+  public getInputStream(): NodeJS.WritableStream | undefined {
     return this.process?.stdin ?? undefined;
   }
 
-  /**
-   * Optional: Set extra output streams (not implemented in _bindOutputStreams yet).
-   * Intended for writing to multiple output destinations.
-   * @param streams - Array describing additional outputs.
-   */
-  setExtraOutputStreams(
+  public setExtraOutputStreams(
     streams: Array<{ stream: Writable; index: number }>,
   ): this {
     this.extraOutputs = Array.isArray(streams) ? [...streams] : [];
     return this;
   }
 
-  /**
-   * Overwrite extra global arguments (prepended to FFmpeg args).
-   * @param args - Arguments that go before main ffmpeg args.
-   */
-  setExtraGlobalArgs(args: string[]): this {
+  public setExtraGlobalArgs(args: string[]): this {
     this.extraGlobalArgs = Array.isArray(args) ? [...args] : [];
     return this;
   }
 
-  /**
-   * Returns the complete list of arguments passed to FFmpeg, including global args.
-   */
-  getFullArgs(): string[] {
-    return [...this.extraGlobalArgs, ...this.args];
-  }
+  public getFullArgs(): string[] {
+    const args: string[] = [];
 
-  /**
-   * Creates a realtime-throttled PassThrough stream to limit PCM/raw stream data rate.
-   * Used to simulate "live" streaming of PCM format output.
-   *
-   * @param sampleRate - PCM sample rate (Hz). Default: 44100 Hz.
-   * @param bits - PCM bit depth per sample. Default: 16.
-   * @param channels - Number of channels. Default: 2.
-   * @returns A throttled PassThrough stream.
-   */
-  private _createRealtimeThrottleStream(
-    sampleRate = 44100,
-    bits = 16,
-    channels = 2
-  ): PassThrough {
-    const bytesPerSample = bits / 8;
-    const bytesPerSecond = sampleRate * bytesPerSample * channels;
-    const throttle = new PassThrough();
-    let lastPush = Date.now();
-    let buffer: Buffer[] = [];
-    let timer: NodeJS.Timeout | null = null;
+    if (this.config.ffmpegLogLevel) {
+      args.push("-loglevel", this.config.ffmpegLogLevel);
+    }
 
-    const pushLoop = () => {
-      if (!buffer.length) {
-        timer = null;
-        return;
-      }
-      const now = Date.now();
-      const elapsed = now - lastPush;
-      lastPush = now;
-      let bytesToSend = Math.floor((bytesPerSecond / 1000) * elapsed);
+    if (this.config.userAgent) {
+      args.push("-user_agent", this.config.userAgent);
+    }
 
-      let outBytes = 0;
-      while (buffer.length && bytesToSend > 0) {
-        const buf = buffer[0];
-        if (buf.length <= bytesToSend) {
-          throttle.push(buffer.shift());
-          bytesToSend -= buf.length;
-          outBytes += buf.length;
-        } else {
-          throttle.push(buf.slice(0, bytesToSend));
-          buffer[0] = buf.slice(bytesToSend);
-          outBytes += bytesToSend;
-          bytesToSend = 0;
+    args.push(...this.extraGlobalArgs);
+
+    const sortedSources = [...this.config.inputSources].sort(
+      (a, b) => a.index - b.index,
+    );
+
+    for (const source of sortedSources) {
+      if (source.type === "url") {
+        const globalHeaders =
+          typeof this.config.headers === "object" ? this.config.headers : {};
+        const finalHeaders = { ...globalHeaders, ...(source.headers || {}) };
+
+        if (Object.keys(finalHeaders).length > 0) {
+          const headerStr = Object.entries(finalHeaders)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join("\r\n");
+          args.push("-headers", headerStr);
         }
-      }
-      if (buffer.length) {
-        timer = setTimeout(pushLoop, 20);
+
+        args.push(
+          "-reconnect",
+          "1",
+          "-reconnect_streamed",
+          "1",
+          "-reconnect_delay_max",
+          "5",
+          "-timeout",
+          "10000000",
+        );
+        args.push("-i", source.url);
       } else {
-        timer = null;
+        args.push("-i", "pipe:0");
       }
-    };
+    }
 
-    throttle._write = function(chunk, _encoding, cb) {
-      buffer.push(Buffer.from(chunk));
-      if (!timer) {
-        timer = setTimeout(pushLoop, 20);
-      }
-      cb();
-    };
-
-    throttle._final = function(cb) {
-      while (buffer.length) {
-        throttle.push(buffer.shift());
-      }
-      cb();
-    };
-
-    return throttle;
+    args.push(...this.args);
+    return args;
   }
 
-  /**
-   * Launches the FFmpeg process with the currently set arguments and input streams.
-   * If output is PCM or similar format, applies a realtime throttle to the output.
-   *
-   * @returns Object with { output, done, stop }:
-   *   - output: ReadableStream for the FFmpeg stdout.
-   *   - done: Promise resolved on process completion or rejected on error.
-   *   - stop(): Function to kill the process.
-   *
-   * @example
-   * const proc = new Processor({...}).setArgs([...]).run()
-   * proc.output.pipe(fs.createWriteStream("output.pcm"))
-   */
-  run(): FFmpegRunResult {
+  public enableAudioProcessor(enable: boolean): this {
+    this.useAudioProcessor = enable;
+    return this;
+  }
+
+  public isRunning(): boolean {
+    return !!this.process && !this.hasFinished;
+  }
+
+  public getProgress(): Partial<FFmpegProgress> {
+    return { ...this.progress };
+  }
+
+  public reset(): void {
+    this._resetRunState();
+  }
+
+  public run(): import("../Types/index.js").FFmpegRunResultExtended {
     if (this.process) throw new Error("FFmpeg process is already running");
-    this.outputStream = new PassThrough();
+    if (this._skipInProgress) throw new Error("Skip operation in progress");
+
+    this._resetRunState();
+    this._initPromise();
+    this._startTime = Date.now();
+    this._totalChunks = 0;
 
     const fullArgs = this.getFullArgs();
-    const fullCmd = `${this.config.ffmpegPath} ${fullArgs.join(" ")}`;
 
-    this.emit("start", fullCmd);
-    if (this.config.debug!) {
-      this.config.logger.debug?.(
-        `[${this.config.loggerTag}] Starting: ${fullCmd}`,
+    if (this.config.onBeforeChildProcessSpawn) {
+      try {
+        this.config.onBeforeChildProcessSpawn(this.config.ffmpegPath, fullArgs);
+      } catch {
+        // Ignore errors from user callback
+      }
+    }
+
+    if (this.config.verbose) {
+      this.config.logger.info?.(
+        `[${getTimeString()}] [${this.config.loggerTag}] FFmpeg command: ${this.config.ffmpegPath} ${fullArgs.join(" ")}`,
+      );
+      this.config.logger.info?.(
+        `[${getTimeString()}] [${this.config.loggerTag}] Audio config: volume=${this.currentVolume}, bass=${this.currentBass}dB, treble=${this.currentTreble}dB, compressor=${this.currentCompressor}`,
       );
     }
 
-    this.process = execa(this.config.ffmpegPath, fullArgs, {
-      reject: false,
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-
-    if (this.config.debug!) {
-      this.config.logger.debug?.(
-        `[${this.config.loggerTag}] PID: ${this.process.pid ?? null}`,
+    try {
+      this.process = execa(this.config.ffmpegPath, fullArgs, {
+        reject: false,
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    } catch (ex) {
+      this.config.logger.error?.(
+        `[${getTimeString()}] [${this.config.loggerTag}] Failed to spawn ffmpeg: ${(ex as Error).message}`,
       );
+      this._finalize(ex as Error);
+      throw ex;
     }
 
     this._handleTimeout();
-    this._bindInputStream();
-    this._bindOutputStreams(true);
-    this._bindProcessEvents();
 
-    this.process.once("spawn", () => {
-      this.emit("spawn", { pid: this.process?.pid ?? null });
+    if (this.process.stdin && this.inputStreams.length) {
+      const primary = this.inputStreams
+        .slice()
+        .sort((a, b) => a.index - b.index)[0];
+
+      if (primary) {
+        const throttled = primary.stream.pipe(new ThrottleStream(32_000));
+        pipeline(throttled, this.process.stdin, (err) => {
+          if (err) {
+            const code = (err as NodeJS.ErrnoException)?.code;
+            if (code === "EPIPE" && (this.hasFinished || this.isTerminating))
+              return;
+            this.emit("error", err);
+            this._finalize(err as Error);
+          }
+        });
+      }
+
+      for (const s of this.inputStreams) {
+        if (s !== primary) {
+          pipeline(s.stream, this._getBlackholeStream(), () => {});
+        }
+      }
+    }
+
+    const finalPassthrough = new PassThrough({
+      highWaterMark: 16384,
+    }) as PassThroughWithDrain;
+    const BYTES_PER_SECOND = 48000 * 2 * 2; // PCM s16le 48kHz stereo
+
+    const audioProcessor = new AudioProcessor({
+      volume: this.currentVolume,
+      bass: this.currentBass,
+      treble: this.currentTreble,
+      compressor: this.currentCompressor,
+      normalize: false,
+      sampleRate: 48000,
+      channels: 2,
+    });
+
+    if (!this.useAudioProcessor) {
+      audioProcessor.setVolume(1);
+      audioProcessor.setEqualizer(0, 0, false);
+    }
+
+    this.throttledOutput = this.config.disableThrottling
+      ? new PassThrough()
+      : new ThrottleStream(BYTES_PER_SECOND);
+
+    if (this.process.stdout) {
+      this.process.stdout.on("data", () => {
+        this._totalChunks++;
+      });
+
+      this.process.stdout.on("end", () => {
+        this._runEnded = true;
+        if (this.config.verbose) {
+          this.config.logger.debug?.(
+            `[${getTimeString()}] [${this.config.loggerTag}] FFmpeg stdout ended: total chunks=${this._totalChunks}`,
+          );
+        }
+      });
+
+      this.process.stdout.on("error", (err) => {
+        if (!this.hasFinished) {
+          this.emit("error", err);
+          this._finalize(err);
+        }
+      });
+
+      audioProcessor.on("end", () => {
+        if (this.config.verbose) {
+          this.config.logger.debug?.(
+            `[${getTimeString()}] [${this.config.loggerTag}] AudioProcessor ended`,
+          );
+        }
+      });
+
+      audioProcessor.on("error", (err) => {
+        if (!this.hasFinished) {
+          this.emit("error", err);
+          this._finalize(err);
+        }
+      });
+
+      this.throttledOutput.on("error", (err) => {
+        if (!this.hasFinished) {
+          this.emit("error", err);
+          this._finalize(err);
+        }
+      });
+
+      finalPassthrough.on("end", () => {
+        if (this.config.verbose) {
+          this.config.logger.debug?.(
+            `[${getTimeString()}] [${this.config.loggerTag}] Output stream ended`,
+          );
+        }
+      });
+
+      finalPassthrough.on("error", (err) => {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        // Игнорируем premature close при нормальном завершении
+        if (code === "ERR_STREAM_PREMATURE_CLOSE" && this.hasFinished) {
+          if (this.config.verbose) {
+            this.config.logger.debug?.(
+              `[${getTimeString()}] [${this.config.loggerTag}] Ignoring premature close on finished stream`,
+            );
+          }
+          return;
+        }
+        if (!this.hasFinished) {
+          this.emit("error", err);
+          this._finalize(err);
+        }
+      });
+
+      pipeline(
+        this.process.stdout,
+        audioProcessor,
+        this.throttledOutput,
+        finalPassthrough,
+        (err) => {
+          if (err && !this.hasFinished) {
+            this.emit("error", err);
+            this._finalize(err);
+          }
+        },
+      );
+    } else {
+      finalPassthrough.end();
+    }
+
+    this.passthrough = finalPassthrough;
+    this.outputStream = finalPassthrough;
+    this._ensureFinalOutputDrained(finalPassthrough);
+
+    this.process.stderr?.on("data", (chunk) => this._handleStderr(chunk));
+    this.process.stderr?.on("data", (chunk) => {
+      try {
+        this.config.stderrLogHandler?.(chunk.toString("utf8"));
+      } catch {
+        // Ignore errors from user stderr handler
+      }
+    });
+
+    this.process.once("exit", (code, signal) => {
+      this._pendingProcessExitLog = () => {
+        if (this.config.verbose) {
+          this.config.logger.debug?.(
+            `[${getTimeString()}] [${this.config.loggerTag}] Process exited with code ${code}, signal ${signal}`,
+          );
+        }
+      };
+      this._onProcessExit(code, signal);
+    });
+
+    this.process.once("error", (err: Error) => {
+      this.config.logger.error?.(
+        `[${getTimeString()}] [${this.config.loggerTag}] Process error: ${err.message}`,
+      );
+      this.emit("error", err);
+      this._finalize(err);
+    });
+
+    this.endSequenceFn = this._createEndSequence(
+      audioProcessor,
+      finalPassthrough,
+    );
+
+    this.donePromise!.catch((err) => {
+      this.emit("error", err);
+      if (
+        !this._runEmittedEnd &&
+        finalPassthrough &&
+        !finalPassthrough.destroyed
+      ) {
+        finalPassthrough.destroy(err);
+      }
     });
 
     return {
-      output: this.outputStream,
-      done: this.donePromise,
+      output: finalPassthrough,
+      passthrough: finalPassthrough,
+      done: this.donePromise!,
       stop: () => this.kill(),
+      close: () => this.close(),
+      audioProcessor,
+      setVolume: (v: number) => {
+        const oldValue = this.currentVolume;
+        this.currentVolume = v;
+        if (
+          audioProcessor &&
+          !audioProcessor.destroyed &&
+          !audioProcessor.writableEnded
+        ) {
+          audioProcessor.setVolume(v);
+        }
+        if (this.config.verbose) {
+          this.config.logger.info?.(
+            `[${getTimeString()}] [${this.config.loggerTag}] Volume changed: ${oldValue} → ${v}`,
+          );
+        }
+      },
+      setBass: (b: number) => {
+        const oldValue = this.currentBass;
+        this.currentBass = b;
+        if (
+          audioProcessor &&
+          !audioProcessor.destroyed &&
+          !audioProcessor.writableEnded
+        ) {
+          audioProcessor.setEqualizer(
+            b,
+            audioProcessor.treble,
+            audioProcessor.compressor,
+          );
+        }
+        if (this.config.verbose) {
+          this.config.logger.info?.(
+            `[${getTimeString()}] [${this.config.loggerTag}] Bass changed: ${oldValue}dB → ${b}dB`,
+          );
+        }
+      },
+      setTreble: (t: number) => {
+        const oldValue = this.currentTreble;
+        this.currentTreble = t;
+        if (
+          audioProcessor &&
+          !audioProcessor.destroyed &&
+          !audioProcessor.writableEnded
+        ) {
+          audioProcessor.setEqualizer(
+            audioProcessor.bass,
+            t,
+            audioProcessor.compressor,
+          );
+        }
+        if (this.config.verbose) {
+          this.config.logger.info?.(
+            `[${getTimeString()}] [${this.config.loggerTag}] Treble changed: ${oldValue}dB → ${t}dB`,
+          );
+        }
+      },
+      setCompressor: (c: boolean) => {
+        const oldValue = this.currentCompressor;
+        this.currentCompressor = c;
+        if (
+          audioProcessor &&
+          !audioProcessor.destroyed &&
+          !audioProcessor.writableEnded
+        ) {
+          audioProcessor.setCompressor(c);
+        }
+        if (this.config.verbose) {
+          this.config.logger.info?.(
+            `[${getTimeString()}] [${this.config.loggerTag}] Compressor changed: ${oldValue} → ${c}`,
+          );
+        }
+      },
+      setEqualizer: (b: number, t: number, c: boolean) => {
+        this.currentBass = b;
+        this.currentTreble = t;
+        this.currentCompressor = c;
+        if (
+          audioProcessor &&
+          !audioProcessor.destroyed &&
+          !audioProcessor.writableEnded
+        ) {
+          audioProcessor.setEqualizer(b, t, c);
+        }
+      },
+      startFade: (targetVolume: number, durationMs: number) => {
+        return audioProcessor?.startFade(targetVolume, durationMs);
+      },
     };
   }
 
-  /**
-   * Kills the underlying FFmpeg process, sending a signal (default: SIGTERM).
-   * @param signal - Node.js signal string (e.g. "SIGTERM")]
-   */
-  kill(signal: NodeJS.Signals = "SIGTERM"): void {
+  private _createEndSequence(
+    _audioProcessor: AudioProcessor,
+    finalPassthrough: PassThrough,
+  ) {
+    return () => {
+      if (this._runEmittedEnd || this.hasFinished || this.isClosed) return;
+      this._runEmittedEnd = true;
+
+      if (this.throttledOutput && !this.throttledOutput.destroyed) {
+        this.throttledOutput.once("end", () => {
+          // Даём AudioPlayer время обработать оставшиеся данные
+          setTimeout(() => {
+            if (
+              !finalPassthrough.destroyed &&
+              !finalPassthrough.writableEnded
+            ) {
+              finalPassthrough.end();
+            }
+            this.emit("end");
+            if (this._pendingProcessExitLog) {
+              this._pendingProcessExitLog();
+              this._pendingProcessExitLog = null;
+            }
+            this._finalize();
+          }, 100); // 100ms задержка
+        });
+      } else {
+        setTimeout(() => {
+          if (!finalPassthrough.destroyed && !finalPassthrough.writableEnded) {
+            finalPassthrough.end();
+          }
+          this.emit("end");
+          if (this._pendingProcessExitLog) {
+            this._pendingProcessExitLog();
+            this._pendingProcessExitLog = null;
+          }
+          this._finalize();
+        }, 100);
+      }
+    };
+  }
+
+  public async close(): Promise<void> {
+    if (this.isClosed) return;
+    this.isClosed = true;
+    this._runEmittedEnd = true;
+
+    if (this.passthrough && !this.passthrough.destroyed) {
+      this.passthrough.end();
+      this.passthrough.destroy();
+    }
+
+    this.outputStream?.destroy();
+
+    if (this.config.verbose) {
+      this.config.logger.debug?.(
+        `[${getTimeString()}] [${this.config.loggerTag}] Closed processor stream via .close()`,
+      );
+    }
+
+    await this.kill();
+    await this.donePromise;
+    this._finalize();
+  }
+
+  public async kill(signal: NodeJS.Signals = "SIGTERM"): Promise<void> {
     if (this.process && !this.isTerminating) {
       this.isTerminating = true;
-      if (this.config.debug) {
+      this._skipInProgress = true;
+
+      if (this.config.verbose) {
         this.config.logger.debug?.(
-          `[${this.config.loggerTag}] Killing process with signal ${signal}`,
+          `[${getTimeString()}] [${this.config.loggerTag}] Killing process with signal ${signal}`,
         );
       }
-      this.process.kill(signal);
+
+      try {
+        // Сначала останавливаем стримы
+        if (this.throttledOutput && !this.throttledOutput.destroyed) {
+          this.throttledOutput.destroy();
+        }
+
+        if (this.outputStream && !this.outputStream.destroyed) {
+          this.outputStream.end();
+        }
+
+        if (this.passthrough && !this.passthrough.destroyed) {
+          this.passthrough.end();
+        }
+
+        // Затем убиваем процесс
+        this.process.kill(signal);
+      } catch (error) {
+        // Ignore kill errors
+        if (this.config.verbose) {
+          this.config.logger.debug?.(
+            `[${getTimeString()}] [${this.config.loggerTag}] Kill error: ${error}`,
+          );
+        }
+      }
+
+      if (this.donePromise) {
+        try {
+          await this.donePromise;
+        } catch {
+          // ignore
+        }
+      }
+
+      // Debounce для предотвращения немедленного перезапуска
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      this._skipInProgress = false;
     }
   }
 
+  public async skip(): Promise<void> {
+    const now = Date.now();
+    if (now - this._lastSkipTime < this.SKIP_DEBOUNCE_MS) {
+      if (this.config.verbose) {
+        this.config.logger.warn?.(
+          `[${getTimeString()}] [${this.config.loggerTag}] Skip ignored: too soon after previous skip`,
+        );
+      }
+      return;
+    }
+
+    this._lastSkipTime = now;
+    await this.kill("SIGTERM");
+  }
+
+  public destroy(): void {
+    if (this.config.verbose) {
+      this.config.logger?.warn?.(
+        `[${getTimeString()}] [${this.config.loggerTag}] Processor force destroy() called`,
+      );
+    }
+    this._cleanup();
+    void this.kill("SIGKILL");
+    this._finalize(new Error("Destroyed by user"));
+    this.removeAllListeners();
+  }
+
   /**
-   * Build the acrossfade FFmpeg filter string.
-   * Useful for audio cross-fading operations.
+   * Build FFmpeg acrossfade filter string with correct syntax.
+   * Generates proper filter_complex syntax for audio crossfading.
    *
-   * @param opts - Filter options.
-   * @returns Object with filter string and (optional) outputLabel.
+   * FFmpeg acrossfade works with exactly 2 inputs. For multiple inputs,
+   * this method generates cascading crossfades.
    *
-   * @example
-   * Processor.buildAcrossfadeFilter({duration: 3, curve1: "exp", curve2: "exp"})
-   * // { filter: "acrossfade=d=3:c1=exp:c2=exp" }
+   * Examples:
+   *  - 2 inputs: [0:a][1:a]acrossfade=d=5:c1=tri:c2=tri[out]
+   *  - 3 inputs: [0:a][1:a]acrossfade=d=3[cf1];[cf1][2:a]acrossfade=d=3[out]
+   *  - 4 inputs: [0:a][1:a]acrossfade=d=2[cf1];[cf1][2:a]acrossfade=d=2[cf2];[cf2][3:a]acrossfade=d=2[out]
    */
-  static buildAcrossfadeFilter(
+  public static buildAcrossfadeFilter(
     opts: {
       inputs?: number;
       nb_samples?: number;
       duration?: number | string;
-      overlap?: boolean;
       curve1?: string;
       curve2?: string;
       inputLabels?: string[];
       outputLabel?: string;
     } = {},
   ): { filter: string; outputLabel?: string } {
-    let filter = "acrossfade";
-    let hasParam = false;
-    const add = (key: string, val: string | number | undefined) => {
-      if (val === undefined || val === "") return;
-      filter += (hasParam ? ":" : "=") + key + "=" + val;
-      hasParam = true;
-    };
-    add("d", opts.duration);
-    add("c1", opts.curve1 ?? "tri");
-    add("c2", opts.curve2 ?? "tri");
-    add("ns", opts.nb_samples);
-    if (opts.overlap === false) add("o", 0);
-    if (opts.inputs && opts.inputs !== 2) add("n", opts.inputs);
-    if (opts.outputLabel && opts.outputLabel.length) {
-      filter += `[${opts.outputLabel}]`;
-      return { filter, outputLabel: opts.outputLabel };
+    const inputs = opts.inputs ?? 2;
+    const duration = opts.duration ?? 3;
+    const curve1 = opts.curve1 ?? "tri";
+    const curve2 = opts.curve2 ?? "tri";
+    const outputLabel = opts.outputLabel ?? "acf";
+
+    // Validate curves
+    const validCurves = [
+      "tri",
+      "qsin",
+      "esin",
+      "hsin",
+      "log",
+      "ipar",
+      "qua",
+      "cub",
+      "squ",
+      "cbr",
+      "par",
+      "exp",
+      "iqsin",
+      "ihsin",
+      "dese",
+      "desi",
+      "losi",
+      "nofade",
+    ];
+
+    if (!validCurves.includes(curve1)) {
+      throw new Error(
+        `Invalid curve1: ${curve1}. Must be one of: ${validCurves.join(", ")}`,
+      );
     }
-    return { filter };
+    if (!validCurves.includes(curve2)) {
+      throw new Error(
+        `Invalid curve2: ${curve2}. Must be one of: ${validCurves.join(", ")}`,
+      );
+    }
+
+    // Build parameters for acrossfade
+    const params: string[] = [];
+    params.push(`d=${duration}`);
+    params.push(`c1=${curve1}`);
+    params.push(`c2=${curve2}`);
+
+    if (opts.nb_samples !== undefined) {
+      params.push(`ns=${opts.nb_samples}`);
+    }
+
+    const paramStr = params.join(":");
+
+    if (inputs === 2) {
+      // Simple case: 2 inputs
+      // [0:a][1:a]acrossfade=d=5:c1=tri:c2=tri[out]
+      const in0 = opts.inputLabels?.[0] ?? "0:a";
+      const in1 = opts.inputLabels?.[1] ?? "1:a";
+      const filter = `[${in0}][${in1}]acrossfade=${paramStr}[${outputLabel}]`;
+
+      return { filter, outputLabel };
+    } else {
+      // Multiple inputs: cascading crossfades
+      // [0:a][1:a]acrossfade=d=3[cf1];[cf1][2:a]acrossfade=d=3[cf2];...
+      const filterParts: string[] = [];
+      let prevLabel = "";
+
+      for (let i = 1; i < inputs; i++) {
+        const in0Label = i === 1 ? (opts.inputLabels?.[0] ?? "0:a") : prevLabel;
+        const in1Label = opts.inputLabels?.[i] ?? `${i}:a`;
+        const outLabel = i === inputs - 1 ? outputLabel : `acf_${i}`;
+
+        filterParts.push(
+          `[${in0Label}][${in1Label}]acrossfade=${paramStr}[${outLabel}]`,
+        );
+
+        prevLabel = outLabel;
+      }
+
+      const filter = filterParts.join(";");
+      return { filter, outputLabel };
+    }
   }
 
-  /**
-   * Returns CLI invocation string.
-   */
-  toString(): string {
+  public toString(): string {
     return `${this.config.ffmpegPath} ${this.getFullArgs().join(" ")}`;
   }
 
-  /** Bind abort signal, if provided, to kill on abort. */
+  public debugDump(): ProcessorDebugInfo {
+    return {
+      pid: this.pid,
+      args: this.getArgs(),
+      fullArgs: this.getFullArgs(),
+      isClosed: this.isClosed,
+      hasFinished: this.hasFinished,
+      isTerminating: this.isTerminating,
+      running: !!this.process,
+      runEnded: this._runEnded,
+      runEmittedEnd: this._runEmittedEnd,
+      extraGlobalArgs: [...this.extraGlobalArgs],
+      stderrBufferLength: this.stderrBuffer.length,
+      timeoutHandle: !!this.timeoutHandle,
+      progress: { ...this.progress },
+      inputStreamsCount: this.inputStreams.length,
+      extraOutputsCount: this.extraOutputs.length,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  private _resetRunState() {
+    if (
+      this.outputStream &&
+      (this.outputStream as PassThroughWithDrain)._ffmpegDrainAttached
+    ) {
+      delete (this.outputStream as PassThroughWithDrain)._ffmpegDrainAttached;
+    }
+
+    this._runEnded = false;
+    this._runEmittedEnd = false;
+    this._pendingProcessExitLog = null;
+    this.isClosed = false;
+    this.hasFinished = false;
+    this.isTerminating = false;
+    this.stderrBuffer = "";
+    this.progress = {};
+    this.process = null;
+    this.outputStream = null;
+    this.passthrough = null;
+    this.blackholeStream = null;
+    this.endSequenceFn = null;
+    this.throttledOutput = null;
+    this._bitrateDetected = false;
+    this._startTime = 0;
+    this._totalChunks = 0;
+    this._skipInProgress = false;
+    this._lastSkipTime = 0;
+
+    if (this.timeoutHandle) {
+      clearTimeout(this.timeoutHandle);
+      this.timeoutHandle = undefined;
+    }
+  }
+
+  private _getBlackholeStream(): Writable {
+    if (this.blackholeStream) return this.blackholeStream;
+
+    this.blackholeStream = new Writable({
+      write(_chunk, _encoding, cb) {
+        cb();
+      },
+    });
+
+    return this.blackholeStream;
+  }
+
+  private _ensureFinalOutputDrained(output: PassThroughWithDrain) {
+    if (!output || output._ffmpegDrainAttached) return;
+
+    let consumerAttached = false;
+
+    const markRead = () => {
+      if (!output || output.destroyed || output.writableEnded) return;
+      consumerAttached = true;
+      output._ffmpegDrainAttached = true;
+
+      if (this.config.verbose) {
+        this.config.logger.debug?.(
+          `[${getTimeString()}] [${this.config.loggerTag}] Consumer attached to output stream`,
+        );
+      }
+    };
+
+    const events = ["data", "readable", "end", "close"];
+    const isBeingRead = () =>
+      output &&
+      !output.destroyed &&
+      !output.writableEnded &&
+      output.listeners("data").length > 0;
+
+    const maybeDrain = () => {
+      if (
+        !consumerAttached &&
+        output &&
+        !output._ffmpegDrainAttached &&
+        !isBeingRead()
+      ) {
+        output._ffmpegDrainAttached = true;
+        output.pipe(this._getBlackholeStream(), { end: false });
+
+        if (this.config.verbose) {
+          this.config.logger.debug?.(
+            `[${getTimeString()}] [${this.config.loggerTag}] Final output drained to blackhole to prevent backpressure`,
+          );
+        }
+      }
+    };
+
+    events.forEach((ev) => output.once(ev, markRead));
+    output.once("newListener", (event: string) => {
+      if (events.includes(event)) {
+        markRead();
+        clearTimeout(timer);
+      }
+    });
+
+    const timer = setTimeout(maybeDrain, 100);
+  }
+
   private _handleAbortSignal(): void {
     const { abortSignal } = this.config;
     if (!abortSignal) return;
+
     const onAbort = () => this.kill("SIGTERM");
+
     if (abortSignal.aborted) {
       onAbort();
     } else {
@@ -385,156 +981,61 @@ export class Processor extends EventEmitter {
     }
   }
 
-  /** Handles timeout by killing FFmpeg if the configured timeout is reached. */
   private _handleTimeout(): void {
-    if (this.config.timeout > 0) {
-      this.timeoutHandle = setTimeout(() => {
-        if (this.config.debug) {
-          this.config.logger.warn?.(
-            `[${this.config.loggerTag}] Process timeout after ${this.config.timeout}ms. Terminating.`,
-          );
-        }
-        this.kill("SIGKILL");
-      }, this.config.timeout);
-    }
+    if (!this.config.timeout) return;
+
+    this.timeoutHandle = setTimeout(() => {
+      if (this.config.verbose) {
+        this.config.logger.warn?.(
+          `[${getTimeString()}] [${this.config.loggerTag}] Process timeout after ${this.config.timeout}ms. Terminating.`,
+        );
+      }
+      this.kill("SIGKILL");
+    }, this.config.timeout);
   }
 
-  /** Binds a user-provided input stream to the FFmpeg process stdin. */
-  private _bindInputStream(): void {
-    if (!this.inputStreams.length || !this.process?.stdin) return;
-    const { stream: inputStream } =
-      this.inputStreams.find((i) => i.index === 0) || this.inputStreams[0];
-    pipeline(inputStream, this.process.stdin, (err) => {
-      if (err) {
-        if ((err as any).code === "EPIPE" && (this.hasFinished || this.isTerminating)) {
+  public createSilenceMs(durationMs = 100, sampleRate = 48000, channels = 2) {
+    const bytesPerSecond = sampleRate * channels * 2;
+    const silenceBytes = Math.floor((durationMs / 1000) * bytesPerSecond);
+    const adaptiveChunkSize = Math.min(
+      512,
+      Math.max(128, (this.currentBitrate / 128) * 256),
+    );
+    const chunkSize = Math.min(adaptiveChunkSize, silenceBytes);
+    let silenceSent = 0;
+
+    return new Readable({
+      highWaterMark: 4096,
+      read() {
+        if (silenceSent >= silenceBytes) {
+          this.push(null);
           return;
         }
-        this.config.logger.error?.(
-          `[${this.config.loggerTag}] Input pipeline failed: ${(err as Error).message}`,
-        );
-        this.emit("error", err);
-        this._finalize(err as Error);
-      }
+
+        const remaining = silenceBytes - silenceSent;
+        const sendSize = Math.min(chunkSize, remaining);
+        const chunk = Buffer.alloc(sendSize, 0);
+        this.push(chunk);
+        silenceSent += sendSize;
+      },
     });
   }
 
-  /**
-   * Decide if output stream needs throttling; if so, wrap it in a throttling stream.
-   * This applies to raw/pcm-like outputs (e.g. "-f s16le").
-   *
-   * @param applyThrottlePCM - If true, analyze arguments to possibly enable output throttling.
-   */
-  private _bindOutputStreams(applyThrottlePCM = false): void {
-    if (!this.process || !this.outputStream) return;
-
-    let isPCM = false;
-    let sampleRate = 44100;
-    let bits = 16;
-    let channels = 2;
-
-    const args = this.getFullArgs();
-    for (let i = 0; i < args.length; ++i) {
-      if (args[i] === "-f" && typeof args[i + 1] === "string") {
-        const fmt = args[i + 1];
-        if (
-          /^s(8|16|24|32)le$/.test(fmt) ||
-          /^f(32|64)le$/.test(fmt) ||
-          fmt === "s16be" ||
-          fmt === "f32be" ||
-          fmt === "f64be" ||
-          fmt === "u8" ||
-          fmt === "pcm_s16le" ||
-          fmt === "pcm_s16be" ||
-          fmt === "pcm_f32le" ||
-          fmt === "pcm_f32be" ||
-          fmt === "rawaudio" ||
-          fmt === "wav"
-        ) {
-          isPCM = true;
-        }
-      }
-      if (args[i] === "-ar" && typeof args[i + 1] === "string") {
-        const s = parseInt(args[i + 1], 10);
-        if (s > 1000 && s < 384000) sampleRate = s;
-      }
-      if (args[i] === "-ac" && typeof args[i + 1] === "string") {
-        const c = parseInt(args[i + 1], 10);
-        if (c > 0 && c < 32) channels = c;
-      }
-      if (args[i] === "-sample_fmt" && typeof args[i + 1] === "string") {
-        if (/^s(8|16|24|32)/.test(args[i + 1])) {
-          bits = parseInt(args[i + 1].replace(/[^\d]/g, ""), 10);
-        }
-        if (/^f(32|64)/.test(args[i + 1])) {
-          bits = parseInt(args[i + 1].replace(/[^\d]/g, ""), 10);
-        }
-      }
-    }
-
-    const onPipelineError = (err: Error | null) => {
-      if (!err) return;
-      if (
-        err.message &&
-        /premature close/i.test(err.message) &&
-        (this.hasFinished ||
-          this.isTerminating ||
-          this.config.suppressPrematureCloseWarning)
-      ) {
-        return;
-      }
-      if (err.message && /premature close/i.test(err.message)) {
-        if (this.config.debug) {
-          this.config.logger.warn?.(
-            `[${this.config.loggerTag}] Output pipeline warning: Premature close`,
-          );
-        }
-        return;
-      }
-      this.config.logger.error?.(
-        `[${this.config.loggerTag}] Output pipeline failed: ${err.message}`,
-      );
-      this.emit("error", err);
-      this._finalize(err);
-    };
-
-    if (this.process.stdout) {
-      if (applyThrottlePCM && isPCM) {
-        const throttle = this._createRealtimeThrottleStream(sampleRate, bits, channels);
-        pipeline(this.process.stdout, throttle, this.outputStream, onPipelineError);
-      } else {
-        pipeline(this.process.stdout, this.outputStream, onPipelineError);
-      }
-    }
-
-    // TODO: Support extraOutputs as independent pipelines
-
-    this.process.stderr?.on("data", (chunk) => this._handleStderr(chunk));
-  }
-
-  /** Bind process-level events for cleanup and reporting. */
-  private _bindProcessEvents(): void {
-    this.process?.once("exit", (code, signal) =>
-      this._onProcessExit(code, signal),
+  public createSilenceBuffer(
+    durationMs = 100,
+    sampleRate = 48000,
+    channels = 2,
+  ): Buffer {
+    const bytesPerSample = 2;
+    const totalBytes = Math.floor(
+      (durationMs / 1000) * sampleRate * channels * bytesPerSample,
     );
-    this.process?.once("error", (err: Error) => {
-      this.config.logger.error?.(
-        `[${this.config.loggerTag}] Process error: ${err.message}`,
-      );
-      this.emit("error", err);
-      this._finalize(err);
-    });
-    this.process?.on("close", (code, signal) => {
-      if (this.config.debug) {
-        this.config.logger.debug?.(
-          `[${this.config.loggerTag}] close event: code=${code} signal=${signal}`,
-        );
-      }
-    });
+    return Buffer.alloc(totalBytes, 0);
   }
 
-  /** Handles progress-parsing and stderr buffer management. */
   private _handleStderr(chunk: Buffer): void {
     const text = chunk.toString("utf-8");
+
     if (this.stderrBuffer.length < this.config.maxStderrBuffer) {
       this.stderrBuffer += text;
       if (this.stderrBuffer.length > this.config.maxStderrBuffer) {
@@ -543,6 +1044,58 @@ export class Processor extends EventEmitter {
         );
       }
     }
+
+    // Parse duration
+    const durationMatch = text.match(
+      /Duration:\s*(\d{2}):(\d{2}):(\d{2})\.(\d+)/,
+    );
+    if (durationMatch) {
+      const hours = parseInt(durationMatch[1], 10);
+      const minutes = parseInt(durationMatch[2], 10);
+      const seconds = parseInt(durationMatch[3], 10);
+      const milliseconds = parseInt(durationMatch[4].substring(0, 3), 10);
+      const totalSeconds =
+        hours * 3600 + minutes * 60 + seconds + milliseconds / 1000;
+      this.currentDuration = Math.max(1, Math.min(3600, totalSeconds));
+
+      if (this.config.verbose) {
+        this.config.logger.debug?.(
+          `[${getTimeString()}] [${this.config.loggerTag}] Detected duration: ${this.currentDuration.toFixed(3)}s`,
+        );
+      }
+    }
+
+    // Parse bitrate (only once)
+    if (!this._bitrateDetected) {
+      const bitrateMatch = text.match(
+        /bitrate=\s*(\d+(?:\.\d+)?)\s*(k(?:b\/s)?|M(?:b\/s)?)/i,
+      );
+      if (bitrateMatch) {
+        const value = parseFloat(bitrateMatch[1]);
+        const unit = bitrateMatch[2].toLowerCase();
+        let bitrateKbps = value;
+
+        if (unit.startsWith("m")) {
+          bitrateKbps = value * 1000;
+        }
+
+        this.currentBitrate = Math.max(32, Math.min(320, bitrateKbps));
+        this._bitrateDetected = true;
+
+        if (this.throttledOutput instanceof ThrottleStream) {
+          const bytesPerSecond = (this.currentBitrate * 1000) / 8;
+          this.throttledOutput.updateBitrate(bytesPerSecond);
+        }
+
+        if (this.config.verbose) {
+          this.config.logger.info?.(
+            `[${getTimeString()}] [${this.config.loggerTag}] Bitrate detected: ${this.currentBitrate} kbps`,
+          );
+        }
+      }
+    }
+
+    // Progress tracking
     if (this.config.enableProgressTracking) {
       const lines = text.split(/[\r\n]+/);
       for (const line of lines) {
@@ -557,158 +1110,241 @@ export class Processor extends EventEmitter {
     }
   }
 
-  /** Handles process exit, cleans up, and emits appropriate events. */
   private _onProcessExit(
     code: number | null,
     signal: NodeJS.Signals | null,
   ): void {
     if (this.hasFinished) return;
-    if (this.config.debug) {
-      this.config.logger.debug?.(
-        `[${this.config.loggerTag}] Process exited with code ${code}, signal ${signal}`,
-      );
-    }
+
     if (code === 0 || (signal !== null && this.isTerminating)) {
       if (this.isTerminating) {
-        this.emit("terminated", signal ?? "SIGTERM");
+        // Задержка перед эмитом события для предотвращения race condition
+        setTimeout(() => {
+          this.emit("terminated", signal ?? "SIGTERM");
+        }, 50);
       }
-      this.emit("end");
-      this._finalize();
+
+      if (this.config.debug) {
+        this.config.logger.debug?.(
+          `[${getTimeString()}] [${this.config.loggerTag}] Process exited normally with code ${code}, signal ${signal}`,
+        );
+      }
+
+      if (!this._runEmittedEnd) {
+        this._runEnded = true;
+
+        setImmediate(() => {
+          if (this.endSequenceFn && !this._runEmittedEnd) {
+            this.endSequenceFn();
+          }
+        });
+      }
     } else {
       const error = this._getProcessExitError(code, signal);
+      const tail = this.stderrBuffer.trim().slice(-4000);
+
+      if (tail && this.config.verbose) {
+        this.config.logger.error?.(
+          `[${getTimeString()}] [${this.config.loggerTag}] Process exited abnormally, stderr tail:\n${tail}`,
+        );
+      }
+
       this.emit("error", error);
       this._finalize(error);
     }
   }
 
-  /**
-   * Create an Error describing FFmpeg process exit with useful stderr output included.
-   */
   private _getProcessExitError(
     code: number | null,
     signal: NodeJS.Signals | null,
   ): Error {
     const stderrSnippet = this.stderrBuffer.trim().slice(-1000);
     let message = `FFmpeg exited with code ${code}`;
+
     if (signal) message += ` (signal ${signal})`;
     if (stderrSnippet) {
       message += `.\nLast stderr output:\n${stderrSnippet}`;
     }
+
     return new Error(message);
   }
 
-  /**
-   * Final cleanup: stop timeouts, release streams, resolve/reject the done promise.
-   * @param error - Error to reject with (optional; otherwise will resolve).
-   */
   private _finalize(error?: Error): void {
     if (this.hasFinished) return;
     this.hasFinished = true;
-    if (this.timeoutHandle) clearTimeout(this.timeoutHandle);
-    this._cleanup();
-    if (error) {
-      this.doneReject(error);
-    } else {
-      this.doneResolve();
+
+    try {
+      if (this.timeoutHandle) clearTimeout(this.timeoutHandle);
+
+      // Log statistics
+      if (this.config.verbose) {
+        const duration = (Date.now() - this._startTime) / 1000;
+        const expectedDuration = this.currentDuration || 0;
+        const ratio = expectedDuration > 0 ? duration / expectedDuration : 0;
+
+        this.config.logger.info?.(
+          `[${getTimeString()}] [${this.config.loggerTag}] Playback complete: ` +
+            `actual=${duration.toFixed(1)}s, expected=${expectedDuration.toFixed(1)}s, ` +
+            `ratio=${ratio.toFixed(2)}, chunks=${this._totalChunks}`,
+        );
+      }
+
+      this._cleanup();
+
+      if (
+        this.outputStream &&
+        !this.outputStream.destroyed &&
+        !this.outputStream.writableEnded
+      ) {
+        this.outputStream.end();
+        this.emit("end");
+      }
+
+      if (error) {
+        this.doneReject(error);
+      } else {
+        this.doneResolve();
+      }
+    } finally {
+      this.process = null;
+      this.outputStream = null;
+      this.passthrough = null;
+      this.blackholeStream = null;
+      this.timeoutHandle = undefined;
     }
   }
 
-  /**
-   * Cleanup resources/streams. Always called on process completion.
-   */
   private _cleanup(): void {
-    this.process?.stdout?.destroy();
-    this.process?.stderr?.destroy();
-    this.outputStream?.destroy();
+    try {
+      this.process?.stdout?.destroy();
+    } catch {
+      /* ignore */
+    }
+    try {
+      this.process?.stderr?.destroy();
+    } catch {
+      /* ignore */
+    }
+    try {
+      this.outputStream?.destroy();
+    } catch {
+      /* ignore */
+    }
+    try {
+      this.passthrough?.destroy();
+    } catch {
+      /* ignore */
+    }
+    try {
+      this.blackholeStream?.destroy();
+    } catch {
+      /* ignore */
+    }
+    try {
+      this.throttledOutput?.destroy();
+    } catch {
+      /* ignore */
+    }
+
     for (const { stream } of this.extraOutputs) {
-      stream.destroy();
+      try {
+        stream.destroy();
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (this.timeoutHandle) {
+      clearTimeout(this.timeoutHandle);
+      this.timeoutHandle = undefined;
     }
   }
 
-  /**
-   * Attempts to parse a single FFmpeg progress line into a FFmpegProgress object.
-   * @param line - FFmpeg stderr output line.
-   * @returns Partial FFmpegProgress info (or null if no recognized keys).
-   */
   private _parseProgress(line: string): Partial<FFmpegProgress> | null {
     const progress: Partial<FFmpegProgress> = {};
     const pairs = line.trim().split(/\s+/);
+
     for (const pair of pairs) {
       const [key, value] = pair.split("=", 2);
       if (!key || value == null) continue;
+
       switch (key) {
         case "frame":
-          progress.frame = parseInt(value, 10);
-          break;
-        case "fps":
-          progress.fps = parseFloat(value);
-          break;
-        case "bitrate":
-          progress.bitrate = value;
+          progress.frame = Number(value);
           break;
         case "total_size":
-          progress.totalSize = parseInt(value, 10);
+          progress.totalSize = Number(value);
           break;
         case "out_time_us":
-          progress.outTimeUs = parseInt(value, 10);
-          break;
-        case "out_time":
-          progress.outTime = value;
+          progress.outTimeUs = Number(value);
           break;
         case "dup_frames":
-          progress.dupFrames = parseInt(value, 10);
+          progress.dupFrames = Number(value);
           break;
         case "drop_frames":
-          progress.dropFrames = parseInt(value, 10);
+          progress.dropFrames = Number(value);
+          break;
+        case "packet":
+          progress.packet = Number(value);
+          break;
+        case "chapter":
+          progress.chapter = Number(value);
+          break;
+        case "fps":
+          progress.fps = parseFloat(value.replace("x", ""));
           break;
         case "speed":
           progress.speed = parseFloat(value.replace("x", ""));
           break;
-        case "progress":
-          progress.progress = value;
+        case "bitrate":
+          progress.bitrate = value;
           break;
         case "size":
           progress.size = value;
           break;
+        case "out_time":
+          progress.outTime = value;
+          break;
+        case "progress":
+          progress.progress = value;
+          break;
         case "time":
           progress.time = value;
           break;
-        case "packet":
-          progress.packet = parseInt(value, 10);
-          break;
-        case "chapter":
-          progress.chapter = parseInt(value, 10);
-          break;
       }
     }
+
     return Object.keys(progress).length > 0 ? progress : null;
   }
 
-  /**
-   * Create a Processor instance with quick-style options for convenience.
-   *
-   * @example
-   * Processor.create({
-   *   args: ["-i", "input.mp3", ...],
-   *   options: { ffmpegPath: "/usr/bin/ffmpeg" }
-   * });
-   */
   static create(
     params?: {
       args?: string[];
       inputStreams?: Array<{ stream: Readable; index: number }>;
       options?: ProcessorOptions;
-    } & ProcessorOptions,
+    } & Partial<ProcessorOptions>,
   ): Processor {
-    if (!params) return new Processor();
-    const { args, inputStreams, options, ...rest } = params;
-    const workerOptions: ProcessorOptions = {
-      ...(typeof options === "object" ? options : {}),
-      ...rest,
+    if (!params || typeof params !== "object") return new Processor();
+
+    const {
+      options: extraOptions,
+      args: workerArgs,
+      inputStreams: workerInputStreams,
+      ...restParams
+    } = params;
+    const optionsObj = {
+      ...(typeof extraOptions === "object" ? extraOptions : {}),
+      ...restParams,
     };
-    const worker = new Processor(workerOptions);
-    if (Array.isArray(args)) worker.setArgs(args);
-    if (Array.isArray(inputStreams)) worker.inputStreams = [...inputStreams];
+    const worker = new Processor(optionsObj);
+
+    if (workerArgs) worker.setArgs(workerArgs);
+    if (workerInputStreams)
+      worker.inputStreams = workerInputStreams.map(({ stream, index }) => ({
+        stream,
+        index,
+      }));
+
     return worker;
   }
 }
