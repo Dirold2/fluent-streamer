@@ -27,7 +27,6 @@ class AudioService extends EventEmitter {
     // Устанавливаем заголовки, если заданы
     if (this.currentOptions.headers && Object.keys(this.currentOptions.headers).length > 0) {
       fluent.setHeaders(this.currentOptions.headers);
-      fluent.headers(this.currentOptions.headers);
     }
 
     fluent
@@ -50,7 +49,7 @@ class AudioService extends EventEmitter {
     this.ffmpeg = fluent;
 
     // Запуск процесса
-    const { output, done } = fluent.run();
+    const { output, done } = await fluent.run();
 
     done
       .then(() => {
@@ -78,12 +77,10 @@ describe("AudioService / FluentStream integration", () => {
 
   beforeEach(() => {
     service = new AudioService();
-    FluentStream._reset();
   });
 
   afterEach(async () => {
     await service.destroy();
-    FluentStream._reset();
   });
 
   it("создаёт audio stream", async () => {

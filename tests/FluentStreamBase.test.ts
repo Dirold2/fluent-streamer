@@ -133,12 +133,12 @@ describe("FluentStream Unit Tests", () => {
             f.startsWith("acrossfade:") ||
             f.startsWith("acrossfade")))
       );
-      expect(found).toBe("acrossfade=d=3.5:c1=tri:c2=tri");
+      expect(found).toBe("[0:a][1:a]acrossfade=d=3.5:c1=tri:c2=tri[acf]");
     });
 
     it("crossfadeAudio works with custom options", () => {
       const s = new FluentStream();
-      s.input("a.mp3").input("b.mp3").crossfadeAudio(10, { c1: 'exp', c2: 'log' });
+      s.input("a.mp3").input("b.mp3").crossfadeAudio(10, { curve1: 'exp', curve2: 'log' });
       const summary = s.getInputSummary();
       const found = summary.complexFilters.find(f =>
         (typeof f === "string" &&
@@ -147,7 +147,7 @@ describe("FluentStream Unit Tests", () => {
             f.startsWith("acrossfade:") ||
             f.startsWith("acrossfade")))
       );
-      expect(found).toBe("acrossfade=d=10:c1=exp:c2=log");
+      expect(found).toBe("[0:a][1:a]acrossfade=d=10:c1=exp:c2=log[acf]");
     });
   });
 

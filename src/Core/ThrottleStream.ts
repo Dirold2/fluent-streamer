@@ -3,35 +3,90 @@ import { Transform } from "stream";
 export class ThrottleStream extends Transform {
   private bytesPerSecond: number;
   private lastTime: number = Date.now();
+  private buffer: Buffer[] = [];
+  private isThrottling: boolean = false;
 
   constructor(bytesPerSecond: number) {
     super();
     this.bytesPerSecond = bytesPerSecond;
   }
 
-  _transform(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void) {
+  public updateBitrate(bytesPerSecond: number) {
+    this.bytesPerSecond = Math.max(1000, bytesPerSecond);
+  }
+
+  _transform(
+    chunk: Buffer,
+    _encoding: string,
+    callback: (error?: Error | null) => void,
+  ) {
+    this.buffer.push(chunk);
+
+    if (!this.isThrottling) {
+      this.processBuffer();
+    }
+
+    callback();
+  }
+
+  private processBuffer() {
+    if (this.buffer.length === 0) {
+      this.isThrottling = false;
+      return;
+    }
+
+    this.isThrottling = true;
+    const chunk = this.buffer.shift()!;
     const now = Date.now();
     const elapsed = now - this.lastTime;
+
+    // Рассчитываем, сколько байт мы могли бы отправить за прошедшее время
     const allowedBytes = (elapsed / 1000) * this.bytesPerSecond;
 
-    if (allowedBytes >= chunk.length) {
+    if (elapsed === 0 || allowedBytes >= chunk.length) {
+      // Если прошло достаточно времени, отправляем чанк немедленно
       this.push(chunk);
       this.lastTime = now;
-      callback();
+      setImmediate(() => this.processBuffer());
     } else {
-      let i = 0;
-      const pushChunk = () => {
-        if (i >= chunk.length) {
+      // Рассчитываем необходимую задержку для соблюдения bitrate
+      const delay = (chunk.length / this.bytesPerSecond) * 1000 - elapsed;
+
+      setTimeout(
+        () => {
+          this.push(chunk);
           this.lastTime = Date.now();
-          callback();
-          return;
+          this.processBuffer();
+        },
+        Math.max(0, delay),
+      );
+    }
+  }
+
+  _flush(callback: (error?: Error | null) => void) {
+    // Обработать все оставшиеся чанки в буфере
+    const flushAll = () => {
+      if (this.buffer.length === 0) {
+        callback();
+      } else {
+        const chunk = this.buffer.shift()!;
+        this.push(chunk);
+        setImmediate(flushAll);
+      }
+    };
+
+    if (!this.isThrottling) {
+      flushAll();
+    } else {
+      // Если throttling активен, подождём его завершения
+      const checkThrottling = () => {
+        if (!this.isThrottling) {
+          flushAll();
+        } else {
+          setTimeout(checkThrottling, 10);
         }
-        const end = Math.min(i + allowedBytes, chunk.length);
-        this.push(chunk.slice(i, end));
-        i = end;
-        setTimeout(pushChunk, 20);
       };
-      pushChunk();
+      checkThrottling();
     }
   }
 }

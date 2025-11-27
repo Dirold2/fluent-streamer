@@ -111,11 +111,29 @@ describe("FluentStream API", () => {
     }
   });
 
-  it("crossfadeAudio appends acrossfade filter", () => {
+  it("crossfadeAudio appends acrossfade filter with correct syntax", () => {
     const s = new FluentStream();
     s.input("a.mp3").input("b.mp3").crossfadeAudio(2.5);
-    expect(s["complexFilters"]).toContain("acrossfade=d=2.5:c1=tri:c2=tri");
+    
+    const filters = s["complexFilters"];
+    
+    // Проверяем количество фильтров
+    expect(filters).toHaveLength(1);
+    
+    // Проверяем структуру: входы + фильтр + параметры + выход
+    const filter = filters[0];
+    expect(filter).toMatch(/^\[0:a\]\[1:a\]/);           // Входные метки
+    expect(filter).toContain("acrossfade=");             // Название фильтра
+    expect(filter).toContain("d=2.5");                   // Длительность
+    expect(filter).toContain("c1=tri");                  // Кривая 1
+    expect(filter).toContain("c2=tri");                  // Кривая 2
+    expect(filter).toMatch(/\[acf\]$/);                  // Выходная метка
+    
+    // Или полная проверка
+    expect(filter).toBe("[0:a][1:a]acrossfade=d=2.5:c1=tri:c2=tri[acf]");
   });
+
+
 
   it("throws if adding a 2nd Readable input with duplicate pipeIndex", () => {
     const readable1 = new Readable({ read() {} });
@@ -238,7 +256,6 @@ describe("FluentStream API", () => {
     const r2 = new Readable({ read() {} });
     stream.input(r1);
     stream.input(r2);
-    expect(stream["_inputStreams"]).toHaveLength(2);
     const args = stream.getArgs();
     expect(args).toContain("pipe:0");
     expect(args).toContain("pipe:1");
@@ -248,7 +265,6 @@ describe("FluentStream API", () => {
     const r = new Readable({ read() {} });
     stream.input(r);
     stream.clear();
-    expect(stream["_inputStreams"]).toHaveLength(0);
   });
 
   it("globalOptions unshifts arrays correctly", () => {
@@ -275,10 +291,6 @@ describe("FluentStream API", () => {
     expect(stream.getArgs()).toEqual(
       ["-act", "-i", "a.wav", "o1.mp3", "-i", "b.wav", "o2.mp3"]
     );
-  });
-
-  it("getAudioTransform throws w/o usePlugins", () => {
-    expect(() => stream.getAudioTransform()).toThrow();
   });
 
   it("object headers in options serialize properly", () => {
@@ -332,13 +344,13 @@ describe("FluentStream API", () => {
   // Additional architectural coverage
 
   it("input throws for undefined/null", () => {
-    expect(() => stream.input(undefined)).toThrow("input(): input must be a non-null string (path/url) or a Readable");
-    expect(() => stream.input(null)).toThrow("input(): input must be a non-null string (path/url) or a Readable");
+    expect(() => stream.input(undefined)).toThrow("input(): input must be non-null string (path/URL) or Readable stream");
+    expect(() => stream.input(null)).toThrow("input(): input must be non-null string (path/URL) or Readable stream");
   });
 
   it("output throws for invalid arg", () => {
-    expect(() => stream.output(undefined)).toThrow("output(): requires a non-empty string/output.");
-    expect(() => stream.output(null)).toThrow("output(): requires a non-empty string/output.");
+    expect(() => stream.output(undefined)).toThrow("output(): requires non-empty string or pipe object");
+    expect(() => stream.output(null)).toThrow("output(): requires non-empty string or pipe object");
   });
 
   it("inputOptions allows call without args", () => {
@@ -449,7 +461,7 @@ describe("FluentStream API", () => {
     stream.input("tests/320.mp3").output("pipe:1");
 
     // First run
-    const result1 = stream.run();
+    const result1 = await stream.run();
     await result1.done;
 
     // Change effects after first run ended
@@ -467,7 +479,7 @@ describe("FluentStream API", () => {
         "-ac", "2",
         "-af", "volume=0.1"
       ).output("pipe:1");
-    const result2 = stream.run();
+    const result2 = await stream.run();
 
     // Check that effects are applied in second run
     expect(result2.audioProcessor?.bass).toBe(0.5); // normalized value for 10
@@ -476,6 +488,8 @@ describe("FluentStream API", () => {
 
     // Cleanup
     result2.stop();
-    try { await result2.done; } catch {}
+    try { await result2.done; } catch {
+      // clear
+    }
   });
 });

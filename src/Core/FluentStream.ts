@@ -1,52 +1,115 @@
+/**
+ * FluentStream - Fluent API for FFmpeg stream processing
+ * FluentStream - Fluent API для обработки потоков FFmpeg
+ *
+ * Builder pattern for constructing FFmpeg commands with:
+ * - Input/output management (streams and files)
+ * - Audio effects control (volume, EQ, compression, fade)
+ * - Complex filter chains
+ * - Real-time effect adjustment
+ *
+ * Паттерн Builder для конструирования команд FFmpeg с:
+ * - Управлением входами/выходами (потоки и файлы)
+ * - Контролем аудиоэффектов (громкость, EQ, компрессия, затухание)
+ * - Цепочками сложных фильтров
+ * - Регулировкой эффектов в реальном времени
+ *
+ * WARNING: После .run() объект становится "грязным" (dirty).
+ * Повторное использование ЗАПРЕЩЕНО до .clear()!
+ *
+ * ВНИМАНИЕ: После .run() объект становится "грязным" (dirty).
+ * Повторное использование ЗАПРЕЩЕНО до .clear()!
+ */
+
 import { EventEmitter } from "eventemitter3";
-import { Readable, Transform, Duplex } from "node:stream";
+import { Readable } from "node:stream";
 import Processor from "./Processor.js";
-import {
+import type {
   FFmpegRunResultExtended,
   ProcessorOptions,
   Logger,
   AudioProcessingOptions,
-  LogMeta
+  LogMeta,
+  CrossfadeAudioOptions,
 } from "../Types/index.js";
 
-const defaultLogger: Logger = {
+// ============================================================================
+// CONSTANTS & DEFAULTS
+// ============================================================================
+
+/**
+ * Humanization headers to identify requests
+ * Заголовки гуманизации для идентификации запросов
+ */
+const HUMANITY_HEADERS = Object.freeze({
+  "X-Human-Intent": "true",
+  "X-Request-Attention": "just-want-to-do-my-best",
+  "User-Agent": "FluentStream/1.0 (friendly bot)",
+});
+
+/**
+ * Default no-op logger implementation
+ * Реализация логгера по умолчанию (без операций)
+ */
+const DEFAULT_LOGGER: Logger = {
   debug: () => {},
   info: () => {},
   log: () => {},
-  warn: (msg: string, opts?: { code?: string; stackTrace?: string }) => {
-    if (process?.emitWarning) process.emitWarning(msg, { code: opts?.code });
-    if (opts?.stackTrace) {
-      console.warn("Stack (context):", opts.stackTrace);
+  warn: (msg: string, meta?: LogMeta) => {
+    if (process?.emitWarning) {
+      process.emitWarning(msg, { code: meta?.code });
+    }
+    if (meta?.stackTrace) {
+      console.warn("Stack (context):", meta.stackTrace);
     }
   },
-  error: (msg: string, opts?: { code?: string; stackTrace?: string }) => {
-    if (process?.emitWarning) process.emitWarning(msg, { code: opts?.code });
-    if (opts?.stackTrace) {
-      console.error("Stack (context):", opts.stackTrace);
+  error: (msg: string | Error, meta?: LogMeta) => {
+    if (process?.emitWarning) {
+      process.emitWarning(msg instanceof Error ? msg.message : msg, {
+        code: meta?.code,
+      });
+    }
+    if (meta?.stackTrace) {
+      console.error("Stack (context):", meta.stackTrace);
     }
   },
 };
 
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+/**
+ * Get stack trace for debugging
+ * Получить стек вызовов для отладки
+ *
+ * @param skip - Number of frames to skip (количество фреймов для пропуска)
+ */
 function getStackTrace(skip = 2): string {
   const stack = new Error().stack;
-  return stack ? stack.split("\n").slice(skip).filter(l => !l.includes("node:internal")).join("\n") : "";
+  return stack
+    ? stack
+        .split("\n")
+        .slice(skip)
+        .filter((l) => !l.includes("node:internal"))
+        .join("\n")
+    : "";
 }
 
-export type EncoderBuilder = (encoder: FluentStream) => void;
-
-class FluentStreamValidationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "FluentStreamValidationError";
-  }
-}
-function countInputs(args: string[], inputStreams: Array<{ stream: Readable; index: number }>): {
+/**
+ * Count total inputs (string URLs + streams)
+ * Подсчитать общее количество входов (URL + потоки)
+ */
+function countInputs(
+  args: string[],
+  inputStreams: Array<{ stream: Readable; index: number }>,
+): {
   streams: number;
   stringInputs: number;
   total: number;
 } {
   let stringInputs = 0;
-  for (let i = 0; i < args.length - 1; ++i) {
+  for (let i = 0; i < args.length - 1; i++) {
     if (args[i] === "-i") stringInputs++;
   }
   return {
@@ -55,576 +118,743 @@ function countInputs(args: string[], inputStreams: Array<{ stream: Readable; ind
     total: stringInputs + inputStreams.length,
   };
 }
-function summarizeInputs(args: string[], _inputStreamsArr: Array<{stream: Readable, index: number}>, complexFilters: string[]) {
-  const ret: {
-    stringInputs: string[],
-    pipeStreams: string[],
-    complexFilters: string[]
-  } = { stringInputs: [], pipeStreams: [], complexFilters: [...complexFilters] };
-  for (let i = 0; i < args.length - 1; ++i) {
-    if (args[i] === "-i") {
-      if (/^pipe:\d+$/.test(args[i + 1])) ret.pipeStreams.push(args[i + 1]);
-      else ret.stringInputs.push(args[i + 1]);
-    }
-  }
-  return ret;
-}
 
 /**
- * Класс-обёртка для управления потоковым ffmpeg процессом (Fluent API).
- * После .run() объект становится "грязным" (dirty) — до .clear() повторное использование запрещено!
+ * Summarize inputs for debugging
+ * Суммаризовать входы для отладки
+ */
+function summarizeInputs(
+  args: string[],
+  _inputStreams: Array<{ stream: Readable; index: number }>,
+  complexFilters: string[],
+): {
+  stringInputs: string[];
+  pipeStreams: string[];
+  complexFilters: string[];
+} {
+  const result: {
+    stringInputs: string[];
+    pipeStreams: string[];
+    complexFilters: string[];
+  } = {
+    stringInputs: [],
+    pipeStreams: [],
+    complexFilters: [...complexFilters],
+  };
+
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === "-i") {
+      if (/^pipe:\d+$/.test(args[i + 1])) {
+        result.pipeStreams.push(args[i + 1]);
+      } else {
+        result.stringInputs.push(args[i + 1]);
+      }
+    }
+  }
+
+  return result;
+}
+
+// ============================================================================
+// CUSTOM ERROR CLASS
+// ============================================================================
+
+/**
+ * FluentStream validation error
+ * Ошибка валидации FluentStream
+ */
+class FluentStreamValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FluentStreamValidationError";
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, FluentStreamValidationError);
+    }
+  }
+}
+
+// ============================================================================
+// MAIN CLASS
+// ============================================================================
+
+/**
+ * FluentStream - Builder API for FFmpeg command construction
+ * FluentStream - Builder API для конструирования команд FFmpeg
+ *
+ * Chainable methods for building complex FFmpeg pipelines with audio effects.
+ * Цепочечные методы для построения сложных FFmpeg пайплайнов с аудиоэффектами.
  */
 export default class FluentStream extends EventEmitter {
-  static HUMANITY_HEADER = Object.freeze({
-    "X-Human-Intent": "true",
-    "X-Request-Attention": "just-want-to-do-my-best",
-    "User-Agent": "FluentStream/1.0 (friendly bot)",
-  });
+  // ============================================================================
+  // STATIC PROPERTIES
+  // ============================================================================
 
-  static logger: Logger = defaultLogger;
+  /** Static humanization headers / Статические заголовки гуманизации */
+  static readonly HUMANITY_HEADERS = HUMANITY_HEADERS;
 
-  static _reset(): void {}
+  /** Static logger instance / Статический экземпляр логгера */
+  static logger: Logger = DEFAULT_LOGGER;
 
+  // ============================================================================
+  // PRIVATE PROPERTIES - CORE STATE
+  // ============================================================================
+
+  /** FFmpeg command arguments / Аргументы команды FFmpeg */
   private args: string[] = [];
-  private _inputStreams: Array<{ stream: Readable; index: number }> = [];
+
+  /** Input streams with indices / Входные потоки с индексами */
+  private inputStreams: Array<{ stream: Readable; index: number }> = [];
+
+  /** Complex filter chains / Цепочки сложных фильтров */
   private complexFilters: string[] = [];
+
+  /** Processor configuration / Конфигурация процессора */
   public readonly options: ProcessorOptions;
-  public _headers: Record<string, string> | undefined;
-  private audioTransform: Transform | Duplex | null = null;
-  private _logger =
-    (this.constructor as typeof FluentStream).logger || defaultLogger;
-  private customAudioTransform: Transform | Duplex | null = null;
-  private _dirty = false;
-  private _volume: number = 1;
-  private _bass: number = 0;
-  private _treble: number = 0;
-  private _compressor: boolean = false;
-  private _useAudioProcessor: boolean = false;
-  public _processorRunResult: FFmpegRunResultExtended | null = null;
 
-  /** Получить/установить громкость (0..1) */
-  public get volume() { return this._volume; }
-  public set volume(val: number) {
-    this._volume = val;
-    if (this._processorRunResult?.setVolume) this._processorRunResult.setVolume(val);
+  /** Custom HTTP headers / Пользовательские HTTP-заголовки */
+  private headers: Record<string, string> | undefined;
+
+  /** Dirty flag (prevents reuse before .clear()) / Флаг "грязности" (предотвращает переиспользование) */
+  private isDirty = false;
+
+  // ============================================================================
+  // PRIVATE PROPERTIES - AUDIO EFFECTS STATE
+  // ============================================================================
+
+  /** Current volume level (0-1) / Текущий уровень громкости (0-1) */
+  private audioVolume = 1;
+
+  /** Current bass level (-20 to 20) / Текущий уровень баса (-20 до 20) */
+  private audioBass = 0;
+
+  /** Current treble level (-20 to 20) / Текущий уровень верхних частот (-20 до 20) */
+  private audioTreble = 0;
+
+  /** Current compressor state / Текущее состояние компрессора */
+  private audioCompressor = false;
+
+  /** Whether to use AudioProcessor chain / Использовать ли цепь AudioProcessor */
+  private enabledAudioProcessor = false;
+
+  /** Cached audio processor options / Кэшированные опции аудио-процессора */
+  private cachedAudioOptions: AudioProcessingOptions | null = null;
+
+  /** Hash for cache invalidation / Хэш для инвалидации кэша */
+  private cachedOptionsHash = "";
+
+  // ============================================================================
+  // PRIVATE PROPERTIES - INTERNAL
+  // ============================================================================
+
+  /** Logger instance / Экземпляр логгера */
+  private logger =
+    (this.constructor as typeof FluentStream).logger || DEFAULT_LOGGER;
+
+  /** Active processor result (after .run()) / Активный результат процессора (после .run()) */
+  private processorResult: FFmpegRunResultExtended | null = null;
+
+  // ============================================================================
+  // PUBLIC GETTERS & SETTERS
+  // ============================================================================
+
+  /**
+   * Get/set volume (0-1) / Получить/установить громкость (0-1)
+   */
+  public get volume(): number {
+    return this.audioVolume;
   }
-  /** Получить/установить плавную регулировку громкости (0..1) */
-  public get fade(): { target: number; duration?: number } | null {
-    return this._processorRunResult?.currentFade ?? null;
+
+  public set volume(value: number) {
+    this.audioVolume = value;
+    if (this.processorResult?.setVolume) {
+      this.processorResult.setVolume(value);
+    }
   }
-  public set fade(params: { target: number; duration?: number }) {
-    const { target, duration = 1000 } = params;
-    this._volume = target;
-    if (this._processorRunResult?.startFade) this._processorRunResult.startFade(target, duration);
+
+  /**
+   * Get/set bass (-20 to 20) / Получить/установить бас (-20 до 20)
+   */
+  public get bass(): number {
+    return this.audioBass;
   }
-  /** Получить/установить бас (-20..20) */
-  public get bass() { return this._bass; }
-  public set bass(val: number) {
-    this._bass = val;
-    if (this._processorRunResult?.setBass) this._processorRunResult.setBass(val);
+
+  public set bass(value: number) {
+    this.audioBass = value;
+    if (this.processorResult?.setBass) {
+      this.processorResult.setBass(value);
+    }
   }
-  /** Получить/установить верхние частоты (-20..20) */
-  public get treble() { return this._treble; }
-  public set treble(val: number) {
-    this._treble = val;
-    if (this._processorRunResult?.setTreble) this._processorRunResult.setTreble(val);
+
+  /**
+   * Get/set treble (-20 to 20) / Получить/установить верхние частоты (-20 до 20)
+   */
+  public get treble(): number {
+    return this.audioTreble;
   }
-  /** Получить/установить компрессор (true/false) */
-  public get compressor() { return this._compressor; }
-  public set compressor(val: boolean) {
-    this._compressor = val;
-    if (this._processorRunResult?.setCompressor) this._processorRunResult.setCompressor(val);
+
+  public set treble(value: number) {
+    this.audioTreble = value;
+    if (this.processorResult?.setTreble) {
+      this.processorResult.setTreble(value);
+    }
   }
-  /** Флаг использования AudioProcessor-chain (можно задать до run). */
-  public get useAudioProcessor() { return this._useAudioProcessor; }
-  public set useAudioProcessor(val: boolean) {
-    this._useAudioProcessor = val;
+
+  /**
+   * Get/set compressor (true/false) / Получить/установить компрессор (true/false)
+   */
+  public get compressor(): boolean {
+    return this.audioCompressor;
   }
-  /** Явно включить AudioProcessor-обработку (цепочка) */
-  public enableAudioProcessor(on: boolean = true) {
-    this._useAudioProcessor = on;
+
+  public set compressor(value: boolean) {
+    this.audioCompressor = value;
+    if (this.processorResult?.setCompressor) {
+      this.processorResult.setCompressor(value);
+    }
+  }
+
+  /**
+   * Get/set audio processor enabled / Получить/установить включение аудио-процессора
+   */
+  public get useAudioProcessor(): boolean {
+    return this.enabledAudioProcessor;
+  }
+
+  public set useAudioProcessor(value: boolean) {
+    this.enabledAudioProcessor = value;
+  }
+
+  private _runInProgress: boolean = false;
+  private _runQueue: Array<() => void> = [];
+
+  // ============================================================================
+  // CONSTRUCTOR
+  // ============================================================================
+
+  /**
+   * Create FluentStream instance
+   * Создать экземпляр FluentStream
+   *
+   * @param options - Processor options (опции процессора)
+   */
+  constructor(options: ProcessorOptions = {}) {
+    super();
+
+    this.options = { ...options };
+    this.headers =
+      typeof options.headers === "object" && options.headers !== null
+        ? options.headers
+        : undefined;
+
+    // Initialize audio settings from options
+    this.enabledAudioProcessor = options.useAudioProcessor ?? false;
+    this.audioVolume = options.audioProcessorOptions?.volume ?? 1;
+    this.audioBass = options.audioProcessorOptions?.bass ?? 0;
+    this.audioTreble = options.audioProcessorOptions?.treble ?? 0;
+    this.audioCompressor = options.audioProcessorOptions?.compressor ?? false;
+  }
+
+  // ============================================================================
+  // PRIVATE HELPER METHODS
+  // ============================================================================
+
+  /**
+   * Emit log message with standardized format
+   * Выпустить сообщение логирования со стандартным форматом
+   */
+  private emitLog(
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    meta?: LogMeta,
+  ): void {
+    const fullMeta = { ...(meta || {}) };
+    if (!fullMeta.stackTrace) {
+      fullMeta.stackTrace = getStackTrace();
+    }
+
+    if (typeof this.logger[level] === "function") {
+      this.logger[level](message, fullMeta);
+    }
+  }
+
+  /**
+   * Build cached audio processor options
+   * Создать кэшированные опции аудио-процессора
+   */
+  private buildAudioOptions(): AudioProcessingOptions {
+    const hash = `${this.audioVolume}-${this.audioBass}-${this.audioTreble}-${this.audioCompressor}`;
+
+    if (this.cachedAudioOptions && this.cachedOptionsHash === hash) {
+      return this.cachedAudioOptions;
+    }
+
+    this.cachedAudioOptions = {
+      volume: this.audioVolume,
+      bass: this.audioBass,
+      treble: this.audioTreble,
+      compressor: this.audioCompressor,
+      normalize: false,
+    };
+    this.cachedOptionsHash = hash;
+
+    return this.cachedAudioOptions;
+  }
+
+  /**
+   * Get merged headers (user + humanity headers)
+   * Получить объединённые заголовки (пользовательские + гуманизирующие)
+   */
+  private getMergedHeaders(): Record<string, string> {
+    if (!this.headers || Object.keys(this.headers).length === 0) {
+      return { ...HUMANITY_HEADERS };
+    }
+    return { ...this.headers };
+  }
+
+  /**
+   * Create Processor with current configuration
+   * Создать Processor с текущей конфигурацией
+   */
+  private createProcessor(
+    extraOpts: Partial<ProcessorOptions> = {},
+  ): Processor {
+    const mergedHeaders = this.getMergedHeaders();
+
+    const finalOptions: ProcessorOptions = {
+      ...this.options,
+      ...extraOpts,
+      headers: mergedHeaders,
+      useAudioProcessor: this.enabledAudioProcessor,
+      audioProcessorOptions: this.buildAudioOptions(),
+      inputStreams: this.inputStreams,
+    };
+
+    return Processor.create({
+      options: finalOptions,
+      args: this.assembleArgs(),
+      inputStreams: this.inputStreams,
+    });
+  }
+
+  /**
+   * Validate not dirty before modification
+   * Проверить, что не "грязно" перед модификацией
+   */
+  private requireClean(operation: string): void {
+    if (this.isDirty) {
+      throw new FluentStreamValidationError(
+        `Cannot use .${operation}() after .run() without .clear()`,
+      );
+    }
+  }
+
+  // ============================================================================
+  // PUBLIC API - AUDIO EFFECTS (Chainable)
+  // ============================================================================
+
+  /**
+   * Set volume (chainable) / Установить громкость (цепочечный)
+   */
+  public setVolume(value: number): this {
+    this.volume = value;
     return this;
   }
 
-  /** Установить громкость (цепочка) */
-  public setVolume(val: number) { this.volume = val; return this; }
-  /** Установить: плавную регулировку громкости */
-  public startFade(target: number, duration: number = 1000) {
-    this.fade = { target, duration };
+  /**
+   * Start fade-in effect / Начать эффект появления
+   */
+  public fadeIn(targetVolume: number = 1, durationMs: number = 1000): this {
+    this.audioVolume = targetVolume;
+    if (this.processorResult?.startFade) {
+      this.processorResult.startFade(targetVolume, durationMs);
+    }
     return this;
   }
-  /** Установить bass (цепочка) */
-  public setBass(val: number) { this.bass = val; return this; }
-  /** Установить treble (цепочка) */
-  public setTreble(val: number) { this.treble = val; return this; }
-  /** Установить compressor (цепочка) */
-  public setCompressor(val: boolean) { this.compressor = val; return this; }
-  /** Установить все эффекты разом (цепочка) */
-  public setEqualizer(bass: number, treble: number, compressor: boolean) {
+
+  /**
+   * Start fade-out effect / Начать эффект затухания
+   */
+  public fadeOut(durationMs: number = 1000): this {
+    this.audioVolume = 0;
+    if (this.processorResult?.startFade) {
+      this.processorResult.startFade(0, durationMs);
+    }
+    return this;
+  }
+
+  /**
+   * Set bass level (chainable) / Установить уровень баса (цепочечный)
+   */
+  public setBass(value: number): this {
+    this.bass = value;
+    return this;
+  }
+
+  /**
+   * Set treble level (chainable) / Установить уровень верхних частот (цепочечный)
+   */
+  public setTreble(value: number): this {
+    this.treble = value;
+    return this;
+  }
+
+  /**
+   * Set compressor state (chainable) / Установить состояние компрессора (цепочечный)
+   */
+  public setCompressor(enabled: boolean): this {
+    this.compressor = enabled;
+    return this;
+  }
+
+  /**
+   * Set all EQ parameters at once / Установить все параметры EQ сразу
+   */
+  public setEqualizer(bass: number, treble: number, compressor: boolean): this {
     this.bass = bass;
     this.treble = treble;
     this.compressor = compressor;
-    if (this._processorRunResult?.setEqualizer) this._processorRunResult.setEqualizer(bass, treble, compressor);
     return this;
   }
 
-  /** Изменить громкость на лету (работает после run) */
-  public changeVolume(val: number): boolean {
-    if (this._processorRunResult?.setVolume) {
-      this._processorRunResult.setVolume(val);
-      this._volume = val;
+  /**
+   * Enable audio processor chain / Включить цепь аудио-процессора
+   */
+  public enableAudioProcessing(enable: boolean = true): this {
+    this.enabledAudioProcessor = enable;
+    return this;
+  }
+
+  // ============================================================================
+  // PUBLIC API - AUDIO EFFECTS (On-the-fly, after .run())
+  // ============================================================================
+
+  /**
+   * Change volume during playback / Изменить громкость во время воспроизведения
+   *
+   * @returns true if applied, false if no active processor (успешно ли применено)
+   */
+  public changeVolume(value: number): boolean {
+    if (this.processorResult?.setVolume) {
+      this.processorResult.setVolume(value);
+      this.audioVolume = value;
       return true;
     }
     return false;
   }
 
-  /** Изменить бас на лету (работает после run) */
-  public changeBass(val: number): boolean {
-    if (this._processorRunResult?.setBass) {
-      this._processorRunResult.setBass(val);
-      this._bass = val;
+  /**
+   * Change bass during playback / Изменить бас во время воспроизведения
+   */
+  public changeBass(value: number): boolean {
+    if (this.processorResult?.setBass) {
+      this.processorResult.setBass(value);
+      this.audioBass = value;
       return true;
     }
     return false;
   }
 
-  /** Изменить верхние частоты на лету (работает после run) */
-  public changeTreble(val: number): boolean {
-    if (this._processorRunResult?.setTreble) {
-      this._processorRunResult.setTreble(val);
-      this._treble = val;
+  /**
+   * Change treble during playback / Изменить верхние частоты во время воспроизведения
+   */
+  public changeTreble(value: number): boolean {
+    if (this.processorResult?.setTreble) {
+      this.processorResult.setTreble(value);
+      this.audioTreble = value;
       return true;
     }
     return false;
   }
 
-  /** Изменить компрессор на лету (работает после run) */
-  public changeCompressor(val: boolean): boolean {
-    if (this._processorRunResult?.setCompressor) {
-      this._processorRunResult.setCompressor(val);
-      this._compressor = val;
+  /**
+   * Change compressor during playback / Изменить компрессор во время воспроизведения
+   */
+  public changeCompressor(enabled: boolean): boolean {
+    if (this.processorResult?.setCompressor) {
+      this.processorResult.setCompressor(enabled);
+      this.audioCompressor = enabled;
       return true;
     }
     return false;
   }
 
-  /** Изменить все эффекты на лету (работает после run) */
-  public changeEqualizer(bass: number, treble: number, compressor: boolean): boolean {
-    if (this._processorRunResult?.setEqualizer) {
-      this._processorRunResult.setEqualizer(bass, treble, compressor);
-      this._bass = bass;
-      this._treble = treble;
-      this._compressor = compressor;
+  /**
+   * Change all EQ during playback / Изменить все EQ во время воспроизведения
+   */
+  public changeEqualizer(
+    bass: number,
+    treble: number,
+    compressor: boolean,
+  ): boolean {
+    if (this.processorResult?.setEqualizer) {
+      this.processorResult.setEqualizer(bass, treble, compressor);
+      this.audioBass = bass;
+      this.audioTreble = treble;
+      this.audioCompressor = compressor;
       return true;
     }
     return false;
   }
 
-  /** Запустить плавное затухание на лету (работает после run) */
-  public fadeOut(duration: number = 1000): boolean {
-    if (this._processorRunResult?.startFade) {
-      this._processorRunResult.startFade(0, duration);
-      this._volume = 0;
-      return true;
-    }
-    return false;
-  }
-
-  /** Запустить плавное появление на лету (работает после run) */
-  public fadeIn(targetVolume: number = 1, duration: number = 1000): boolean {
-    if (this._processorRunResult?.startFade) {
-      this._processorRunResult.startFade(targetVolume, duration);
-      this._volume = targetVolume;
-      return true;
-    }
-    return false;
-  }
-
-  // Cache for audio processor options to avoid repeated object creation
-  private _cachedAudioProcessorOptions: AudioProcessingOptions | null = null;
-  private _lastOptionsHash = "";
-
-  /** Сконструировать актуальные опции для AudioProcessor */
-  private buildAudioProcessorOptions() {
-    const currentHash = `${this._volume}-${this._bass}-${this._treble}-${this._compressor}`;
-    if (this._cachedAudioProcessorOptions && this._lastOptionsHash === currentHash) {
-      return this._cachedAudioProcessorOptions;
-    }
-
-    this._cachedAudioProcessorOptions = {
-      volume: this._volume,
-      bass: this._bass,
-      treble: this._treble,
-      compressor: this._compressor,
-      normalize: false // можно сделать configurable
-    };
-    this._lastOptionsHash = currentHash;
-    return this._cachedAudioProcessorOptions;
-  }
-
-  constructor(options: ProcessorOptions = {}) {
-    super();
-    this.options = { ...options };
-    if (typeof options.headers === "object" && options.headers !== null) {
-      this._headers = options.headers;
-    } else if (options.headers === undefined) {
-      this._headers = undefined;
-    } else {
-      this._headers = {};
-    }
-
-    // Initialize audio processor settings from options
-    this._useAudioProcessor = options.useAudioProcessor ?? false;
-    this._volume = options.audioProcessorOptions?.volume ?? 1;
-    this._bass = options.audioProcessorOptions?.bass ?? 0;
-    this._treble = options.audioProcessorOptions?.treble ?? 0;
-    this._compressor = options.audioProcessorOptions?.compressor ?? false;
-  }
+  // ============================================================================
+  // PUBLIC API - INPUT/OUTPUT
+  // ============================================================================
 
   /**
-   * Централизованный логгер для предупреждений, ошибок и информации.
-   * @param level 'warn' | 'error' | 'info' | 'debug'
-   * @param msg Сообщение для журнала
-   * @param opts Дополнительные параметры лога
-   */
-  private emitLog(
-    level: "warn" | "error" | "info" | "debug",
-    msg: string,
-    opts?: LogMeta
-  ): void {
-    const logger = this._logger;
-    const options = { ...(opts || {}) };
-    if (!options.stackTrace) options.stackTrace = getStackTrace();
-    if (typeof logger[level] === "function") {
-      logger[level](msg, options);
-    }
-  }
-
-  /**
-   * Экспериментальная функция кастомной обработки аудио-цепочки.
-   * Меняет поведение только на период выполнения `fn`, исключает утечки состояний.
-   * @param processor Внешний transform/duplex для аудио
-   * @param fn Callback-сборщик, вызываемый прокси-encoder API
-   */
-  public withAudioTransform(
-    processor: Transform | Duplex,
-    fn: (encoder: {
-      input: (input: string | Readable, opts?: { label?: string, pipeIndex?: number, allowDuplicate?: boolean }) => typeof encoder;
-      inputOptions: (...opts: string[]) => typeof encoder;
-      output: (output: string | Readable | number | { pipe?: string } | undefined | null) => typeof encoder;
-      audioCodec: (codec: string) => typeof encoder;
-      outputOptions: (...opts: string[]) => typeof encoder;
-    }) => void
-  ): this {
-    if (this._dirty) throw new FluentStreamValidationError("Cannot use .withAudioTransform() after .run() without .clear()");
-    if (typeof fn !== "function") throw new FluentStreamValidationError("withAudioTransform expects a function as the second argument");
-
-    const encoder = {
-      input: (input: string | Readable, opts?: { label?: string, pipeIndex?: number, allowDuplicate?: boolean }) => {
-        this.input(input, opts); return encoder;
-      },
-      inputOptions: (...opts: string[]) => { this.inputOptions(...opts); return encoder; },
-      output: (output: string | Readable | number | { pipe?: string } | undefined | null) => {
-        this.output(output); return encoder;
-      },
-      audioCodec: (codec: string) => { this.audioCodec(codec); return encoder; },
-      outputOptions: (...opts: string[]) => { this.outputOptions(...opts); return encoder; }
-    };
-
-    const prev = { audio: this.audioTransform, custom: this.customAudioTransform };
-    try {
-      this.customAudioTransform = this.audioTransform = processor;
-      fn(encoder);
-    } catch (err) {
-      this.customAudioTransform = prev.custom;
-      this.audioTransform = prev.audio;
-      this.emitLog("error", "[FluentStream] withAudioTransform user error", { err: err as Error });
-      throw err;
-    }
-
-    return this;
-  }
-
-  /**
-   * Установить собственный Transform/duplex как обработчик аудиопотока.
-   * @param transform Трансформ-стрим
-   * @returns this
-   */
-  public setAudioTransform(transform: Transform | Duplex): this {
-    if (this._dirty) throw new FluentStreamValidationError("Cannot use .setAudioTransform() after .run() without .clear()");
-    this.customAudioTransform = transform;
-    this.audioTransform = transform;
-    return this;
-  }
-
-  /**
-   * Сбросить пользовательский аудиотрансформ.
-   * @returns this
-   */
-  public clearAudioTransform(): this {
-    this.customAudioTransform = null;
-    this.audioTransform = null;
-    return this;
-  }
-
-  /**
-   * Установить HTTP-заголовки для ffmpeg-запросов.
-   * @returns this
-   */
-  public setHeaders(headers?: Record<string, string> | null): this {
-    this._headers = headers == null ? undefined : headers;
-    return this;
-  }
-
-  /**
-   * Получить итоговые HTTP-заголовки, учитывающие HUMANITY_HEADER.
-   */
-  public getHeaders(): Record<string, string> {
-    return this.getMergedHeaders();
-  }
-
-  /**
-   * Добавить или заменить HTTP-заголовки (аргумент -headers для ffmpeg).
-   * @returns this
-   */
-  public headers(
-    headers?: Record<string, string> | null,
-    opts?: { merge?: boolean }
-  ): this {
-    this._headers = headers == null ? undefined : headers;
-    const mergeMode = !!opts?.merge;
-    if (!mergeMode) {
-      for (let i = 0; i < this.args.length; ) {
-        if (this.args[i] === "-headers" && typeof this.args[i + 1] === "string") {
-          this.args.splice(i, 2);
-        } else i++;
-      }
-    }
-    if (headers && Object.keys(headers).length > 0) {
-      const headerString =
-        Object.entries(headers)
-          .map(([k, v]) => {
-            const keyEsc = String(k).replace(/;/g, "\\;");
-            const valEsc = String(v).replace(/;/g, "\\;");
-            return `${keyEsc}: ${valEsc}`;
-          })
-          .join("\r\n") + "\r\n";
-      const firstInput = this.args.findIndex(a => a === "-i");
-      if (firstInput !== -1) {
-        this.args.splice(firstInput, 0, "-headers", headerString);
-      } else {
-        this.args.unshift("-headers", headerString);
-      }
-    }
-    return this;
-  }
-
-  /**
-   * Добавляет -user_agent для HTTP(S) input (ffmpeg).
-   * @returns this
-   */
-  public userAgent(
-    userAgent?: string | null,
-    opts?: { merge?: boolean }
-  ): this {
-    const mergeMode = !!opts?.merge;
-    if (!mergeMode) {
-      for (let i = 0; i < this.args.length;) {
-        if (this.args[i] === "-user_agent" && typeof this.args[i + 1] === "string") {
-          this.args.splice(i, 2);
-        } else i++;
-      }
-    }
-    if (userAgent && userAgent.length > 0) {
-      const firstInput = this.args.findIndex(a => a === "-i");
-      if (firstInput !== -1) {
-        this.args.splice(firstInput, 0, "-user_agent", userAgent);
-      } else {
-        this.args.unshift("-user_agent", userAgent);
-      }
-    }
-    const hasHTTPInput =
-      this.args.some(
-        (v, idx, arr) =>
-          v === "-i" &&
-          typeof arr[idx + 1] === "string" &&
-          /^https?:\/\//.test(arr[idx + 1])
-      );
-    if (
-      userAgent &&
-      userAgent.length > 0 &&
-      !hasHTTPInput
-    ) {
-      this.emitLog(
-        "warn",
-        "userAgent: -user_agent применяется ТОЛЬКО к HTTP/HTTPS входам! ffmpeg проигнорирует -user_agent для других протоколов.",
-        { code: "FluentStream-warn-non-http-useragent", detail: userAgent }
-      );
-    }
-    return this;
-  }
-
-  /**
-   * Сбросить весь накопленный state (обязательно перед повторным .run()).
-   */
-  public clear(): this {
-    this.audioTransform = null;
-    this.customAudioTransform = null;
-    this.args = [];
-    this._inputStreams = [];
-    this.complexFilters = [];
-    this._dirty = false;
-    return this;
-  }
-
-  /**
-   * Сбросить только аргументы (без потоков).
-   */
-  public resetArgs(): this {
-    this.args = [];
-    this.complexFilters = [];
-    return this;
-  }
-
-  /**
-   * Добавить вход для ffmpeg (строка: путь/url либо поток).
-   * Безопасно предотвращает дубликаты, гарантирует согласованность потоков.
-   * @param input Строка url/путь или поток Readable
-   * @param opts Доп. опции
-   * @returns this
+   * Add input (file path/URL or stream) / Добавить вход (путь/URL или поток)
+   *
+   * @param input - File path, URL, or Readable stream (путь файла, URL или поток Readable)
+   * @param opts - Options (опции)
    */
   public input(
     input: string | Readable | undefined | null,
-    opts?: { label?: string, pipeIndex?: number, allowDuplicate?: boolean }
+    opts?: {
+      label?: string;
+      pipeIndex?: number;
+      allowDuplicate?: boolean;
+    },
   ): this {
-    if (this._dirty) throw new FluentStreamValidationError("Cannot add input after .run() without .clear()");
+    this.requireClean("input");
+
     if (input == null) {
       throw new FluentStreamValidationError(
-        `input(): input must be a non-null string (path/url) or a Readable`
+        "input(): input must be non-null string (path/URL) or Readable stream",
       );
     }
+
     if (typeof input === "string") {
-      if (!opts?.allowDuplicate && this.args.some((v, i) => v === "-i" && this.args[i + 1] === input)) {
+      // String input (file or URL)
+      if (
+        !opts?.allowDuplicate &&
+        this.args.some((v, i) => v === "-i" && this.args[i + 1] === input)
+      ) {
         this.emitLog(
           "warn",
-          `input(): String input "${input}" already exists in args (skipped duplicate).`,
-          { code: "FluentStream-duplicate-string-input" }
+          `input(): Duplicate string input detected: "${input}"`,
+          { code: "FluentStream-duplicate-string-input" },
         );
         return this;
       }
+
       this.args.push("-i", input);
     } else if (typeof input.read === "function") {
-      // Защита от дублирования pipe index
+      // Stream input
       let streamIdx: number;
-      if (opts?.pipeIndex != null && Number.isFinite(opts.pipeIndex) && opts.pipeIndex >= 0) {
-        if (this._inputStreams.some(entry => entry.index === opts.pipeIndex)) {
+
+      if (
+        opts?.pipeIndex != null &&
+        Number.isFinite(opts.pipeIndex) &&
+        opts.pipeIndex >= 0
+      ) {
+        if (this.inputStreams.some((entry) => entry.index === opts.pipeIndex)) {
           throw new FluentStreamValidationError(
-            `input(): Attempt to use duplicate pipe index: ${opts.pipeIndex}`
+            `input(): Duplicate pipe index: ${opts.pipeIndex}`,
           );
         }
         streamIdx = opts.pipeIndex;
       } else {
-        streamIdx = this._inputStreams.length;
+        streamIdx = this.inputStreams.length;
       }
-      // Запрет дублирования самого потока (по ссылке)
+
       if (
         !opts?.allowDuplicate &&
-        this._inputStreams.some((s) => s.stream === input)
+        this.inputStreams.some((s) => s.stream === input)
       ) {
         this.emitLog(
           "warn",
-          "input(): Provided Readable stream has already been added (skipping duplicate).",
-          { code: "FluentStream-duplicate-pipe" }
+          "input(): Duplicate Readable stream detected (skipped)",
+          { code: "FluentStream-duplicate-pipe" },
         );
         return this;
       }
-      this._inputStreams.push({ stream: input, index: streamIdx });
+
+      this.inputStreams.push({ stream: input, index: streamIdx });
       this.args.push("-i", `pipe:${streamIdx}`);
     } else {
       throw new FluentStreamValidationError(
-        `input(): input must be string (path/url) or a Readable`
+        "input(): must be string (file/URL) or Readable stream",
       );
     }
+
     return this;
   }
 
   /**
-   * Задать выход ffmpeg: строка/pipe-объект.
-   * @returns this
+   * Set output (file path or pipe) / Установить выход (путь файла или pipe)
    */
   public output(
-    output: string | Readable | number | { pipe?: string } | undefined | null
+    output: string | Readable | number | { pipe?: string } | undefined | null,
   ): this {
-    if (this._dirty) throw new FluentStreamValidationError("Cannot set output after .run() without .clear()");
-    if (output && typeof output === "object" && "pipe" in output && output.pipe) {
+    this.requireClean("output");
+
+    if (
+      output &&
+      typeof output === "object" &&
+      "pipe" in output &&
+      output.pipe
+    ) {
       const pipeName = output.pipe;
+
       if (
         pipeName === "stdout" ||
         pipeName === "stderr" ||
         pipeName === "1" ||
         pipeName === "2"
       ) {
-        this.args.push(
-          "pipe:" +
-            (pipeName === "stdout"
-              ? "1"
-              : pipeName === "stderr"
-              ? "2"
-              : String(pipeName))
-        );
+        const pipeTarget =
+          pipeName === "stdout" || pipeName === "1" ? "pipe:1" : "pipe:2";
+        this.args.push(pipeTarget);
         return this;
       }
+
       if (typeof pipeName === "string" && /^pipe:\d+$/.test(pipeName)) {
         this.args.push(pipeName);
         return this;
       }
+
       throw new FluentStreamValidationError(
-        "output(): Invalid pipe target: " + String(pipeName)
+        `output(): Invalid pipe target: ${String(pipeName)}`,
       );
     }
+
     if (
       output == null ||
       (typeof output === "string" && output.trim().length === 0)
     ) {
       throw new FluentStreamValidationError(
-        "output(): requires a non-empty string/output."
+        "output(): requires non-empty string or pipe object",
       );
     }
+
     this.args.push(String(output));
     return this;
   }
 
   /**
-   * Добавить глобальные аргументы ffmpeg (до первого -i).
-   * @returns this
+   * Get effective HTTP headers that will be passed to Processor/FFmpeg.
+   * Получить итоговые HTTP-заголовки, которые будут переданы в Processor/FFmpeg.
    */
-  public globalOptions(...opts: string[]): this {
-    const firstInputIdx = this.args.findIndex(arg => arg === "-i");
-    if (firstInputIdx !== -1) {
-      this.args.splice(firstInputIdx, 0, ...opts);
+  public getHeaders(): Record<string, string> {
+    return this.getMergedHeaders();
+  }
+
+  /**
+   * Set HTTP headers / Установить HTTP-заголовки
+   */
+  public setHeaders(
+    headers?: Record<string, string> | null,
+    opts?: { merge?: boolean },
+  ): this {
+    this.requireClean("setHeaders");
+
+    if (headers == null) {
+      this.headers = undefined;
+    } else if (!opts?.merge) {
+      this.headers = headers;
+
+      // Remove existing -headers from args
+      for (let i = 0; i < this.args.length; ) {
+        if (
+          this.args[i] === "-headers" &&
+          typeof this.args[i + 1] === "string"
+        ) {
+          this.args.splice(i, 2);
+        } else {
+          i++;
+        }
+      }
+
+      // Add new headers if provided
+      if (Object.keys(headers).length > 0) {
+        const headerString = Object.entries(headers)
+          .map(([k, v]) => {
+            const keyEsc = String(k).replace(/[;]/g, "\\;");
+            const valEsc = String(v).replace(/[;]/g, "\\;");
+            return `${keyEsc}: ${valEsc}`;
+          })
+          .join("\r\n");
+
+        const firstInput = this.args.findIndex((a) => a === "-i");
+        if (firstInput !== -1) {
+          this.args.splice(firstInput, 0, "-headers", headerString);
+        } else {
+          this.args.unshift("-headers", headerString);
+        }
+      }
     } else {
-      this.args.unshift(...opts);
+      this.headers = { ...this.headers, ...headers };
     }
+
     return this;
   }
 
   /**
-   * Добавить опции ffmpeg для входов (перед последним -i).
-   * @returns this
+   * Set user-agent header / Установить заголовок user-agent
+   */
+  public userAgent(userAgent?: string | null): this {
+    this.requireClean("userAgent");
+
+    // Remove existing -user_agent
+    for (let i = 0; i < this.args.length; ) {
+      if (
+        this.args[i] === "-user_agent" &&
+        typeof this.args[i + 1] === "string"
+      ) {
+        this.args.splice(i, 2);
+      } else {
+        i++;
+      }
+    }
+
+    if (userAgent && userAgent.length > 0) {
+      const firstInput = this.args.findIndex((a) => a === "-i");
+      if (firstInput !== -1) {
+        this.args.splice(firstInput, 0, "-user_agent", userAgent);
+      } else {
+        this.args.unshift("-user_agent", userAgent);
+      }
+
+      const hasHTTPInput = this.args.some(
+        (v, idx, arr) =>
+          v === "-i" &&
+          typeof arr[idx + 1] === "string" &&
+          /^https?:\/\//.test(arr[idx + 1]),
+      );
+
+      if (!hasHTTPInput) {
+        this.emitLog(
+          "warn",
+          "userAgent: applies ONLY to HTTP/HTTPS inputs. FFmpeg will ignore it for other protocols.",
+          { code: "FluentStream-non-http-useragent" },
+        );
+      }
+    }
+
+    return this;
+  }
+
+  // ============================================================================
+  // PUBLIC API - OPTIONS
+  // ============================================================================
+
+  /**
+   * Add input options (before first -i) / Добавить опции входа (перед первым -i)
    */
   public inputOptions(...opts: string[]): this {
+    this.requireClean("inputOptions");
+
     const idx = this.args.lastIndexOf("-i");
     if (idx !== -1) {
       this.args.splice(idx, 0, ...opts);
     } else {
       this.args.unshift(...opts);
     }
+
     return this;
   }
 
   /**
-   * Добавить опции ffmpeg для выхода (после остальных аргументов).
-   * @returns this
+   * Add output options (after all args) / Добавить опции выхода (после всех аргументов)
    */
   public outputOptions(...opts: string[]): this {
     this.args.push(...opts);
@@ -632,94 +862,48 @@ export default class FluentStream extends EventEmitter {
   }
 
   /**
-   * Установить видео-кодек.
-   * @returns this
+   * Add global options (before first -i) / Добавить глобальные опции (перед первым -i)
    */
-  public videoCodec(codec: string): this {
-    if (codec) this.args.push("-c:v", codec);
+  public globalOptions(...opts: string[]): this {
+    const firstInput = this.args.findIndex((a) => a === "-i");
+    if (firstInput !== -1) {
+      this.args.splice(firstInput, 0, ...opts);
+    } else {
+      this.args.unshift(...opts);
+    }
     return this;
   }
 
   /**
-   * Установить аудиокодек.
-   * @returns this
+   * Set audio codec / Установить аудиокодек
    */
   public audioCodec(codec: string): this {
-    if (codec) this.args.push("-c:a", codec);
-    return this;
-  }
-
-  /**
-   * Задать bitrate для видео.
-   * @returns this
-   */
-  public videoBitrate(bitrate: string): this {
-    this.args.push("-b:v", bitrate);
-    return this;
-  }
-
-  /**
-   * Задать bitrate для аудио.
-   * @returns this
-   */
-  public audioBitrate(bitrate: string): this {
-    this.args.push("-b:a", bitrate);
-    return this;
-  }
-
-  /**
-   * Принудительно задать формат.
-   * @returns this
-   */
-  public format(format: string): this {
-    for (let i = 0; i < this.args.length - 1;) {
-      if (this.args[i] === "-f") {
-        this.args.splice(i, 2);
-      } else i++;
+    if (codec) {
+      this.args.push("-c:a", codec);
     }
-    this.args.push("-f", format);
     return this;
   }
 
   /**
-   * Ограничить длительность трека.
-   * @returns this
+   * Set video codec / Установить видеокодек
    */
-  public duration(time: string | number): this {
-    this.args.push("-t", String(time));
+  public videoCodec(codec: string): this {
+    if (codec) {
+      this.args.push("-c:v", codec);
+    }
     return this;
   }
 
   /**
-   * Отключить видео-дорожку.
-   * @returns this
+   * Set audio sample rate / Установить частоту дискретизации аудио
    */
-  public noVideo(): this {
-    this.args.push("-vn");
+  public audioFrequency(frequency: number): this {
+    this.args.push("-ar", String(frequency));
     return this;
   }
 
   /**
-   * Отключить аудио-дорожку.
-   * @returns this
-   */
-  public noAudio(): this {
-    this.args.push("-an");
-    return this;
-  }
-
-  /**
-   * Установить частоту дискретизации.
-   * @returns this
-   */
-  public audioFrequency(freq: number): this {
-    this.args.push("-ar", String(freq));
-    return this;
-  }
-
-  /**
-   * Установить количество каналов.
-   * @returns this
+   * Set number of audio channels / Установить количество аудиоканалов
    */
   public audioChannels(channels: number): this {
     this.args.push("-ac", String(channels));
@@ -727,8 +911,125 @@ export default class FluentStream extends EventEmitter {
   }
 
   /**
-   * Прямое копирование кодеков (без перекодирования).
-   * @returns this
+   * Set output format / Установить выходной формат
+   */
+  public format(fmt: string): this {
+    // Remove existing -f
+    for (let i = 0; i < this.args.length - 1; ) {
+      if (this.args[i] === "-f") {
+        this.args.splice(i, 2);
+      } else {
+        i++;
+      }
+    }
+    this.args.push("-f", fmt);
+    return this;
+  }
+
+  /**
+   * Disable video stream / Отключить видеопоток
+   */
+  public noVideo(): this {
+    this.args.push("-vn");
+    return this;
+  }
+
+  /**
+   * Disable audio stream / Отключить аудиопоток
+   */
+  public noAudio(): this {
+    this.args.push("-an");
+    return this;
+  }
+
+  /**
+   * Add complex filter / Добавить сложный фильтр
+   */
+  public complexFilter(graph: string | string[]): this {
+    this.requireClean("complexFilter");
+
+    if (Array.isArray(graph)) {
+      for (const g of graph) {
+        if (typeof g === "string" && g.trim()) {
+          this.complexFilters.push(g);
+        }
+      }
+    } else if (typeof graph === "string" && graph.trim()) {
+      this.complexFilters.push(graph);
+    }
+
+    return this;
+  }
+
+  /**
+   * Add stream map / Добавить маппирование потока
+   */
+  public map(spec: string): this {
+    this.args.push("-map", spec);
+    return this;
+  }
+
+  /**
+   * Set seek position for input / Установить позицию seek для входа
+   */
+  public seekInput(position: number | string): this {
+    this.requireClean("seekInput");
+
+    if (
+      position == null ||
+      (typeof position === "string" && !position.trim())
+    ) {
+      throw new FluentStreamValidationError(
+        "seekInput: position must be non-empty string or number",
+      );
+    }
+
+    const firstInput = this.args.findIndex((a) => a === "-i");
+    if (firstInput === -1) {
+      this.args.unshift("-ss", String(position));
+    } else {
+      this.args.splice(firstInput, 0, "-ss", String(position));
+    }
+
+    return this;
+  }
+
+  /**
+   * Set duration limit / Установить лимит длительности
+   */
+  public duration(time: number | string): this {
+    this.args.push("-t", String(time));
+    return this;
+  }
+
+  /**
+   * Force audio bitrate / Установить битрейт аудио
+   */
+  public audioBitrate(bitrate: string): this {
+    this.args.push("-b:a", bitrate);
+    return this;
+  }
+
+  /**
+   * Force video bitrate / Установить битрейт видео
+   */
+  public videoBitrate(bitrate: string): this {
+    this.args.push("-b:v", bitrate);
+    return this;
+  }
+
+  /**
+   * Enable file overwrite (-y flag) / Включить перезапись файла
+   */
+  public overwrite(): this {
+    // Remove existing -y
+    this.args = this.args.filter((a) => a !== "-y");
+    this.args.unshift("-y");
+    return this;
+  }
+
+  /**
+   * Copy codecs without re-encoding / Копировать кодеки без перекодирования
    */
   public copyCodecs(): this {
     if (
@@ -741,333 +1042,339 @@ export default class FluentStream extends EventEmitter {
   }
 
   /**
-   * Добавить комплексный фильтр (или несколько) к ffmpeg.
-   * @returns this
-   */
-  public complexFilter(graph: string | string[]): this {
-    if (Array.isArray(graph)) {
-      for (const g of graph) {
-        if (typeof g === "string" && g.trim()) {
-          this.complexFilters.push(g);
-        }
-      }
-    } else if (typeof graph === "string" && graph.trim()) {
-      this.complexFilters.push(graph);
-    }
-    return this;
-  }
-
-  /**
-   * Вставить acrossfade фильтр crossfadeAudio с параметрами.
-   * @param duration длительность в секундах
-   * @param opts опции crossfade
-   * @returns this
+   * Create audio crossfade using FFmpeg acrossfade filter.
+   * Создать аудио-кроссфейд с помощью FFmpeg-фильтра acrossfade.
+   *
+   * Note: FFmpeg's acrossfade filter works with exactly 2 inputs at a time.
+   * For multiple inputs, use sequential crossfades.
+   *
+   * Примеры:
+   *  fluent
+   *    .input(firstUrl)
+   *    .input(secondUrl)
+   *    .crossfadeAudio(5);                 // 5 секунд кроссфейда
+   *
+   *  fluent
+   *    .input(firstUrl)
+   *    .crossfadeAudio(3, { secondInput: secondUrl });
+   *
+   * @param durationSec Crossfade duration in seconds (длительность в секундах)
+   * @param options Crossfade options (опции кроссфейда)
    */
   public crossfadeAudio(
-    duration: number,
-    opts?: {
-      c1?: string;
-      c2?: string;
-      curve1?: string;
-      curve2?: string;
-      additional?: string;
-      input2?: string | Readable;
-      nb_samples?: number;
-      overlap?: boolean;
-      inputLabels?: string[];
-      outputLabel?: string;
-      inputs?: number;
-      input2Label?: string;
-      allowDuplicateInput2?: boolean;
-    },
+    durationSec: number,
+    options: CrossfadeAudioOptions = {},
   ): this {
-    if (this._dirty) throw new FluentStreamValidationError("Cannot use .crossfadeAudio() after .run() without .clear()");
+    this.requireClean("crossfadeAudio");
+
     if (
-      duration == null ||
-      typeof duration !== "number" ||
-      !Number.isFinite(duration) ||
-      duration <= 0
+      durationSec == null ||
+      typeof durationSec !== "number" ||
+      !Number.isFinite(durationSec) ||
+      durationSec <= 0
     ) {
-      throw new FluentStreamValidationError("crossfadeAudio: duration must be a positive number.");
-    }
-    // Добавить второй источник при необходимости.
-    if (opts?.input2) {
-      let alreadyPresent = false;
-      if (typeof opts.input2 === "string") {
-        alreadyPresent = this.args.some(
-          (v, i) => v === "-i" && this.args[i + 1] === opts.input2
-        );
-      } else if (opts.input2 && typeof (opts.input2).read === "function") {
-        alreadyPresent = this._inputStreams.some(ent => ent.stream === opts.input2);
-      }
-      if (!alreadyPresent || opts.allowDuplicateInput2) {
-        this.input(opts.input2, {
-          allowDuplicate: opts.allowDuplicateInput2,
-          label: opts.input2Label
-        });
-      }
-    }
-    // Проверка количества входов
-    const counted = countInputs(this.args, this._inputStreams);
-    const expectedInputs = opts?.inputs ?? 2;
-    if (counted.total < expectedInputs) {
       throw new FluentStreamValidationError(
-        `crossfadeAudio requires at least ${expectedInputs} inputs (current: ${counted.total}).`
+        "crossfadeAudio: durationSec must be a positive number",
       );
     }
-    // Генерация фильтра
-    const { filter } = Processor.buildAcrossfadeFilter({
-      inputs: expectedInputs,
-      duration,
-      curve1: opts?.curve1 ?? opts?.c1 ?? "tri",
-      curve2: opts?.curve2 ?? opts?.c2 ?? "tri",
-      nb_samples: opts?.nb_samples,
-      overlap: opts?.overlap,
-      inputLabels: opts?.inputLabels,
-      outputLabel: opts?.outputLabel,
-    });
-    let filterStr = filter;
-    if (opts?.additional && String(opts.additional).trim()) {
-      filterStr += `:${String(opts.additional).trim()}`;
+
+    // При необходимости добавляем второй вход
+    if (options.secondInput) {
+      const second = options.secondInput;
+
+      if (typeof second === "string") {
+        const already = this.args.some(
+          (v, i) => v === "-i" && this.args[i + 1] === second,
+        );
+        if (!already) {
+          this.input(second);
+        }
+      } else {
+        // Readable stream: добавляем как новый pipe
+        this.input(second, { allowDuplicate: false });
+      }
     }
-    this.complexFilters.push(filterStr);
+
+    const counted = this.countInputs();
+    const inputs = options.inputs ?? 2;
+
+    if (counted.total < inputs) {
+      throw new FluentStreamValidationError(
+        `crossfadeAudio: requires at least ${inputs} inputs, but only ${counted.total} configured`,
+      );
+    }
+
+    // ✅ ИСПРАВЛЕНИЕ: Правильная генерация фильтра
+    const { filter } = Processor.buildAcrossfadeFilter({
+      inputs,
+      duration: durationSec,
+      curve1: options.curve1 ?? "tri",
+      curve2: options.curve2 ?? "tri",
+      inputLabels: options.inputLabels,
+      outputLabel: options.outputLabel,
+    });
+
+    // Extra фильтры применяются отдельно, не через двоеточие
+    if (options.extra && String(options.extra).trim().length > 0) {
+      const extraFilter = String(options.extra).trim();
+      const outputLbl = options.outputLabel ?? "acf";
+      const finalFilter = `${filter};[${outputLbl}]${extraFilter}[${outputLbl}_final]`;
+      this.complexFilter(finalFilter);
+    } else {
+      this.complexFilter(filter);
+    }
 
     return this;
   }
 
+  // ============================================================================
+  // PUBLIC API - STATE MANAGEMENT
+  // ============================================================================
+
   /**
-   * Получить копию текущего массива CLI-аргументов ffmpeg.
+   * Clear all state (required before reuse after .run()) / Очистить всё состояние (требуется перед переиспользованием после .run())
+   */
+  public clear(): this {
+    this.args = [];
+    this.inputStreams = [];
+    this.complexFilters = [];
+    this.isDirty = false;
+    this.processorResult = null;
+    this._runInProgress = false;
+    this._runQueue = [];
+    return this;
+  }
+
+  /**
+   * Reset only arguments / Сбросить только аргументы
+   */
+  public resetArgs(): this {
+    this.args = [];
+    this.complexFilters = [];
+    return this;
+  }
+
+  /**
+   * Check if instance is dirty (requires .clear()) / Проверить, "грязно" ли (требует .clear())
+   */
+  public isDirtyState(): boolean {
+    return this.isDirty;
+  }
+
+  /**
+   * Check if instance is ready for use / Проверить, готово ли к использованию
+   */
+  public isReady(): boolean {
+    return !this.isDirty;
+  }
+
+  // ============================================================================
+  // PUBLIC API - EXECUTION & INSPECTION
+  // ============================================================================
+
+  /**
+   * Get copy of current FFmpeg arguments / Получить копию текущих аргументов FFmpeg
    */
   public getArgs(): string[] {
     return [...this.args];
   }
 
-  public isDirty(): boolean {
-    return this._dirty;
-  }
-
-  public isReady(): boolean {
-    return !this._dirty;
-  }
-
-  public toString(): string {
-    return `[FluentStream dirty=${this._dirty} inputs=${this._inputStreams.length} args=${this.args.length}]`;
-  }
-
   /**
-   * Получить краткое описание входов.
-   */
-  public getInputSummary(): {stringInputs: string[], pipeStreams: string[], complexFilters: string[]} {
-    return summarizeInputs(this.args, this._inputStreams, this.complexFilters);
-  }
-
-  /**
-   * Собрать "чистый" перечень аргументов для запуска Processor/ffmpeg.
-   * Не вставляет дубликатов фильтров!
+   * Assemble final FFmpeg arguments with filters / Собрать финальные аргументы FFmpeg с фильтрами
    */
   public assembleArgs(): string[] {
     const finalArgs = [...this.args];
 
-    // -filter_complex, если фильтры есть
-    const filterComplexes: string[] = [];
-    if (this.complexFilters.length) {
-      // Количество -filter_complex в исходных args
-      let manualIdx = -1;
+    // Add -filter_complex if filters exist
+    if (this.complexFilters.length > 0) {
+      let hasFilterComplex = false;
+
       for (let i = 0; i < finalArgs.length - 1; i++) {
         if (finalArgs[i] === "-filter_complex") {
-          manualIdx = i;
-          filterComplexes.push(finalArgs[i + 1]);
+          hasFilterComplex = true;
+          this.emitLog(
+            "warn",
+            "assembleArgs: Duplicate -filter_complex detected. Using combined filters.",
+            { code: "FluentStream-duplicate-filter-complex" },
+          );
+          break;
         }
       }
-      if (manualIdx >= 0) {
-        this.emitLog(
-          "warn",
-          "assembleArgs: Дублирование -filter_complex! Убедитесь, что не добавляете вручную -filter_complex в args при использовании complexFilter/crossfadeAudio. Будут использованы ВСЕ -filter_complex для FFmpeg (поведение не гарантировано).",
-          {
-            code: "FluentStream-DuplicateFilterComplex",
-            currentArgs: [...finalArgs],
-            complexFilters: [...this.complexFilters]
-          }
-        );
-      } else {
+
+      if (!hasFilterComplex) {
         finalArgs.push("-filter_complex", this.complexFilters.join(";"));
       }
     }
 
+    // Add fail-fast flag if enabled
     if (this.options.failFast && !finalArgs.includes("-xerror")) {
       finalArgs.push("-xerror");
     }
 
-    // -progress
-    const progressIdx = finalArgs.findIndex(a => a === "-progress");
+    // Add progress tracking if enabled
     if (this.options.enableProgressTracking) {
-      if (progressIdx === -1) {
+      if (!finalArgs.some((v, _i, _arr) => v === "-progress")) {
         finalArgs.push("-progress", "pipe:2");
-      } else {
-        this.emitLog(
-          "warn",
-          "assembleArgs: Дублирование -progress! (лучше использовать только API, а не вручную)",
-          { code: "FluentStream-DuplicateProgress", currentArgs: [...finalArgs] }
-        );
       }
     }
 
-    // -timelimit (wallTimeLimit)
+    // Add wall-time limit if specified
     if (
       typeof this.options.wallTimeLimit === "number" &&
       this.options.wallTimeLimit > 0
     ) {
       finalArgs.push("-timelimit", String(this.options.wallTimeLimit));
     }
+
     return finalArgs;
   }
 
   /**
-   * Получить итоговый набор заголовков: пользовательские или HUMANITY_HEADER.
-  */
-  private getMergedHeaders(): Record<string, string> {
-    if (!this._headers) return { ...FluentStream.HUMANITY_HEADER };
-    return Object.keys(this._headers).length > 0 ? { ...this._headers } : {};
-  }
-
-  private addHumanityHeadersToProcessorOptions(
-    options: ProcessorOptions,
-  ): ProcessorOptions {
-    const mergedHeaders = this.getMergedHeaders();
-    return { ...options, headers: mergedHeaders };
+   * Get summary of inputs / Получить краткое описание входов
+   */
+  public getInputSummary(): {
+    stringInputs: string[];
+    pipeStreams: string[];
+    complexFilters: string[];
+  } {
+    return summarizeInputs(this.args, this.inputStreams, this.complexFilters);
   }
 
   /**
-   * Подготавливает Processor со всеми аргументами/потоками (только для внутреннего запуска).
+   * Count inputs / Подсчитать входы
    */
-  private createProcessor(
+  public countInputs(): {
+    streams: number;
+    stringInputs: number;
+    total: number;
+  } {
+    return countInputs(this.args, this.inputStreams);
+  }
+
+  /**
+   * Run FFmpeg process / Запустить процесс FFmpeg
+   *
+   * WARNING: Instance becomes dirty after this. Call .clear() before reusing!
+   * ВНИМАНИЕ: Экземпляр становится "грязным" после этого. Вызовите .clear() перед переиспользованием!
+   */
+  public async run(
     extraOpts: Partial<ProcessorOptions> = {},
-    args?: string[],
-    inputStreams?: Array<{ stream: Readable; index: number }>,
-  ) {
-    const opts = this.addHumanityHeadersToProcessorOptions({
-      ...this.options,
-      ...extraOpts,
-      useAudioProcessor: this._useAudioProcessor,
-      audioProcessorOptions: this.buildAudioProcessorOptions()
-    });
-    if (inputStreams && inputStreams.length > 0) {
-      (opts).inputStreams = inputStreams;
-    } else if (this._inputStreams && this._inputStreams.length > 0) {
-      (opts).inputStreams = this._inputStreams;
+  ): Promise<FFmpegRunResultExtended> {
+    // Защита от параллельного запуска
+    if (this._runInProgress) {
+      // Ожидание завершения текущего запуска
+      await new Promise<void>((resolve) => {
+        this._runQueue.push(resolve);
+      });
     }
-    return Processor.create({
-      args: args ?? this.assembleArgs(),
-      options: opts,
-    });
-  }
 
-  /**
-   * Запустить ffmpeg с текущими аргументами/потоками.
-   * После вызова становится dirty, повторное использование невозможно — нужно clear()!
-   */
-  public run(extraOpts: Partial<ProcessorOptions> = {}): FFmpegRunResultExtended {
-    if (this._dirty) {
+    if (this.isDirty) {
       throw new FluentStreamValidationError(
-        "FluentStream instance is dirty: .clear() must be called before next .run()!"
+        "FluentStream is dirty — `.clear()` required before next `.run()`",
       );
     }
-    const proc = this.createProcessor(extraOpts);
-    this._dirty = true;
-    this._processorRunResult = proc.run();
-    return this._processorRunResult;
-  }
 
-  /**
-   * Принудительно разрешить overwrite (-y) первым аргументом.
-   * @returns this
-   */
-  public overwrite(): this {
-    this.args = this.args.filter((arg) => arg !== "-y");
-    this.args.unshift("-y");
-    return this;
-  }
+    this._runInProgress = true;
 
-  /**
-   * Добавить -map спецификацию.
-   * @returns this
-   */
-  public map(mapSpec: string): this {
-    this.args.push("-map", mapSpec);
-    return this;
-  }
+    try {
+      const processor = this.createProcessor(extraOpts);
+      this.isDirty = true;
+      this.processorResult = processor.run();
 
-  /**
-   * Установить позицию seek для входа.
-   * @returns this
-   */
-  public seekInput(position: number | string): this {
-    if (
-      position == null ||
-      (typeof position === "string" && !position.trim())
-    ) {
-      throw new FluentStreamValidationError(
-        "seekInput: position must be non-empty string or number"
-      );
-    }
-    const firstInputIdx = this.args.findIndex((arg) => arg === "-i");
-    if (firstInputIdx === -1) {
-      this.args.unshift("-ss", String(position));
-    } else {
-      this.args.splice(firstInputIdx, 0, "-ss", String(position));
-    }
-    return this;
-  }
+      // Ожидание начала процесса
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
-  /**
-   * Получить аудио Transform/duplex, учитывая кастомный, если задан.
-   */
-  public getAudioTransform(): Transform | Duplex {
-    if (this.customAudioTransform) {
-      return this.customAudioTransform;
-    }
-    if (!this.audioTransform) {
-      throw new FluentStreamValidationError(
-        "No audio transform pipeline exists: .setAudioTransform() must be called before getAudioTransform()."
-      );
-    }
-    const t = this.audioTransform as Transform & {
-      _backpressureWarned?: boolean;
-      _writableState?: { highWaterMark?: number };
-      _readableState?: { highWaterMark?: number };
-    };
-    if (
-      typeof t._backpressureWarned === "undefined"
-      && typeof t._writableState === "object"
-      && typeof t._readableState === "object"
-    ) {
-      t._backpressureWarned = true;
-      const readableState = t._readableState;
-      if (readableState && readableState.highWaterMark && readableState.highWaterMark > 128 * 1024) {
-        this.emitLog(
-          "warn",
-          `getAudioTransform(): Potentially large stream buffer (highWaterMark: ${readableState.highWaterMark}). If running multiple big inputs or complex crossfade, monitor node memory/latency.`,
-          { code: "FluentStream-backpressure" }
-        );
+      return this.processorResult;
+    } finally {
+      this._runInProgress = false;
+
+      // Обработка очереди
+      if (this._runQueue.length > 0) {
+        const next = this._runQueue.shift();
+        next?.();
       }
     }
-    return this.audioTransform;
   }
 
-  /** Объект для pipe:1 (stdout) */
+  // ============================================================================
+  // PUBLIC API - STATIC UTILITIES
+  // ============================================================================
+
+  /**
+   * Get stdout pipe helper object / Получить helper-объект для stdout
+   */
   static get stdout(): { pipe: string } {
     return { pipe: "stdout" };
   }
-  /** Объект для pipe:2 (stderr) */
+
+  /**
+   * Get stderr pipe helper object / Получить helper-объект для stderr
+   */
   static get stderr(): { pipe: string } {
     return { pipe: "stderr" };
   }
-  /** Объект для pipe:1 (stdout) */
+
+  /**
+   * Get pipe:1 helper object / Получить helper-объект для pipe:1
+   */
   static get pipe1(): { pipe: "pipe:1" } {
     return { pipe: "pipe:1" };
   }
-  /** Объект для pipe:2 (stderr) */
+
+  /**
+   * Get pipe:2 helper object / Получить helper-объект для pipe:2
+   */
   static get pipe2(): { pipe: "pipe:2" } {
     return { pipe: "pipe:2" };
+  }
+
+  // ============================================================================
+  // PUBLIC API - DEBUG UTILITIES
+  // ============================================================================
+
+  /**
+   * Get string representation for debugging / Получить строковое представление для отладки
+   */
+  public toString(): string {
+    return (
+      `[FluentStream dirty=${this.isDirty} ` +
+      `inputs=${this.countInputs().total} ` +
+      `filters=${this.complexFilters.length} ` +
+      `args=${this.args.length}]`
+    );
+  }
+
+  /**
+   * Get detailed debug info / Получить подробную отладочную информацию
+   */
+  public debugInfo(): {
+    isDirty: boolean;
+    args: string[];
+    inputs: Array<{ stream: string; index: number }>;
+    filters: string[];
+    audioState: {
+      volume: number;
+      bass: number;
+      treble: number;
+      compressor: boolean;
+      audioProcessor: boolean;
+    };
+  } {
+    return {
+      isDirty: this.isDirty,
+      args: [...this.args],
+      inputs: this.inputStreams.map((s) => ({
+        stream: `Readable[${s.index}]`,
+        index: s.index,
+      })),
+      filters: [...this.complexFilters],
+      audioState: {
+        volume: this.audioVolume,
+        bass: this.audioBass,
+        treble: this.audioTreble,
+        compressor: this.audioCompressor,
+        audioProcessor: this.enabledAudioProcessor,
+      },
+    };
   }
 }
