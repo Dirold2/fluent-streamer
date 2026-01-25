@@ -31,6 +31,7 @@ import type {
   AudioProcessingOptions,
   LogMeta,
   CrossfadeAudioOptions,
+  InputSource,
 } from "../Types/index.js";
 
 // ============================================================================
@@ -204,6 +205,9 @@ export default class FluentStream extends EventEmitter {
 
   /** Input streams with indices / Входные потоки с индексами */
   private inputStreams: Array<{ stream: Readable; index: number }> = [];
+
+  /** Input sources (URLs, blobs, etc.) / Источники входов (URL, blob и т.д.) */
+  private inputSources: InputSource[] = [];
 
   /** Complex filter chains / Цепочки сложных фильтров */
   private complexFilters: string[] = [];
@@ -427,13 +431,16 @@ export default class FluentStream extends EventEmitter {
       useAudioProcessor: this.enabledAudioProcessor,
       audioProcessorOptions: this.buildAudioOptions(),
       inputStreams: this.inputStreams,
+      inputSources: this.inputSources,
     };
 
-    return Processor.create({
+    const processor = Processor.create({
       options: finalOptions,
       args: this.assembleArgs(),
       inputStreams: this.inputStreams,
     });
+    processor.setInputSources(this.inputSources);
+    return processor;
   }
 
   /**
@@ -601,9 +608,9 @@ export default class FluentStream extends EventEmitter {
   // ============================================================================
 
   /**
-   * Add input (file path/URL or stream) / Добавить вход (путь/URL или поток)
+   * Add input (file path/URL/blob or stream) / Добавить вход (путь/URL/blob или поток)
    *
-   * @param input - File path, URL, or Readable stream (путь файла, URL или поток Readable)
+   * @param input - File path, URL, blob URL, or Readable stream (путь файла, URL, blob URL или поток Readable)
    * @param opts - Options (опции)
    */
   public input(
@@ -618,11 +625,16 @@ export default class FluentStream extends EventEmitter {
 
     if (input == null) {
       throw new FluentStreamValidationError(
-        "input(): input must be non-null string (path/URL) or Readable stream",
+        "input(): input must be non-null string (path/URL/blob) or Readable stream",
       );
     }
 
     if (typeof input === "string") {
+      // Check if it's a blob URL
+      if (input.startsWith("blob:")) {
+        return this.inputBlob(input, opts?.pipeIndex);
+      }
+
       // String input (file or URL)
       if (
         !opts?.allowDuplicate &&
@@ -672,7 +684,7 @@ export default class FluentStream extends EventEmitter {
       this.args.push("-i", `pipe:${streamIdx}`);
     } else {
       throw new FluentStreamValidationError(
-        "input(): must be string (file/URL) or Readable stream",
+        "input(): must be string (file/URL/blob) or Readable stream",
       );
     }
 
@@ -1132,11 +1144,34 @@ export default class FluentStream extends EventEmitter {
   // ============================================================================
 
   /**
+   * Add blob input / Добавить blob вход
+   *
+   * @param blobUrl - Blob URL to resolve (blob URL для разрешения)
+   * @param index - Input index (optional) (индекс входа, опционально)
+   */
+  public inputBlob(blobUrl: string, index?: number): this {
+    this.requireClean("inputBlob");
+
+    if (!blobUrl || typeof blobUrl !== "string") {
+      throw new FluentStreamValidationError(
+        "inputBlob(): blobUrl must be a non-empty string",
+      );
+    }
+
+    const inputIndex = index ?? this.inputSources.length;
+    this.inputSources.push({ type: "blob", blobUrl, index: inputIndex });
+    this.args.push("-i", "pipe:0"); // FFmpeg will read from stdin
+
+    return this;
+  }
+
+  /**
    * Clear all state (required before reuse after .run()) / Очистить всё состояние (требуется перед переиспользованием после .run())
    */
   public clear(): this {
     this.args = [];
     this.inputStreams = [];
+    this.inputSources = [];
     this.complexFilters = [];
     this.isDirty = false;
     this.processorResult = null;
@@ -1279,7 +1314,7 @@ export default class FluentStream extends EventEmitter {
     try {
       const processor = this.createProcessor(extraOpts);
       this.isDirty = true;
-      this.processorResult = processor.run();
+      this.processorResult = await processor.run();
 
       // Ожидание начала процесса
       await new Promise((resolve) => setTimeout(resolve, 50));

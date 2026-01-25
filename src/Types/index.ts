@@ -47,8 +47,8 @@ export interface AudioProcessingOptions {
 }
 
 /**
- * Input source type: stream or URL
- * Тип входного источника: поток или URL
+ * Input source type: stream, URL, or blob
+ * Тип входного источника: поток, URL или blob
  */
 export type InputSource =
   | { type: "stream"; stream: Readable; index: number }
@@ -57,7 +57,8 @@ export type InputSource =
       url: string;
       index: number;
       headers?: Record<string, string>;
-    };
+    }
+  | { type: "blob"; blobUrl: string; index: number };
 
 /**
  * Global ffmpeg & processor configuration.
@@ -293,7 +294,7 @@ export interface Processor {
   enableAudioProcessor(enable: boolean): this;
 
   /** Start ffmpeg + optional AudioProcessor chain */
-  run(): FFmpegRunResultExtended;
+  run(): Promise<FFmpegRunResultExtended>;
 
   /** Graceful shutdown and cleanup */
   close(): Promise<void>;

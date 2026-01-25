@@ -344,8 +344,8 @@ describe("FluentStream API", () => {
   // Additional architectural coverage
 
   it("input throws for undefined/null", () => {
-    expect(() => stream.input(undefined)).toThrow("input(): input must be non-null string (path/URL) or Readable stream");
-    expect(() => stream.input(null)).toThrow("input(): input must be non-null string (path/URL) or Readable stream");
+    expect(() => stream.input(undefined)).toThrow("input(): input must be non-null string (path/URL/blob) or Readable stream");
+    expect(() => stream.input(null)).toThrow("input(): input must be non-null string (path/URL/blob) or Readable stream");
   });
 
   it("output throws for invalid arg", () => {
@@ -458,7 +458,7 @@ describe("FluentStream API", () => {
 
   it("effects persist after process end for next run", async () => {
     const stream = new FluentStream({ useAudioProcessor: true });
-    stream.input("tests/320.mp3").output("pipe:1");
+    stream.input("tests/320.mp3").format("s16le").output("pipe:1");
 
     // First run
     const result1 = await stream.run();
@@ -491,5 +491,41 @@ describe("FluentStream API", () => {
     try { await result2.done; } catch {
       // clear
     }
+  });
+
+  it("inputBlob throws for invalid blobUrl", () => {
+    const stream = new FluentStream();
+    expect(() => stream.inputBlob("")).toThrow("inputBlob(): blobUrl must be a non-empty string");
+    expect(() => stream.inputBlob(null as any)).toThrow("inputBlob(): blobUrl must be a non-empty string");
+    expect(() => stream.inputBlob(undefined as any)).toThrow("inputBlob(): blobUrl must be a non-empty string");
+  });
+
+  it("inputBlob adds blob input source", () => {
+    const stream = new FluentStream();
+    stream.inputBlob("blob:test-url");
+    expect(stream.getArgs()).toEqual(["-i", "pipe:0"]);
+    // Note: inputSources are private, so we can't directly test them
+  });
+
+  it("input accepts blob URLs automatically", () => {
+    const stream = new FluentStream();
+    stream.input("blob:test-blob-url");
+    expect(stream.getArgs()).toEqual(["-i", "pipe:0"]);
+  });
+
+  it("input accepts blob URLs with minimal validation", () => {
+    const stream = new FluentStream();
+    // "blob:" is technically a valid prefix, even if incomplete
+    expect(() => stream.input("blob:")).not.toThrow();
+  });
+
+  it("blob URL processing includes validation", () => {
+    // Test that blob URLs are processed through the validation pipeline
+    const stream = new FluentStream();
+    stream.input("blob:nodedata:5f243e10-c206-46c2-83fc-6ee018f80508");
+    expect(stream.getArgs()).toEqual(["-i", "pipe:0"]);
+
+    // The actual validation happens during blob resolution in run()
+    // This test verifies that blob URLs are properly recognized and set up
   });
 });

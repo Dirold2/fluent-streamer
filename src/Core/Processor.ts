@@ -1,10 +1,12 @@
 import { EventEmitter } from "eventemitter3";
 import { Readable, Writable, PassThrough, pipeline } from "stream";
 import { execa, type Subprocess } from "execa";
+import { resolveObjectURL } from "buffer";
 import type {
   Logger,
   FFmpegProgress,
   ProcessorDebugInfo,
+  InputSource,
 } from "../Types/index.js";
 import { ProcessorOptions } from "../Types/index.js";
 import { ThrottleStream } from "./ThrottleStream.js";
@@ -13,15 +15,6 @@ import { AudioProcessor } from "./AudioProcessor.js";
 // ============================================================================
 // TYPES & INTERFACES
 // ============================================================================
-
-export type InputSource =
-  | { type: "stream"; stream: Readable; index: number }
-  | {
-      type: "url";
-      url: string;
-      index: number;
-      headers?: Record<string, string>;
-    };
 
 interface PassThroughWithDrain extends PassThrough {
   _ffmpegDrainAttached?: boolean;
@@ -207,6 +200,11 @@ export class Processor extends EventEmitter {
     return this;
   }
 
+  public setInputSources(sources: InputSource[]): this {
+    this.config.inputSources = Array.isArray(sources) ? [...sources] : [];
+    return this;
+  }
+
   public getFullArgs(): string[] {
     const args: string[] = [];
 
@@ -214,7 +212,12 @@ export class Processor extends EventEmitter {
       args.push("-loglevel", this.config.ffmpegLogLevel);
     }
 
-    if (this.config.userAgent) {
+    // Only add user_agent if there are HTTP URLs in the inputs
+    const hasHttpInputs = this.config.inputSources.some(source =>
+      source.type === "url" && source.url.startsWith("http")
+    );
+
+    if (this.config.userAgent && hasHttpInputs) {
       args.push("-user_agent", this.config.userAgent);
     }
 
@@ -274,7 +277,104 @@ export class Processor extends EventEmitter {
     this._resetRunState();
   }
 
-  public run(): import("../Types/index.js").FFmpegRunResultExtended {
+  /**
+   * Create a Readable stream from ArrayBuffer data
+   * Создать Readable поток из данных ArrayBuffer
+   */
+  private _createStreamFromArrayBuffer(arrayBuffer: ArrayBuffer): Readable {
+    const buffer = Buffer.from(arrayBuffer);
+    let offset = 0;
+    const chunkSize = 64 * 1024; // 64KB chunks
+
+    return new Readable({
+      read() {
+        if (offset >= buffer.length) {
+          this.push(null);
+          return;
+        }
+
+        const chunk = buffer.slice(offset, offset + chunkSize);
+        this.push(chunk);
+        offset += chunk.length;
+      },
+    });
+  }
+
+  /**
+   * Check if ArrayBuffer contains valid audio data by examining file signatures
+   * Проверить, содержит ли ArrayBuffer валидные аудио данные путем проверки сигнатур файлов
+   */
+  private _validateAudioData(arrayBuffer: ArrayBuffer): boolean {
+    if (arrayBuffer.byteLength < 12) {
+      return false; // Too small to be audio
+    }
+
+    const view = new Uint8Array(arrayBuffer);
+
+    // Check for MP3 signature (ID3v2 or MPEG frame)
+    if (view[0] === 0x49 && view[1] === 0x44 && view[2] === 0x33) { // ID3v2
+      return true;
+    }
+    if ((view[0] === 0xFF && (view[1] & 0xE0) === 0xE0)) { // MPEG frame sync
+      return true;
+    }
+
+    // Check for WAV signature
+    if (view[0] === 0x52 && view[1] === 0x49 && view[2] === 0x46 && view[3] === 0x46) { // RIFF
+      return view[8] === 0x57 && view[9] === 0x41 && view[10] === 0x56 && view[11] === 0x45; // WAVE
+    }
+
+    // Check for OGG signature
+    if (view[0] === 0x4F && view[1] === 0x67 && view[2] === 0x67 && view[3] === 0x53) { // OggS
+      return true;
+    }
+
+    // Check for FLAC signature
+    if (view[0] === 0x66 && view[1] === 0x4C && view[2] === 0x61 && view[3] === 0x43) { // fLaC
+      return true;
+    }
+
+    // Check for AAC (ADTS)
+    if ((view[0] === 0xFF && (view[1] & 0xF0) === 0xF0)) { // ADTS sync
+      return true;
+    }
+
+    // If no known signature found, but data exists, we'll assume it's audio
+    // FFmpeg will give us a proper error if it's not playable
+    return arrayBuffer.byteLength > 100; // Minimum reasonable audio size
+  }
+
+  /**
+   * Resolve blob URL to Readable stream with audio validation
+   * Разрешить blob URL в Readable поток с валидацией аудио данных
+   */
+  private async _resolveBlobToStream(blobUrl: string): Promise<Readable> {
+    try {
+      const blob = resolveObjectURL(blobUrl);
+      if (!blob) {
+        throw new Error(`Blob not found for URL: ${blobUrl}`);
+      }
+
+      const arrayBuffer = await blob.arrayBuffer();
+
+      // Validate that we have audio data
+      if (!this._validateAudioData(arrayBuffer)) {
+        throw new Error(`Blob URL ${blobUrl} does not contain valid audio data (size: ${arrayBuffer.byteLength} bytes)`);
+      }
+
+      if (this.config.verbose) {
+        this.config.logger.info?.(
+          `[${getTimeString()}] [${this.config.loggerTag}] ✅ Validated audio data from blob: ${arrayBuffer.byteLength} bytes`
+        );
+      }
+
+      return this._createStreamFromArrayBuffer(arrayBuffer);
+    } catch (error) {
+      throw new Error(`Failed to resolve blob URL ${blobUrl}: ${error}`);
+    }
+  }
+
+  public async run(): Promise<import("../Types/index.js").FFmpegRunResultExtended> {
     if (this.process) throw new Error("FFmpeg process is already running");
     if (this._skipInProgress) throw new Error("Skip operation in progress");
 
@@ -282,6 +382,22 @@ export class Processor extends EventEmitter {
     this._initPromise();
     this._startTime = Date.now();
     this._totalChunks = 0;
+
+    // Handle blob inputs by resolving them to streams
+    // Обработка blob входов путем разрешения их в потоки
+    const blobPromises: Promise<void>[] = [];
+    for (const source of this.config.inputSources) {
+      if (source.type === "blob") {
+        const promise = this._resolveBlobToStream(source.blobUrl).then((stream) => {
+          this.inputStreams.push({ stream, index: source.index });
+        });
+        blobPromises.push(promise);
+      }
+    }
+
+    // Wait for all blob resolutions
+    // Ждем разрешения всех blob
+    await Promise.all(blobPromises);
 
     const fullArgs = this.getFullArgs();
 
