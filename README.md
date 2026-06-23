@@ -2,7 +2,7 @@
 
 [Перейти на русскую версию](./lang/ru/README.md)
 
-_Fluent_ FFmpeg wrapper for Node.js, written in TypeScript.  
+_Fluent_ FFmpeg wrapper for Node.js, written in TypeScript. **v0.4.0**  
 Offers a fluent, chainable API for media/audio/video processing with FFmpeg, supporting streams, crossfade, audio effects, timeouts, and progress tracking.
 
 - **TypeScript-first**: typed, chainable, and modern
@@ -241,7 +241,9 @@ Creates a new FluentStream instance with optional processor options.
 - `failFast?: boolean` - Stop processing on first error
 - `wallTimeLimit?: number` - Maximum wall clock time limit
 - `useAudioProcessor?: boolean` - Enable built-in audio processing
-- `audioProcessorOptions?: AudioProcessingOptions` - Audio effect defaults
+- `audioProcessorOptions?: AudioProcessingOptions` - Audio effect defaults (volume, bass, treble, compressor, sampleRate, channels)
+- `logger?: Logger` - Custom logger instance (debug, info, warn, error)
+- `verbose?: boolean` - Enable debug log output
 
 ### Input/Output Methods
 
@@ -487,11 +489,9 @@ Permission denied (file locked)
 **Enable verbose logging:**
 ```ts
 const streamer = new FluentStream({
-  logger: console // Enable console logging
+  logger: console, // Enable console logging
+  verbose: true,   // Show debug messages
 });
-// Or
-import debug from 'debug';
-FluentStream.logger = { /* custom logger */ };
 ```
 
 **Inspect FFmpeg command:**
@@ -599,6 +599,7 @@ When reporting bugs, please include:
 - GPU acceleration for video encoding
 - Advanced audio analysis features
 - Streaming server integrations
+- Plugin system for custom filters and processors
 
 ---
 

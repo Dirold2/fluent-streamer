@@ -1,51 +1,21 @@
 {
   "compilerOptions": {
-    "target": "es2022",
-    "module": "nodenext",
-    "lib": ["ES2023", "DOM"],
-    "moduleResolution": "nodenext",
-    "rootDir": "./src",
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
     "outDir": "./dist",
-    "allowSyntheticDefaultImports": true,
-    "importHelpers": true,
-    "strict": true,
-    "strictBindCallApply": true,
-    "sourceMap": true,
+    "rootDir": "./src",
     "declaration": true,
     "declarationMap": true,
+    "sourceMap": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
     "forceConsistentCasingInFileNames": true,
-    "noFallthroughCasesInSwitch": true,
-    "noImplicitReturns": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noImplicitAny": true,
-    "noImplicitThis": true,
-    "strictNullChecks": true,
     "esModuleInterop": true,
-    "experimentalDecorators": true,
-    "emitDecoratorMetadata": true,
     "skipLibCheck": true,
-    "baseUrl": ".",
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "types": ["vitest/globals", "node"],
-    "incremental": true
+    "noEmit": false,
   },
-  "include": [
-    "src/**/*.ts",
-    "src/**/*.tsx",
-    "pla.ts"
-  ],
-  "exclude": [
-    "node_modules",
-    "build",
-    "dist",
-    "**/*.spec.ts",
-    "**/*.test.ts"
-  ],
-  "ts-node": {
-    "esm": true,
-    "experimentalSpecifierResolution": "node",
-    "files": true
-  }
+  "include": ["src/**/*"],
 }

@@ -2,13 +2,8 @@ import { EventEmitter } from "eventemitter3";
 import { Readable, Writable, PassThrough, pipeline } from "stream";
 import { execa, type Subprocess } from "execa";
 import { resolveObjectURL } from "buffer";
-import type {
-  Logger,
-  FFmpegProgress,
-  ProcessorDebugInfo,
-  InputSource,
-} from "../Types/index.js";
-import { ProcessorOptions } from "../Types/index.js";
+import type { Logger, FFmpegProgress, ProcessorDebugInfo, InputSource } from "../Types/index.js";
+import type { ProcessorOptions } from "../Types/index.js";
 import { ThrottleStream } from "./ThrottleStream.js";
 import { AudioProcessor } from "./AudioProcessor.js";
 
@@ -24,7 +19,112 @@ interface PassThroughWithDrain extends PassThrough {
 // UTILS
 // ============================================================================
 function getTimeString(): string {
-  return new Date().toLocaleTimeString("ru-RU", { hour12: false });
+  return new Date().toLocaleTimeString("en-US", { hour12: false });
+}
+
+// ============================================================================
+// AUDIO EFFECT CONTROLLER
+// ============================================================================
+
+class AudioEffectController {
+  private audioProcessor: AudioProcessor;
+  private logger: Logger;
+  private loggerTag: string;
+  private verbose: boolean;
+
+  private _volume: number;
+  private _bass: number;
+  private _treble: number;
+  private _compressor: boolean;
+
+  constructor(
+    audioProcessor: AudioProcessor,
+    config: { logger: Logger; loggerTag: string; verbose?: boolean },
+    initialState: {
+      volume: number;
+      bass: number;
+      treble: number;
+      compressor: boolean;
+    },
+  ) {
+    this.audioProcessor = audioProcessor;
+    this.logger = config.logger;
+    this.loggerTag = config.loggerTag;
+    this.verbose = config.verbose ?? false;
+    this._volume = initialState.volume;
+    this._bass = initialState.bass;
+    this._treble = initialState.treble;
+    this._compressor = initialState.compressor;
+  }
+
+  setVolume(v: number): void {
+    const oldValue = this._volume;
+    this._volume = v;
+    if (this.canUpdate()) {
+      this.audioProcessor.setVolume(v);
+    }
+    this.logChange("Volume", oldValue, v);
+  }
+
+  setBass(b: number): void {
+    const oldValue = this._bass;
+    this._bass = b;
+    if (this.canUpdate()) {
+      this.audioProcessor.setEqualizer(b, this._treble, this._compressor);
+    }
+    this.logChange("Bass", oldValue, b);
+  }
+
+  setTreble(t: number): void {
+    const oldValue = this._treble;
+    this._treble = t;
+    if (this.canUpdate()) {
+      this.audioProcessor.setEqualizer(this._bass, t, this._compressor);
+    }
+    this.logChange("Treble", oldValue, t);
+  }
+
+  setCompressor(c: boolean): void {
+    const oldValue = this._compressor;
+    this._compressor = c;
+    if (this.canUpdate()) {
+      this.audioProcessor.setCompressor(c);
+    }
+    if (this.verbose) {
+      this.logger.info?.(
+        `[${getTimeString()}] [${this.loggerTag}] Compressor changed: ${String(oldValue)} → ${String(c)}`,
+      );
+    }
+  }
+
+  setEqualizer(b: number, t: number, c: boolean): void {
+    this._bass = b;
+    this._treble = t;
+    this._compressor = c;
+    if (this.canUpdate()) {
+      this.audioProcessor.setEqualizer(b, t, c);
+    }
+  }
+
+  startFade(targetVolume: number, durationMs: number): void {
+    this.audioProcessor?.startFade(targetVolume, durationMs);
+  }
+
+  private canUpdate(): boolean {
+    return (
+      this.audioProcessor != null &&
+      !this.audioProcessor.destroyed &&
+      !this.audioProcessor.writableEnded
+    );
+  }
+
+  private logChange(label: string, oldValue: number, newValue: number): void {
+    if (this.verbose) {
+      this.logger.info?.(
+        `[${getTimeString()}] [${this.loggerTag}] ${label} changed: ${oldValue} → ${newValue}`,
+      );
+    }
+  }
 }
 
 // ============================================================================
@@ -112,11 +212,9 @@ export class Processor extends EventEmitter {
       extraGlobalArgs: options.extraGlobalArgs ?? [],
       loggerTag: options.loggerTag ?? `ffmpeg_${Date.now()}`,
       inputStreams: options.inputStreams ?? [],
-      onBeforeChildProcessSpawn:
-        options.onBeforeChildProcessSpawn ?? (() => {}),
+      onBeforeChildProcessSpawn: options.onBeforeChildProcessSpawn ?? (() => {}),
       stderrLogHandler: options.stderrLogHandler ?? (() => {}),
-      executionId:
-        options.executionId ?? Math.random().toString(36).slice(2) + Date.now(),
+      executionId: options.executionId ?? Math.random().toString(36).slice(2) + Date.now(),
       wallTimeLimit: options.wallTimeLimit ?? 0,
       timeout: options.timeout ?? 0,
       maxStderrBuffer: options.maxStderrBuffer ?? 1024 * 1024,
@@ -125,19 +223,15 @@ export class Processor extends EventEmitter {
       debug: options.debug ?? false,
       verbose: options.verbose ?? false,
       stdoutlog: options.stdoutlog ?? false,
-      suppressPrematureCloseWarning:
-        options.suppressPrematureCloseWarning ?? false,
+      suppressPrematureCloseWarning: options.suppressPrematureCloseWarning ?? false,
       abortSignal: options.abortSignal,
       headers: options.headers ?? {},
-      userAgent:
-        options.userAgent ?? "Mozilla/5.0 (compatible; FFmpegProcessor/1.0)",
+      userAgent: options.userAgent ?? "Mozilla/5.0 (compatible; FFmpegProcessor/1.0)",
       disableThrottling: options.disableThrottling ?? true,
       ffmpegLogLevel: options.ffmpegLogLevel ?? "info",
       tailSilenceMs: options.tailSilenceMs ?? 0,
       useAudioProcessor:
-        typeof options.useAudioProcessor === "boolean"
-          ? options.useAudioProcessor
-          : false,
+        typeof options.useAudioProcessor === "boolean" ? options.useAudioProcessor : false,
       inputSources: [],
       audioProcessorOptions: options.audioProcessorOptions ?? {
         volume: 1,
@@ -154,8 +248,7 @@ export class Processor extends EventEmitter {
     this.currentVolume = this.config.audioProcessorOptions?.volume ?? 1;
     this.currentBass = this.config.audioProcessorOptions?.bass ?? 0;
     this.currentTreble = this.config.audioProcessorOptions?.treble ?? 0;
-    this.currentCompressor =
-      this.config.audioProcessorOptions?.compressor ?? false;
+    this.currentCompressor = this.config.audioProcessorOptions?.compressor ?? false;
 
     this._initPromise();
     this._handleAbortSignal();
@@ -177,9 +270,7 @@ export class Processor extends EventEmitter {
     return [...this.args];
   }
 
-  public setInputStreams(
-    streams: Array<{ stream: Readable; index: number }>,
-  ): this {
+  public setInputStreams(streams: Array<{ stream: Readable; index: number }>): this {
     this.inputStreams = Array.isArray(streams) ? [...streams] : [];
     return this;
   }
@@ -188,9 +279,7 @@ export class Processor extends EventEmitter {
     return this.process?.stdin ?? undefined;
   }
 
-  public setExtraOutputStreams(
-    streams: Array<{ stream: Writable; index: number }>,
-  ): this {
+  public setExtraOutputStreams(streams: Array<{ stream: Writable; index: number }>): this {
     this.extraOutputs = Array.isArray(streams) ? [...streams] : [];
     return this;
   }
@@ -213,8 +302,8 @@ export class Processor extends EventEmitter {
     }
 
     // Only add user_agent if there are HTTP URLs in the inputs
-    const hasHttpInputs = this.config.inputSources.some(source =>
-      source.type === "url" && source.url.startsWith("http")
+    const hasHttpInputs = this.config.inputSources.some(
+      (source) => source.type === "url" && source.url.startsWith("http"),
     );
 
     if (this.config.userAgent && hasHttpInputs) {
@@ -223,37 +312,41 @@ export class Processor extends EventEmitter {
 
     args.push(...this.extraGlobalArgs);
 
-    const sortedSources = [...this.config.inputSources].sort(
-      (a, b) => a.index - b.index,
-    );
+    const sortedUrlSources = [...this.config.inputSources]
+      .filter(
+        (
+          s,
+        ): s is {
+          type: "url";
+          url: string;
+          index: number;
+          headers?: Record<string, string>;
+        } => s.type === "url",
+      )
+      .sort((a, b) => a.index - b.index);
 
-    for (const source of sortedSources) {
-      if (source.type === "url") {
-        const globalHeaders =
-          typeof this.config.headers === "object" ? this.config.headers : {};
-        const finalHeaders = { ...globalHeaders, ...(source.headers || {}) };
+    for (const source of sortedUrlSources) {
+      const globalHeaders = typeof this.config.headers === "object" ? this.config.headers : {};
+      const finalHeaders = { ...globalHeaders, ...source.headers };
 
-        if (Object.keys(finalHeaders).length > 0) {
-          const headerStr = Object.entries(finalHeaders)
-            .map(([k, v]) => `${k}: ${v}`)
-            .join("\r\n");
-          args.push("-headers", headerStr);
-        }
-
-        args.push(
-          "-reconnect",
-          "1",
-          "-reconnect_streamed",
-          "1",
-          "-reconnect_delay_max",
-          "5",
-          "-timeout",
-          "10000000",
-        );
-        args.push("-i", source.url);
-      } else {
-        args.push("-i", "pipe:0");
+      if (Object.keys(finalHeaders).length > 0) {
+        const headerStr = Object.entries(finalHeaders)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join("\r\n");
+        args.push("-headers", headerStr);
       }
+
+      args.push(
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_delay_max",
+        "5",
+        "-timeout",
+        "10000000",
+      );
+      args.push("-i", source.url);
     }
 
     args.push(...this.args);
@@ -312,30 +405,36 @@ export class Processor extends EventEmitter {
     const view = new Uint8Array(arrayBuffer);
 
     // Check for MP3 signature (ID3v2 or MPEG frame)
-    if (view[0] === 0x49 && view[1] === 0x44 && view[2] === 0x33) { // ID3v2
+    if (view[0]! === 0x49 && view[1]! === 0x44 && view[2]! === 0x33) {
+      // ID3v2
       return true;
     }
-    if ((view[0] === 0xFF && (view[1] & 0xE0) === 0xE0)) { // MPEG frame sync
+    if (view[0]! === 0xff && (view[1]! & 0xe0) === 0xe0) {
+      // MPEG frame sync
       return true;
     }
 
     // Check for WAV signature
-    if (view[0] === 0x52 && view[1] === 0x49 && view[2] === 0x46 && view[3] === 0x46) { // RIFF
-      return view[8] === 0x57 && view[9] === 0x41 && view[10] === 0x56 && view[11] === 0x45; // WAVE
+    if (view[0]! === 0x52 && view[1]! === 0x49 && view[2]! === 0x46 && view[3]! === 0x46) {
+      // RIFF
+      return view[8]! === 0x57 && view[9]! === 0x41 && view[10]! === 0x56 && view[11]! === 0x45; // WAVE
     }
 
     // Check for OGG signature
-    if (view[0] === 0x4F && view[1] === 0x67 && view[2] === 0x67 && view[3] === 0x53) { // OggS
+    if (view[0]! === 0x4f && view[1]! === 0x67 && view[2]! === 0x67 && view[3]! === 0x53) {
+      // OggS
       return true;
     }
 
     // Check for FLAC signature
-    if (view[0] === 0x66 && view[1] === 0x4C && view[2] === 0x61 && view[3] === 0x43) { // fLaC
+    if (view[0]! === 0x66 && view[1]! === 0x4c && view[2]! === 0x61 && view[3]! === 0x43) {
+      // fLaC
       return true;
     }
 
     // Check for AAC (ADTS)
-    if ((view[0] === 0xFF && (view[1] & 0xF0) === 0xF0)) { // ADTS sync
+    if (view[0]! === 0xff && (view[1]! & 0xf0) === 0xf0) {
+      // ADTS sync
       return true;
     }
 
@@ -359,12 +458,14 @@ export class Processor extends EventEmitter {
 
       // Validate that we have audio data
       if (!this._validateAudioData(arrayBuffer)) {
-        throw new Error(`Blob URL ${blobUrl} does not contain valid audio data (size: ${arrayBuffer.byteLength} bytes)`);
+        throw new Error(
+          `Blob URL ${blobUrl} does not contain valid audio data (size: ${arrayBuffer.byteLength} bytes)`,
+        );
       }
 
       if (this.config.verbose) {
         this.config.logger.info?.(
-          `[${getTimeString()}] [${this.config.loggerTag}] ✅ Validated audio data from blob: ${arrayBuffer.byteLength} bytes`
+          `[${getTimeString()}] [${this.config.loggerTag}] ✅ Validated audio data from blob: ${arrayBuffer.byteLength} bytes`,
         );
       }
 
@@ -436,34 +537,34 @@ export class Processor extends EventEmitter {
     this._handleTimeout();
 
     if (this.process.stdin && this.inputStreams.length) {
-      const primary = this.inputStreams
-        .slice()
-        .sort((a, b) => a.index - b.index)[0];
-
-      if (primary) {
-        const throttled = primary.stream.pipe(new ThrottleStream(32_000));
-        pipeline(throttled, this.process.stdin, (err) => {
-          if (err) {
-            const code = (err as NodeJS.ErrnoException)?.code;
-            if (code === "EPIPE" && (this.hasFinished || this.isTerminating))
-              return;
-            this.emit("error", err);
-            this._finalize(err as Error);
-          }
-        });
+      if (this.inputStreams.length > 1) {
+        const error = new Error(
+          "Multiple stream inputs are not supported. " +
+            "Provide additional inputs as file paths or URLs.",
+        );
+        this.emit("error", error);
+        this._finalize(error);
+        throw error;
       }
 
-      for (const s of this.inputStreams) {
-        if (s !== primary) {
-          pipeline(s.stream, this._getBlackholeStream(), () => {});
+      const primary = this.inputStreams[0]!;
+      const throttled = primary.stream.pipe(new ThrottleStream(32_000));
+      pipeline(throttled, this.process.stdin, (err) => {
+        if (err) {
+          const code = (err as NodeJS.ErrnoException)?.code;
+          if (code === "EPIPE" && (this.hasFinished || this.isTerminating)) return;
+          this.emit("error", err);
+          this._finalize(err as Error);
         }
-      }
+      });
     }
 
     const finalPassthrough = new PassThrough({
       highWaterMark: 16384,
     }) as PassThroughWithDrain;
-    const BYTES_PER_SECOND = 48000 * 2 * 2; // PCM s16le 48kHz stereo
+    const sampleRate = this.config.audioProcessorOptions?.sampleRate ?? 48000;
+    const channels = this.config.audioProcessorOptions?.channels ?? 2;
+    const BYTES_PER_SECOND = sampleRate * channels * 2; // 16-bit PCM
 
     const audioProcessor = new AudioProcessor({
       volume: this.currentVolume,
@@ -471,8 +572,8 @@ export class Processor extends EventEmitter {
       treble: this.currentTreble,
       compressor: this.currentCompressor,
       normalize: false,
-      sampleRate: 48000,
-      channels: 2,
+      sampleRate,
+      channels,
     });
 
     if (!this.useAudioProcessor) {
@@ -572,8 +673,8 @@ export class Processor extends EventEmitter {
     this.outputStream = finalPassthrough;
     this._ensureFinalOutputDrained(finalPassthrough);
 
-    this.process.stderr?.on("data", (chunk) => this._handleStderr(chunk));
-    this.process.stderr?.on("data", (chunk) => {
+    this.process.stderr?.on("data", (chunk: Buffer) => {
+      this._handleStderr(chunk);
       try {
         this.config.stderrLogHandler?.(chunk.toString("utf8"));
       } catch {
@@ -600,20 +701,20 @@ export class Processor extends EventEmitter {
       this._finalize(err);
     });
 
-    this.endSequenceFn = this._createEndSequence(
-      audioProcessor,
-      finalPassthrough,
-    );
+    this.endSequenceFn = this._createEndSequence(audioProcessor, finalPassthrough);
 
     this.donePromise!.catch((err) => {
       this.emit("error", err);
-      if (
-        !this._runEmittedEnd &&
-        finalPassthrough &&
-        !finalPassthrough.destroyed
-      ) {
+      if (!this._runEmittedEnd && finalPassthrough && !finalPassthrough.destroyed) {
         finalPassthrough.destroy(err);
       }
+    });
+
+    const controller = new AudioEffectController(audioProcessor, this.config, {
+      volume: this.currentVolume,
+      bass: this.currentBass,
+      treble: this.currentTreble,
+      compressor: this.currentCompressor,
     });
 
     return {
@@ -623,100 +724,16 @@ export class Processor extends EventEmitter {
       stop: () => this.kill(),
       close: () => this.close(),
       audioProcessor,
-      setVolume: (v: number) => {
-        const oldValue = this.currentVolume;
-        this.currentVolume = v;
-        if (
-          audioProcessor &&
-          !audioProcessor.destroyed &&
-          !audioProcessor.writableEnded
-        ) {
-          audioProcessor.setVolume(v);
-        }
-        if (this.config.verbose) {
-          this.config.logger.info?.(
-            `[${getTimeString()}] [${this.config.loggerTag}] Volume changed: ${oldValue} → ${v}`,
-          );
-        }
-      },
-      setBass: (b: number) => {
-        const oldValue = this.currentBass;
-        this.currentBass = b;
-        if (
-          audioProcessor &&
-          !audioProcessor.destroyed &&
-          !audioProcessor.writableEnded
-        ) {
-          audioProcessor.setEqualizer(
-            b,
-            audioProcessor.treble,
-            audioProcessor.compressor,
-          );
-        }
-        if (this.config.verbose) {
-          this.config.logger.info?.(
-            `[${getTimeString()}] [${this.config.loggerTag}] Bass changed: ${oldValue}dB → ${b}dB`,
-          );
-        }
-      },
-      setTreble: (t: number) => {
-        const oldValue = this.currentTreble;
-        this.currentTreble = t;
-        if (
-          audioProcessor &&
-          !audioProcessor.destroyed &&
-          !audioProcessor.writableEnded
-        ) {
-          audioProcessor.setEqualizer(
-            audioProcessor.bass,
-            t,
-            audioProcessor.compressor,
-          );
-        }
-        if (this.config.verbose) {
-          this.config.logger.info?.(
-            `[${getTimeString()}] [${this.config.loggerTag}] Treble changed: ${oldValue}dB → ${t}dB`,
-          );
-        }
-      },
-      setCompressor: (c: boolean) => {
-        const oldValue = this.currentCompressor;
-        this.currentCompressor = c;
-        if (
-          audioProcessor &&
-          !audioProcessor.destroyed &&
-          !audioProcessor.writableEnded
-        ) {
-          audioProcessor.setCompressor(c);
-        }
-        if (this.config.verbose) {
-          this.config.logger.info?.(
-            `[${getTimeString()}] [${this.config.loggerTag}] Compressor changed: ${oldValue} → ${c}`,
-          );
-        }
-      },
-      setEqualizer: (b: number, t: number, c: boolean) => {
-        this.currentBass = b;
-        this.currentTreble = t;
-        this.currentCompressor = c;
-        if (
-          audioProcessor &&
-          !audioProcessor.destroyed &&
-          !audioProcessor.writableEnded
-        ) {
-          audioProcessor.setEqualizer(b, t, c);
-        }
-      },
-      startFade: (targetVolume: number, durationMs: number) => {
-        return audioProcessor?.startFade(targetVolume, durationMs);
-      },
+      setVolume: (v) => controller.setVolume(v),
+      setBass: (b) => controller.setBass(b),
+      setTreble: (t) => controller.setTreble(t),
+      setCompressor: (c) => controller.setCompressor(c),
+      setEqualizer: (b, t, c) => controller.setEqualizer(b, t, c),
+      startFade: (tv, dur) => controller.startFade(tv, dur),
     };
   }
 
-  private _createEndSequence(
-    _audioProcessor: AudioProcessor,
-    finalPassthrough: PassThrough,
-  ) {
+  private _createEndSequence(_audioProcessor: AudioProcessor, finalPassthrough: PassThrough) {
     return () => {
       if (this._runEmittedEnd || this.hasFinished || this.isClosed) return;
       this._runEmittedEnd = true;
@@ -725,10 +742,7 @@ export class Processor extends EventEmitter {
         this.throttledOutput.once("end", () => {
           // Даём AudioPlayer время обработать оставшиеся данные
           setTimeout(() => {
-            if (
-              !finalPassthrough.destroyed &&
-              !finalPassthrough.writableEnded
-            ) {
+            if (!finalPassthrough.destroyed && !finalPassthrough.writableEnded) {
               finalPassthrough.end();
             }
             this.emit("end");
@@ -907,14 +921,10 @@ export class Processor extends EventEmitter {
     ];
 
     if (!validCurves.includes(curve1)) {
-      throw new Error(
-        `Invalid curve1: ${curve1}. Must be one of: ${validCurves.join(", ")}`,
-      );
+      throw new Error(`Invalid curve1: ${curve1}. Must be one of: ${validCurves.join(", ")}`);
     }
     if (!validCurves.includes(curve2)) {
-      throw new Error(
-        `Invalid curve2: ${curve2}. Must be one of: ${validCurves.join(", ")}`,
-      );
+      throw new Error(`Invalid curve2: ${curve2}. Must be one of: ${validCurves.join(", ")}`);
     }
 
     // Build parameters for acrossfade
@@ -948,9 +958,7 @@ export class Processor extends EventEmitter {
         const in1Label = opts.inputLabels?.[i] ?? `${i}:a`;
         const outLabel = i === inputs - 1 ? outputLabel : `acf_${i}`;
 
-        filterParts.push(
-          `[${in0Label}][${in1Label}]acrossfade=${paramStr}[${outLabel}]`,
-        );
+        filterParts.push(`[${in0Label}][${in1Label}]acrossfade=${paramStr}[${outLabel}]`);
 
         prevLabel = outLabel;
       }
@@ -986,10 +994,7 @@ export class Processor extends EventEmitter {
   }
 
   private _resetRunState() {
-    if (
-      this.outputStream &&
-      (this.outputStream as PassThroughWithDrain)._ffmpegDrainAttached
-    ) {
+    if (this.outputStream && (this.outputStream as PassThroughWithDrain)._ffmpegDrainAttached) {
       delete (this.outputStream as PassThroughWithDrain)._ffmpegDrainAttached;
     }
 
@@ -1033,55 +1038,20 @@ export class Processor extends EventEmitter {
 
   private _ensureFinalOutputDrained(output: PassThroughWithDrain) {
     if (!output || output._ffmpegDrainAttached) return;
+    output._ffmpegDrainAttached = true;
 
-    let consumerAttached = false;
+    setTimeout(() => {
+      if (output.destroyed || output.writableEnded) return;
+      if (output.readableFlowing || output.listeners("data").length > 0) return;
 
-    const markRead = () => {
-      if (!output || output.destroyed || output.writableEnded) return;
-      consumerAttached = true;
-      output._ffmpegDrainAttached = true;
+      output.pipe(this._getBlackholeStream(), { end: false });
 
       if (this.config.verbose) {
         this.config.logger.debug?.(
-          `[${getTimeString()}] [${this.config.loggerTag}] Consumer attached to output stream`,
+          `[${getTimeString()}] [${this.config.loggerTag}] Output drained to prevent backpressure`,
         );
       }
-    };
-
-    const events = ["data", "readable", "end", "close"];
-    const isBeingRead = () =>
-      output &&
-      !output.destroyed &&
-      !output.writableEnded &&
-      output.listeners("data").length > 0;
-
-    const maybeDrain = () => {
-      if (
-        !consumerAttached &&
-        output &&
-        !output._ffmpegDrainAttached &&
-        !isBeingRead()
-      ) {
-        output._ffmpegDrainAttached = true;
-        output.pipe(this._getBlackholeStream(), { end: false });
-
-        if (this.config.verbose) {
-          this.config.logger.debug?.(
-            `[${getTimeString()}] [${this.config.loggerTag}] Final output drained to blackhole to prevent backpressure`,
-          );
-        }
-      }
-    };
-
-    events.forEach((ev) => output.once(ev, markRead));
-    output.once("newListener", (event: string) => {
-      if (events.includes(event)) {
-        markRead();
-        clearTimeout(timer);
-      }
-    });
-
-    const timer = setTimeout(maybeDrain, 100);
+    }, 100);
   }
 
   private _handleAbortSignal(): void {
@@ -1113,10 +1083,7 @@ export class Processor extends EventEmitter {
   public createSilenceMs(durationMs = 100, sampleRate = 48000, channels = 2) {
     const bytesPerSecond = sampleRate * channels * 2;
     const silenceBytes = Math.floor((durationMs / 1000) * bytesPerSecond);
-    const adaptiveChunkSize = Math.min(
-      512,
-      Math.max(128, (this.currentBitrate / 128) * 256),
-    );
+    const adaptiveChunkSize = Math.min(512, Math.max(128, (this.currentBitrate / 128) * 256));
     const chunkSize = Math.min(adaptiveChunkSize, silenceBytes);
     let silenceSent = 0;
 
@@ -1137,15 +1104,9 @@ export class Processor extends EventEmitter {
     });
   }
 
-  public createSilenceBuffer(
-    durationMs = 100,
-    sampleRate = 48000,
-    channels = 2,
-  ): Buffer {
+  public createSilenceBuffer(durationMs = 100, sampleRate = 48000, channels = 2): Buffer {
     const bytesPerSample = 2;
-    const totalBytes = Math.floor(
-      (durationMs / 1000) * sampleRate * channels * bytesPerSample,
-    );
+    const totalBytes = Math.floor((durationMs / 1000) * sampleRate * channels * bytesPerSample);
     return Buffer.alloc(totalBytes, 0);
   }
 
@@ -1162,16 +1123,13 @@ export class Processor extends EventEmitter {
     }
 
     // Parse duration
-    const durationMatch = text.match(
-      /Duration:\s*(\d{2}):(\d{2}):(\d{2})\.(\d+)/,
-    );
+    const durationMatch = text.match(/Duration:\s*(\d{2}):(\d{2}):(\d{2})\.(\d+)/);
     if (durationMatch) {
-      const hours = parseInt(durationMatch[1], 10);
-      const minutes = parseInt(durationMatch[2], 10);
-      const seconds = parseInt(durationMatch[3], 10);
-      const milliseconds = parseInt(durationMatch[4].substring(0, 3), 10);
-      const totalSeconds =
-        hours * 3600 + minutes * 60 + seconds + milliseconds / 1000;
+      const hours = parseInt(durationMatch[1]!, 10);
+      const minutes = parseInt(durationMatch[2]!, 10);
+      const seconds = parseInt(durationMatch[3]!, 10);
+      const milliseconds = parseInt(durationMatch[4]!.substring(0, 3), 10);
+      const totalSeconds = hours * 3600 + minutes * 60 + seconds + milliseconds / 1000;
       this.currentDuration = Math.max(1, Math.min(3600, totalSeconds));
 
       if (this.config.verbose) {
@@ -1183,12 +1141,10 @@ export class Processor extends EventEmitter {
 
     // Parse bitrate (only once)
     if (!this._bitrateDetected) {
-      const bitrateMatch = text.match(
-        /bitrate=\s*(\d+(?:\.\d+)?)\s*(k(?:b\/s)?|M(?:b\/s)?)/i,
-      );
+      const bitrateMatch = text.match(/bitrate=\s*(\d+(?:\.\d+)?)\s*(k(?:b\/s)?|M(?:b\/s)?)/i);
       if (bitrateMatch) {
-        const value = parseFloat(bitrateMatch[1]);
-        const unit = bitrateMatch[2].toLowerCase();
+        const value = parseFloat(bitrateMatch[1]!);
+        const unit = bitrateMatch[2]!.toLowerCase();
         let bitrateKbps = value;
 
         if (unit.startsWith("m")) {
@@ -1226,10 +1182,7 @@ export class Processor extends EventEmitter {
     }
   }
 
-  private _onProcessExit(
-    code: number | null,
-    signal: NodeJS.Signals | null,
-  ): void {
+  private _onProcessExit(code: number | null, signal: NodeJS.Signals | null): void {
     if (this.hasFinished) return;
 
     if (code === 0 || (signal !== null && this.isTerminating)) {
@@ -1270,10 +1223,7 @@ export class Processor extends EventEmitter {
     }
   }
 
-  private _getProcessExitError(
-    code: number | null,
-    signal: NodeJS.Signals | null,
-  ): Error {
+  private _getProcessExitError(code: number | null, signal: NodeJS.Signals | null): Error {
     const stderrSnippet = this.stderrBuffer.trim().slice(-1000);
     let message = `FFmpeg exited with code ${code}`;
 
@@ -1307,11 +1257,7 @@ export class Processor extends EventEmitter {
 
       this._cleanup();
 
-      if (
-        this.outputStream &&
-        !this.outputStream.destroyed &&
-        !this.outputStream.writableEnded
-      ) {
+      if (this.outputStream && !this.outputStream.destroyed && !this.outputStream.writableEnded) {
         this.outputStream.end();
         this.emit("end");
       }

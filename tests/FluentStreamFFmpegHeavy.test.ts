@@ -18,7 +18,9 @@ async function prepareDir() {
 async function cleanupDir() {
   if (fs.existsSync(__outDir)) {
     for (const file of fs.readdirSync(__outDir)) {
-      try { fs.unlinkSync(path.join(__outDir, file)); } catch {
+      try {
+        fs.unlinkSync(path.join(__outDir, file));
+      } catch {
         // Ignore cleanup errors
       }
     }
@@ -26,138 +28,155 @@ async function cleanupDir() {
 }
 
 // Мокаем работу runFfmpeg (заглушка)
-async function runFfmpeg(args: string[], opts: {fail?: boolean} = {}) {
+async function runFfmpeg(args: string[], opts: { fail?: boolean } = {}) {
   const out = args[args.length - 1];
-  if (opts.fail) return { code: 1, stdout: "", stderr: "mock error: input not found" };
+  if (opts.fail)
+    return { code: 1, stdout: "", stderr: "mock error: input not found" };
   if (String(out).endsWith(".wav")) {
-    fs.writeFileSync(out, Buffer.concat([
-      Buffer.from("RIFF"), Buffer.alloc(1536)
-    ]));
+    fs.writeFileSync(
+      out,
+      Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(1536)]),
+    );
   }
   if (String(out).endsWith(".aac")) {
-    const b = Buffer.alloc(256); b[0]=0xff; b[1]=0xf1;
+    const b = Buffer.alloc(256);
+    b[0] = 0xff;
+    b[1] = 0xf1;
     fs.writeFileSync(out, b);
   }
   if (String(out).endsWith(".mp3")) {
-    const b = Buffer.alloc(222); b.write("ID3", 0, 3);
+    const b = Buffer.alloc(222);
+    b.write("ID3", 0, 3);
     fs.writeFileSync(out, b);
   }
   return { code: 0, stdout: "ok", stderr: "" };
 }
 
 describe("@FluentStream.ts heavy integration / ffmpeg testing", () => {
-  beforeAll(async () => { await prepareDir(); });
-  afterAll(async () => { await cleanupDir(); });
+  beforeAll(async () => {
+    await prepareDir();
+  });
+  afterAll(async () => {
+    await cleanupDir();
+  });
 
-  it("should build ffmpeg args and transcode to wav", async () => {
-    const outWav = path.join(__outDir, "a.wav");
-    if (fs.existsSync(outWav)) fs.unlinkSync(outWav);
+  it(
+    "should build ffmpeg args and transcode to wav",
+    async () => {
+      const outWav = path.join(__outDir, "a.wav");
+      if (fs.existsSync(outWav)) fs.unlinkSync(outWav);
 
-    const stream = new FluentStream()
-      .input(TEST_AUDIO)
-      .output(outWav);
+      const stream = new FluentStream().input(TEST_AUDIO).output(outWav);
 
-    const args = stream.getArgs();
-    expect(args).toContain("-i");
-    expect(args[args.indexOf("-i")+1]).toBe(TEST_AUDIO);
-    expect(args.some(x => String(x).endsWith(".wav"))).toBe(true);
+      const args = stream.getArgs();
+      expect(args).toContain("-i");
+      expect(args[args.indexOf("-i") + 1]).toBe(TEST_AUDIO);
+      expect(args.some((x) => String(x).endsWith(".wav"))).toBe(true);
 
-    await runFfmpeg(args);
-    expect(fs.existsSync(outWav)).toBe(true);
+      await runFfmpeg(args);
+      expect(fs.existsSync(outWav)).toBe(true);
 
-    const buf = fs.readFileSync(outWav);
-    expect(buf.slice(0, 4).toString("ascii")).toBe("RIFF");
-    expect(fs.statSync(outWav).size).toBeGreaterThan(1000);
-    expect(fakeChecksum(outWav)).toMatch(/^[a-f0-9]{64}$/);
-  }, globalTimeout);
+      const buf = fs.readFileSync(outWav);
+      expect(buf.slice(0, 4).toString("ascii")).toBe("RIFF");
+      expect(fs.statSync(outWav).size).toBeGreaterThan(1000);
+      expect(fakeChecksum(outWav)).toMatch(/^[a-f0-9]{64}$/);
+    },
+    globalTimeout,
+  );
 
-  it("should transcode to AAC mono 44kHz", async () => {
-    const outAac = path.join(__outDir, "resample.aac");
-    if (fs.existsSync(outAac)) fs.unlinkSync(outAac);
+  it(
+    "should transcode to AAC mono 44kHz",
+    async () => {
+      const outAac = path.join(__outDir, "resample.aac");
+      if (fs.existsSync(outAac)) fs.unlinkSync(outAac);
 
-    const s = new FluentStream()
-      .input(TEST_AUDIO)
-      .audioCodec("aac")
-      .audioChannels(1)
-      .audioFrequency(44100)
-      .output(outAac);
+      const s = new FluentStream()
+        .input(TEST_AUDIO)
+        .audioCodec("aac")
+        .audioChannels(1)
+        .audioFrequency(44100)
+        .output(outAac);
 
-    const args = s.getArgs();
-    expect(args).toContain("-ac");
-    expect(args).toContain("1");
-    expect(args).toContain("-ar");
-    expect(args).toContain("44100");
-    expect(args).toContain("-c:a");
-    expect(args).toContain("aac");
+      const args = s.getArgs();
+      expect(args).toContain("-ac");
+      expect(args).toContain("1");
+      expect(args).toContain("-ar");
+      expect(args).toContain("44100");
+      expect(args).toContain("-c:a");
+      expect(args).toContain("aac");
 
-    await runFfmpeg(args);
-    expect(fs.existsSync(outAac)).toBe(true);
+      await runFfmpeg(args);
+      expect(fs.existsSync(outAac)).toBe(true);
 
-    const buf = fs.readFileSync(outAac);
-    expect(buf[0]).toBe(0xff); // ADTS sync
-    expect((buf[1]&0xf0)).toBe(0xf0);
-    expect(buf.length).toBeGreaterThan(200);
-    expect(fakeChecksum(outAac)).toMatch(/^[a-f0-9]{64}$/);
-  }, globalTimeout);
+      const buf = fs.readFileSync(outAac);
+      expect(buf[0]).toBe(0xff); // ADTS sync
+      expect(buf[1] & 0xf0).toBe(0xf0);
+      expect(buf.length).toBeGreaterThan(200);
+      expect(fakeChecksum(outAac)).toMatch(/^[a-f0-9]{64}$/);
+    },
+    globalTimeout,
+  );
 
   it("should throw if input file missing (simulate ffmpeg error)", async () => {
     const out = path.join(__outDir, "fail.mp3");
     if (fs.existsSync(out)) fs.unlinkSync(out);
 
-    const s = new FluentStream()
-      .input("notfound.wav")
-      .output(out);
+    const s = new FluentStream().input("notfound.wav").output(out);
 
     const args = s.getArgs();
-    const { code, stderr } = await runFfmpeg(args, {fail:true});
+    const { code, stderr } = await runFfmpeg(args, { fail: true });
     expect(code).not.toBe(0);
     expect(stderr).toMatch(/not found/);
   });
 
-  it("crossfadeAudio sets up complex filter and args", async () => {
-    const out = path.join(__outDir, "xfade.mp3");
-    if (fs.existsSync(out)) fs.unlinkSync(out);
+  it(
+    "crossfadeAudio sets up complex filter and args",
+    async () => {
+      const out = path.join(__outDir, "xfade.mp3");
+      if (fs.existsSync(out)) fs.unlinkSync(out);
 
-    const s = new FluentStream();
-    
-    // ✅ ИСПРАВЛЕНИЕ 1: Используем разные файлы ИЛИ allowDuplicate: true
-    s.input(TEST_AUDIO);
-    s.input(TEST_AUDIO, { allowDuplicate: true }); // Разрешаем дубликат
-    
-    s.audioCodec("libmp3lame");
-    s.crossfadeAudio(9, {
-      curve1: "par",
-      curve2: "exp",
-    });
-    s.output(out);
+      const s = new FluentStream();
 
-    const args = s.getArgs();
-    const assembledArgs = s.assembleArgs();
+      // ✅ ИСПРАВЛЕНИЕ 1: Используем разные файлы ИЛИ allowDuplicate: true
+      s.input(TEST_AUDIO);
+      s.input(TEST_AUDIO, { allowDuplicate: true }); // Разрешаем дубликат
 
-    // Проверяем наличие -filter_complex
-    const filterIdx = assembledArgs.indexOf("-filter_complex");
-    expect(filterIdx).toBeGreaterThan(-1);
+      s.audioCodec("libmp3lame");
+      s.crossfadeAudio(9, {
+        curve1: "par",
+        curve2: "exp",
+      });
+      s.output(out);
 
-    const filterString = assembledArgs[filterIdx + 1];
-    expect(typeof filterString).toBe("string");
-    
-    // ✅ ИСПРАВЛЕНИЕ 2: Правильные проверки синтаксиса
-    // Ожидаем: [0:a][1:a]acrossfade=d=9:c1=par:c2=exp[acf]
-    expect(filterString).toMatch(/\[0:a\]\[1:a\]acrossfade=/);
-    expect(filterString).toMatch(/d=9/);
-    expect(filterString).toMatch(/c1=par/); // Проверяем реальные значения
-    expect(filterString).toMatch(/c2=exp/); // Проверяем реальные значения
-    expect(filterString).toMatch(/\[acf\]$/); // Выходная метка в конце
+      const args = s.getArgs();
+      const assembledArgs = s.assembleArgs();
 
-    // ✅ ИСПРАВЛЕНИЕ 3: Убираем неправильную проверку
-    // Удаляем эту строку, так как она проверяет неправильный формат:
-    // expect(assembledArgs[filterIdx + 1]).toContain("acrossfade=d=9:c1=tri:c2=tri:ns=1234[outL]:extra=1");
+      // Проверяем наличие -filter_complex
+      const filterIdx = assembledArgs.indexOf("-filter_complex");
+      expect(filterIdx).toBeGreaterThan(-1);
 
-    await runFfmpeg(args);
-    expect(fs.existsSync(out)).toBe(true);
+      const filterString = assembledArgs[filterIdx + 1];
+      expect(typeof filterString).toBe("string");
 
-    const buf = fs.readFileSync(out);
-    expect(buf.subarray(0, 3).toString("ascii")).toMatch(/^ID3/);
-    expect(fakeChecksum(out)).toMatch(/^[a-f0-9]{64}$/);
-  }, globalTimeout);
+      // ✅ ИСПРАВЛЕНИЕ 2: Правильные проверки синтаксиса
+      // Ожидаем: [0:a][1:a]acrossfade=d=9:c1=par:c2=exp[acf]
+      expect(filterString).toMatch(/\[0:a\]\[1:a\]acrossfade=/);
+      expect(filterString).toMatch(/d=9/);
+      expect(filterString).toMatch(/c1=par/); // Проверяем реальные значения
+      expect(filterString).toMatch(/c2=exp/); // Проверяем реальные значения
+      expect(filterString).toMatch(/\[acf\]$/); // Выходная метка в конце
+
+      // ✅ ИСПРАВЛЕНИЕ 3: Убираем неправильную проверку
+      // Удаляем эту строку, так как она проверяет неправильный формат:
+      // expect(assembledArgs[filterIdx + 1]).toContain("acrossfade=d=9:c1=tri:c2=tri:ns=1234[outL]:extra=1");
+
+      await runFfmpeg(args);
+      expect(fs.existsSync(out)).toBe(true);
+
+      const buf = fs.readFileSync(out);
+      expect(buf.subarray(0, 3).toString("ascii")).toMatch(/^ID3/);
+      expect(fakeChecksum(out)).toMatch(/^[a-f0-9]{64}$/);
+    },
+    globalTimeout,
+  );
 });

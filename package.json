@@ -1,6 +1,6 @@
 {
   "name": "fluent-streamer",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Fluent FFmpeg wrapper with real-time audio effects, timeout and progress tracking.",
   "type": "module",
   "main": "dist/index.js",
@@ -16,9 +16,14 @@
   "author": "dirold2",
   "license": "MIT",
   "scripts": {
-    "build": "tsc",
-    "lint": "eslint . --ext .ts",
-    "format": "prettier --write \"src/**/*.ts\"",
+    "build": "tsc && esbuild 'dist/**/*.js' --outdir=dist --allow-overwrite --minify --sourcemap && d-build",
+    "dist": "d-dist",
+    "deploy": "npm run build && npm run dist",
+    "publish": "d-publish",
+    "lint": "oxlint src",
+    "lint:fix": "oxlint src --fix",
+    "format": "oxfmt src",
+    "format:check": "oxfmt src --check",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -27,14 +32,15 @@
     "execa": "^9.6.1"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
-    "@types/node": "^25.0.10",
-    "dotenv": "^17.2.3",
-    "eslint": "^9.39.2",
-    "prettier": "^3.8.1",
+    "@dirold2/dev-tools": "^1.1.0",
+    "@types/node": "^25.9.4",
+    "dotenv": "^17.4.2",
+    "esbuild": "^0.28.1",
+    "oxfmt": "^0.56.0",
+    "oxlint": "^1.71.0",
     "tslib": "^2.8.1",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.53.1",
-    "vitest": "^4.0.18"
+    "typescript-eslint": "^8.62.0",
+    "vitest": "^4.1.9"
   }
 }

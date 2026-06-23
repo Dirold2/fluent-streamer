@@ -64,11 +64,7 @@ export function userToGainDb(userVal: number, maxDb = 15): number {
  * @param ratio - Compression ratio
  * @returns Compressed sample
  */
-export function compressSample(
-  value: number,
-  threshold = 0.8,
-  ratio = 4,
-): number {
+export function compressSample(value: number, threshold = 0.8, ratio = 4): number {
   const abs = Math.abs(value);
   if (abs <= threshold) return value;
   const excess = abs - threshold;
@@ -258,11 +254,7 @@ export function calcPeakingCoeffs(
  * @param state - Состояние фильтра
  * @returns Выходной сэмпл
  */
-export function processBiquad(
-  input: number,
-  coeffs: BiquadCoeffs,
-  state: BiquadState,
-): number {
+export function processBiquad(input: number, coeffs: BiquadCoeffs, state: BiquadState): number {
   // Direct Form I: y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
   const output =
     coeffs.b0 * input +
@@ -400,10 +392,7 @@ export class AudioProcessor extends Transform {
   public startFade(targetVolume: number, durationMs: number): void {
     if (this.isTerminated()) return;
     const to = clampVolume(targetVolume);
-    const samples = Math.max(
-      1,
-      Math.round((durationMs / 1000) * this.sampleRate),
-    );
+    const samples = Math.max(1, Math.round((durationMs / 1000) * this.sampleRate));
 
     this.fadeFrom = this.volume;
     this.fadeTo = to;
@@ -454,9 +443,7 @@ export class AudioProcessor extends Transform {
     if (!this.fadeActive) return this.volume;
 
     const progress =
-      this.fadeSamplesTotal > 0
-        ? Math.min(1, this.fadeSamplesDone / this.fadeSamplesTotal)
-        : 1;
+      this.fadeSamplesTotal > 0 ? Math.min(1, this.fadeSamplesDone / this.fadeSamplesTotal) : 1;
 
     const current = this.fadeFrom + (this.fadeTo - this.fadeFrom) * progress;
     this.fadeSamplesDone++;
@@ -472,11 +459,7 @@ export class AudioProcessor extends Transform {
     return current;
   }
 
-  private processStereoSample(
-    left: number,
-    right: number,
-    volume: number,
-  ): [number, number] {
+  private processStereoSample(left: number, right: number, volume: number): [number, number] {
     let l = (left * volume) / 32768;
     let r = (right * volume) / 32768;
 
@@ -510,12 +493,7 @@ export class AudioProcessor extends Transform {
     const bassGainDb = userToGainDb(this.bass, 18);
 
     // 1. Low-Shelf фильтр на 120 Hz (основной бас)
-    const shelfCoeffs = calcLowShelfCoeffs(
-      120,
-      this.sampleRate,
-      bassGainDb,
-      0.7,
-    );
+    const shelfCoeffs = calcLowShelfCoeffs(120, this.sampleRate, bassGainDb, 0.7);
 
     l = processBiquad(l, shelfCoeffs, this.filterState.bassShelfL);
     r = processBiquad(r, shelfCoeffs, this.filterState.bassShelfR);
@@ -545,12 +523,7 @@ export class AudioProcessor extends Transform {
     const trebleGainDb = userToGainDb(this.treble, 12);
 
     // 1. High-Shelf фильтр на 8000 Hz (основные высокие частоты)
-    const shelfCoeffs = calcHighShelfCoeffs(
-      8000,
-      this.sampleRate,
-      trebleGainDb,
-      0.7,
-    );
+    const shelfCoeffs = calcHighShelfCoeffs(8000, this.sampleRate, trebleGainDb, 0.7);
 
     l = processBiquad(l, shelfCoeffs, this.filterState.trebleShelfL);
     r = processBiquad(r, shelfCoeffs, this.filterState.trebleShelfR);
@@ -586,11 +559,7 @@ export class AudioProcessor extends Transform {
     }
 
     const out = Buffer.from(buffer);
-    const samples = new Int16Array(
-      out.buffer,
-      out.byteOffset,
-      out.byteLength / 2,
-    );
+    const samples = new Int16Array(out.buffer, out.byteOffset, out.byteLength / 2);
 
     const frameCount = out.byteLength / this.frameSizeBytes;
     const hasFade = this.fadeActive;
@@ -601,7 +570,7 @@ export class AudioProcessor extends Transform {
       let peak = 0;
       const totalSamples = samples.length;
       for (let i = 0; i < totalSamples; i++) {
-        const v = samples[i];
+        const v = samples[i]!;
         const abs = v < 0 ? -v : v;
         if (abs > peak) peak = abs;
       }
@@ -613,7 +582,7 @@ export class AudioProcessor extends Transform {
 
     for (let frame = 0; frame < frameCount; frame++) {
       const idx = frame * this.channels;
-      const left = samples[idx];
+      const left = samples[idx]!;
       const right = samples[idx + 1] ?? left;
 
       if (hasFade) {
@@ -661,9 +630,7 @@ export class AudioProcessor extends Transform {
     try {
       if (this.isTerminated()) return callback();
 
-      const input = this.leftover
-        ? Buffer.concat([this.leftover, chunk])
-        : chunk;
+      const input = this.leftover ? Buffer.concat([this.leftover, chunk]) : chunk;
 
       const { aligned, remainder } = this.splitAligned(input);
       this.leftover = remainder;
@@ -680,9 +647,7 @@ export class AudioProcessor extends Transform {
     }
   }
 
-  override _flush(
-    callback: (error?: Error | null, data?: Buffer) => void,
-  ): void {
+  override _flush(callback: (error?: Error | null, data?: Buffer) => void): void {
     try {
       if (this.leftover && this.leftover.length > 0) {
         const padBytes =
@@ -723,9 +688,7 @@ export class AudioProcessor extends Transform {
       return Buffer.alloc(0);
     }
 
-    const input = this.leftover
-      ? Buffer.concat([this.leftover, buffer])
-      : buffer;
+    const input = this.leftover ? Buffer.concat([this.leftover, buffer]) : buffer;
 
     const { aligned, remainder } = this.splitAligned(input);
     this.leftover = remainder;
@@ -748,8 +711,7 @@ export class AudioProcessor extends Transform {
     }
 
     const padBytes =
-      (this.frameSizeBytes - (this.leftover.length % this.frameSizeBytes)) %
-      this.frameSizeBytes;
+      (this.frameSizeBytes - (this.leftover.length % this.frameSizeBytes)) % this.frameSizeBytes;
 
     const padded = padBytes
       ? Buffer.concat([this.leftover, Buffer.alloc(padBytes, 0)])

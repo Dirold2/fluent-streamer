@@ -7,12 +7,20 @@ import FluentStream from "../src/Core/FluentStream.js";
 const AUDIO_TEST_URL = "tests/320.mp3";
 class AudioService extends EventEmitter {
   public ffmpeg?: InstanceType<typeof FluentStream>;
-  public currentOptions: { volume: number; bass: number; headers?: Record<string, string> } = { volume: 0.5, bass: 1.0 };
+  public currentOptions: {
+    volume: number;
+    bass: number;
+    headers?: Record<string, string>;
+  } = { volume: 0.5, bass: 1.0 };
   public pipelineReady = false;
 
   async createAudioStreamForDiscord(
     url: string,
-    options?: Partial<{ volume: number; bass: number; headers?: Record<string, string> }>
+    options?: Partial<{
+      volume: number;
+      bass: number;
+      headers?: Record<string, string>;
+    }>,
   ): Promise<{ stream: Transform; type: string }> {
     if (options) Object.assign(this.currentOptions, options);
     const filters = [`volume=${this.currentOptions.volume}`];
@@ -26,24 +34,35 @@ class AudioService extends EventEmitter {
     const fluent = new FluentStream();
 
     // Устанавливаем заголовки, если заданы
-    if (this.currentOptions.headers && Object.keys(this.currentOptions.headers).length > 0) {
+    if (
+      this.currentOptions.headers &&
+      Object.keys(this.currentOptions.headers).length > 0
+    ) {
       fluent.setHeaders(this.currentOptions.headers);
     }
 
     fluent
       .input(url)
       .inputOptions(
-        "-fflags", "nobuffer",
-        "-flags", "low_delay",
-        "-probesize", "32",
-        "-analyzeduration", "0"
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-probesize",
+        "32",
+        "-analyzeduration",
+        "0",
       )
       .audioCodec("pcm_s16le")
       .outputOptions(
-        "-f", "s16le",
-        "-ar", "48000",
-        "-ac", "2",
-        "-af", filters.join(',')
+        "-f",
+        "s16le",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-af",
+        filters.join(","),
       )
       .output("pipe:1");
 
@@ -88,12 +107,13 @@ describe("AudioService / FluentStream integration", () => {
   async function safeAudioStreamCreation(url: string, options?: any) {
     try {
       return await service.createAudioStreamForDiscord(url, options);
-    } catch (error) {
+      // oxlint-disable-next-line no-unused-vars
+    } catch (_error) {
       // In test environment, network failures are expected
       // Return mock result to allow testing of non-network functionality
       return {
         stream: new Transform(),
-        type: "raw"
+        type: "raw",
       };
     }
   }

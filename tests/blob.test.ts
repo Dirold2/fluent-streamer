@@ -10,8 +10,10 @@ describe("Blob URL support", () => {
   });
 
   it("принимает blob URL через input метод", () => {
-    const blobUrl = "blob:nodedata:5f243e10-c206-46c2-83fc-6ee018f80508";
+    const blobUrl = "blob:nodedata:3e5ef187-6438-4a3a-bf45-a11b6406f6f8";
     stream.input(blobUrl);
+    
+    console.log(stream.getArgs)
     expect(stream.getArgs()).toEqual(["-i", "pipe:0"]);
   });
 

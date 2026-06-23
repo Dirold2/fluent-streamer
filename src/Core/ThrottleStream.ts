@@ -15,11 +15,7 @@ export class ThrottleStream extends Transform {
     this.bytesPerSecond = Math.max(1000, bytesPerSecond);
   }
 
-  _transform(
-    chunk: Buffer,
-    _encoding: string,
-    callback: (error?: Error | null) => void,
-  ) {
+  _transform(chunk: Buffer, _encoding: string, callback: (error?: Error | null) => void) {
     this.buffer.push(chunk);
 
     if (!this.isThrottling) {

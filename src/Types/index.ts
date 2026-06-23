@@ -36,6 +36,9 @@ export interface AudioProcessingOptions {
   compressor: boolean;
   normalize: boolean;
 
+  sampleRate?: number; // Hz (default: 48000)
+  channels?: number; // 1=mono, 2=stereo (default: 2)
+
   headers?: Record<string, string>;
   lowPassFrequency?: number;
   lowPassQ?: number;
@@ -86,10 +89,7 @@ export interface ProcessorOptions {
   wallTimeLimit?: number;
   executionId?: string;
 
-  onBeforeChildProcessSpawn?: (
-    ffmpegPath: string,
-    ffmpegArgs: string[],
-  ) => void | Promise<void>;
+  onBeforeChildProcessSpawn?: (ffmpegPath: string, ffmpegArgs: string[]) => void | Promise<void>;
 
   stderrLogHandler?: (line: string) => void;
 
@@ -264,48 +264,6 @@ export interface ProcessorDebugInfo {
 }
 
 /**
- * Публичный API Processor на уровне типов.
- * Реальная реализация находится в ../Core/Processor.js.
- */
-export interface Processor {
-  /** Итоговая склеенная конфигурация (с дефолтами). */
-  config: Required<Omit<ProcessorOptions, "logger">> & {
-    abortSignal?: AbortSignal;
-    logger: Logger;
-    verbose?: boolean;
-    debug?: boolean;
-    enableProgressTracking?: boolean;
-    useAudioProcessor: boolean;
-    audioProcessorOptions?: AudioProcessingOptions;
-  };
-
-  /** Lifecycle & state getters */
-  readonly pid: number | null;
-  isRunning(): boolean;
-
-  /** ffmpeg argument management */
-  setArgs(args: string[]): void;
-  getArgs(): string[];
-
-  /** Input / output management */
-  setExtraGlobalArgs(args: string[]): void;
-
-  /** Audio processor configuration */
-  enableAudioProcessor(enable: boolean): this;
-
-  /** Start ffmpeg + optional AudioProcessor chain */
-  run(): Promise<FFmpegRunResultExtended>;
-
-  /** Graceful shutdown and cleanup */
-  close(): Promise<void>;
-  kill(signal?: NodeJS.Signals): Promise<void>;
-  destroy(): void;
-
-  /** Debug helpers */
-  debugDump(): ProcessorDebugInfo;
-}
-
-/**
  * Options for crossfadeAudio helper.
  * Опции для helper-функции crossfadeAudio.
  */
@@ -338,20 +296,4 @@ export interface CrossfadeAudioOptions {
   extra?: string;
 }
 
-/**
- * Реальный класс Processor (значение) из Core.
- * В TypeScript можно импортировать его как значение:
- *
- *   import { Processor } from "fluent-streamer";
- *
- * а тип инстанса получить как:
- *
- *   import type { Processor as ProcessorType } from "fluent-streamer";
- */
-export { default as ProcessorClass } from "../Core/Processor.js";
-
-/**
- * Экспортируем AudioProcessor, чтобы можно было использовать его напрямую,
- * если кто‑то хочет собрать свою цепочку без Processor.
- */
-export { AudioProcessor };
+// Processor and AudioProcessor classes are exported from src/Core/index.ts

@@ -56,24 +56,8 @@ const DEFAULT_LOGGER: Logger = {
   debug: () => {},
   info: () => {},
   log: () => {},
-  warn: (msg: string, meta?: LogMeta) => {
-    if (process?.emitWarning) {
-      process.emitWarning(msg, { code: meta?.code });
-    }
-    if (meta?.stackTrace) {
-      console.warn("Stack (context):", meta.stackTrace);
-    }
-  },
-  error: (msg: string | Error, meta?: LogMeta) => {
-    if (process?.emitWarning) {
-      process.emitWarning(msg instanceof Error ? msg.message : msg, {
-        code: meta?.code,
-      });
-    }
-    if (meta?.stackTrace) {
-      console.error("Stack (context):", meta.stackTrace);
-    }
-  },
+  warn: () => {},
+  error: () => {},
 };
 
 // ============================================================================
@@ -104,19 +88,23 @@ function getStackTrace(skip = 2): string {
 function countInputs(
   args: string[],
   inputStreams: Array<{ stream: Readable; index: number }>,
+  inputSources: InputSource[],
 ): {
   streams: number;
   stringInputs: number;
+  urlInputs: number;
   total: number;
 } {
   let stringInputs = 0;
   for (let i = 0; i < args.length - 1; i++) {
     if (args[i] === "-i") stringInputs++;
   }
+  const urlInputs = inputSources.filter((s) => s.type === "url").length;
   return {
     streams: inputStreams.length,
     stringInputs,
-    total: stringInputs + inputStreams.length,
+    urlInputs,
+    total: stringInputs + inputStreams.length + urlInputs,
   };
 }
 
@@ -128,28 +116,39 @@ function summarizeInputs(
   args: string[],
   _inputStreams: Array<{ stream: Readable; index: number }>,
   complexFilters: string[],
+  inputSources: InputSource[],
 ): {
   stringInputs: string[];
+  urlInputs: string[];
   pipeStreams: string[];
   complexFilters: string[];
 } {
   const result: {
     stringInputs: string[];
+    urlInputs: string[];
     pipeStreams: string[];
     complexFilters: string[];
   } = {
     stringInputs: [],
+    urlInputs: [],
     pipeStreams: [],
     complexFilters: [...complexFilters],
   };
 
   for (let i = 0; i < args.length - 1; i++) {
     if (args[i] === "-i") {
-      if (/^pipe:\d+$/.test(args[i + 1])) {
-        result.pipeStreams.push(args[i + 1]);
+      const next = args[i + 1]!;
+      if (/^pipe:\d+$/.test(next)) {
+        result.pipeStreams.push(next);
       } else {
-        result.stringInputs.push(args[i + 1]);
+        result.stringInputs.push(next);
       }
+    }
+  }
+
+  for (const source of inputSources) {
+    if (source.type === "url") {
+      result.urlInputs.push(source.url);
     }
   }
 
@@ -192,9 +191,6 @@ export default class FluentStream extends EventEmitter {
 
   /** Static humanization headers / Статические заголовки гуманизации */
   static readonly HUMANITY_HEADERS = HUMANITY_HEADERS;
-
-  /** Static logger instance / Статический экземпляр логгера */
-  static logger: Logger = DEFAULT_LOGGER;
 
   // ============================================================================
   // PRIVATE PROPERTIES - CORE STATE
@@ -251,8 +247,7 @@ export default class FluentStream extends EventEmitter {
   // ============================================================================
 
   /** Logger instance / Экземпляр логгера */
-  private logger =
-    (this.constructor as typeof FluentStream).logger || DEFAULT_LOGGER;
+  private logger: Logger;
 
   /** Active processor result (after .run()) / Активный результат процессора (после .run()) */
   private processorResult: FFmpegRunResultExtended | null = null;
@@ -328,9 +323,6 @@ export default class FluentStream extends EventEmitter {
     this.enabledAudioProcessor = value;
   }
 
-  private _runInProgress: boolean = false;
-  private _runQueue: Array<() => void> = [];
-
   // ============================================================================
   // CONSTRUCTOR
   // ============================================================================
@@ -346,9 +338,8 @@ export default class FluentStream extends EventEmitter {
 
     this.options = { ...options };
     this.headers =
-      typeof options.headers === "object" && options.headers !== null
-        ? options.headers
-        : undefined;
+      typeof options.headers === "object" && options.headers !== null ? options.headers : undefined;
+    this.logger = options.logger ?? DEFAULT_LOGGER;
 
     // Initialize audio settings from options
     this.enabledAudioProcessor = options.useAudioProcessor ?? false;
@@ -371,7 +362,7 @@ export default class FluentStream extends EventEmitter {
     message: string,
     meta?: LogMeta,
   ): void {
-    const fullMeta = { ...(meta || {}) };
+    const fullMeta = { ...meta };
     if (!fullMeta.stackTrace) {
       fullMeta.stackTrace = getStackTrace();
     }
@@ -398,6 +389,8 @@ export default class FluentStream extends EventEmitter {
       treble: this.audioTreble,
       compressor: this.audioCompressor,
       normalize: false,
+      sampleRate: this.options.audioProcessorOptions?.sampleRate,
+      channels: this.options.audioProcessorOptions?.channels,
     };
     this.cachedOptionsHash = hash;
 
@@ -419,9 +412,7 @@ export default class FluentStream extends EventEmitter {
    * Create Processor with current configuration
    * Создать Processor с текущей конфигурацией
    */
-  private createProcessor(
-    extraOpts: Partial<ProcessorOptions> = {},
-  ): Processor {
+  private createProcessor(extraOpts: Partial<ProcessorOptions> = {}): Processor {
     const mergedHeaders = this.getMergedHeaders();
 
     const finalOptions: ProcessorOptions = {
@@ -588,11 +579,7 @@ export default class FluentStream extends EventEmitter {
   /**
    * Change all EQ during playback / Изменить все EQ во время воспроизведения
    */
-  public changeEqualizer(
-    bass: number,
-    treble: number,
-    compressor: boolean,
-  ): boolean {
+  public changeEqualizer(bass: number, treble: number, compressor: boolean): boolean {
     if (this.processorResult?.setEqualizer) {
       this.processorResult.setEqualizer(bass, treble, compressor);
       this.audioBass = bass;
@@ -635,16 +622,30 @@ export default class FluentStream extends EventEmitter {
         return this.inputBlob(input, opts?.pipeIndex);
       }
 
-      // String input (file or URL)
+      // URL input: track via inputSources (Processor.getFullArgs() handles headers + -i)
+      if (/^https?:\/\//i.test(input)) {
+        if (
+          !opts?.allowDuplicate &&
+          this.inputSources.some((s) => s.type === "url" && s.url === input)
+        ) {
+          this.emitLog("warn", `input(): Duplicate URL input detected: "${input}"`, {
+            code: "FluentStream-duplicate-url-input",
+          });
+          return this;
+        }
+        const index = this.inputSources.length;
+        this.inputSources.push({ type: "url", url: input, index });
+        return this;
+      }
+
+      // Local file input
       if (
         !opts?.allowDuplicate &&
         this.args.some((v, i) => v === "-i" && this.args[i + 1] === input)
       ) {
-        this.emitLog(
-          "warn",
-          `input(): Duplicate string input detected: "${input}"`,
-          { code: "FluentStream-duplicate-string-input" },
-        );
+        this.emitLog("warn", `input(): Duplicate string input detected: "${input}"`, {
+          code: "FluentStream-duplicate-string-input",
+        });
         return this;
       }
 
@@ -653,30 +654,19 @@ export default class FluentStream extends EventEmitter {
       // Stream input
       let streamIdx: number;
 
-      if (
-        opts?.pipeIndex != null &&
-        Number.isFinite(opts.pipeIndex) &&
-        opts.pipeIndex >= 0
-      ) {
+      if (opts?.pipeIndex != null && Number.isFinite(opts.pipeIndex) && opts.pipeIndex >= 0) {
         if (this.inputStreams.some((entry) => entry.index === opts.pipeIndex)) {
-          throw new FluentStreamValidationError(
-            `input(): Duplicate pipe index: ${opts.pipeIndex}`,
-          );
+          throw new FluentStreamValidationError(`input(): Duplicate pipe index: ${opts.pipeIndex}`);
         }
         streamIdx = opts.pipeIndex;
       } else {
         streamIdx = this.inputStreams.length;
       }
 
-      if (
-        !opts?.allowDuplicate &&
-        this.inputStreams.some((s) => s.stream === input)
-      ) {
-        this.emitLog(
-          "warn",
-          "input(): Duplicate Readable stream detected (skipped)",
-          { code: "FluentStream-duplicate-pipe" },
-        );
+      if (!opts?.allowDuplicate && this.inputStreams.some((s) => s.stream === input)) {
+        this.emitLog("warn", "input(): Duplicate Readable stream detected (skipped)", {
+          code: "FluentStream-duplicate-pipe",
+        });
         return this;
       }
 
@@ -694,27 +684,14 @@ export default class FluentStream extends EventEmitter {
   /**
    * Set output (file path or pipe) / Установить выход (путь файла или pipe)
    */
-  public output(
-    output: string | Readable | number | { pipe?: string } | undefined | null,
-  ): this {
+  public output(output: string | Readable | number | { pipe?: string } | undefined | null): this {
     this.requireClean("output");
 
-    if (
-      output &&
-      typeof output === "object" &&
-      "pipe" in output &&
-      output.pipe
-    ) {
+    if (output && typeof output === "object" && "pipe" in output && output.pipe) {
       const pipeName = output.pipe;
 
-      if (
-        pipeName === "stdout" ||
-        pipeName === "stderr" ||
-        pipeName === "1" ||
-        pipeName === "2"
-      ) {
-        const pipeTarget =
-          pipeName === "stdout" || pipeName === "1" ? "pipe:1" : "pipe:2";
+      if (pipeName === "stdout" || pipeName === "stderr" || pipeName === "1" || pipeName === "2") {
+        const pipeTarget = pipeName === "stdout" || pipeName === "1" ? "pipe:1" : "pipe:2";
         this.args.push(pipeTarget);
         return this;
       }
@@ -724,18 +701,11 @@ export default class FluentStream extends EventEmitter {
         return this;
       }
 
-      throw new FluentStreamValidationError(
-        `output(): Invalid pipe target: ${String(pipeName)}`,
-      );
+      throw new FluentStreamValidationError(`output(): Invalid pipe target: ${String(pipeName)}`);
     }
 
-    if (
-      output == null ||
-      (typeof output === "string" && output.trim().length === 0)
-    ) {
-      throw new FluentStreamValidationError(
-        "output(): requires non-empty string or pipe object",
-      );
+    if (output == null || (typeof output === "string" && output.trim().length === 0)) {
+      throw new FluentStreamValidationError("output(): requires non-empty string or pipe object");
     }
 
     this.args.push(String(output));
@@ -752,47 +722,17 @@ export default class FluentStream extends EventEmitter {
 
   /**
    * Set HTTP headers / Установить HTTP-заголовки
+   *
+   * Headers are passed to Processor which applies them to HTTP(S) inputs.
+   * They no longer appear in getArgs() — use Processor.getFullArgs() instead.
    */
-  public setHeaders(
-    headers?: Record<string, string> | null,
-    opts?: { merge?: boolean },
-  ): this {
+  public setHeaders(headers?: Record<string, string> | null, opts?: { merge?: boolean }): this {
     this.requireClean("setHeaders");
 
     if (headers == null) {
       this.headers = undefined;
     } else if (!opts?.merge) {
       this.headers = headers;
-
-      // Remove existing -headers from args
-      for (let i = 0; i < this.args.length; ) {
-        if (
-          this.args[i] === "-headers" &&
-          typeof this.args[i + 1] === "string"
-        ) {
-          this.args.splice(i, 2);
-        } else {
-          i++;
-        }
-      }
-
-      // Add new headers if provided
-      if (Object.keys(headers).length > 0) {
-        const headerString = Object.entries(headers)
-          .map(([k, v]) => {
-            const keyEsc = String(k).replace(/[;]/g, "\\;");
-            const valEsc = String(v).replace(/[;]/g, "\\;");
-            return `${keyEsc}: ${valEsc}`;
-          })
-          .join("\r\n");
-
-        const firstInput = this.args.findIndex((a) => a === "-i");
-        if (firstInput !== -1) {
-          this.args.splice(firstInput, 0, "-headers", headerString);
-        } else {
-          this.args.unshift("-headers", headerString);
-        }
-      }
     } else {
       this.headers = { ...this.headers, ...headers };
     }
@@ -808,10 +748,7 @@ export default class FluentStream extends EventEmitter {
 
     // Remove existing -user_agent
     for (let i = 0; i < this.args.length; ) {
-      if (
-        this.args[i] === "-user_agent" &&
-        typeof this.args[i + 1] === "string"
-      ) {
+      if (this.args[i] === "-user_agent" && typeof this.args[i + 1] === "string") {
         this.args.splice(i, 2);
       } else {
         i++;
@@ -828,9 +765,7 @@ export default class FluentStream extends EventEmitter {
 
       const hasHTTPInput = this.args.some(
         (v, idx, arr) =>
-          v === "-i" &&
-          typeof arr[idx + 1] === "string" &&
-          /^https?:\/\//.test(arr[idx + 1]),
+          v === "-i" && typeof arr[idx + 1] === "string" && /^https?:\/\//.test(arr[idx + 1]!),
       );
 
       if (!hasHTTPInput) {
@@ -987,10 +922,7 @@ export default class FluentStream extends EventEmitter {
   public seekInput(position: number | string): this {
     this.requireClean("seekInput");
 
-    if (
-      position == null ||
-      (typeof position === "string" && !position.trim())
-    ) {
+    if (position == null || (typeof position === "string" && !position.trim())) {
       throw new FluentStreamValidationError(
         "seekInput: position must be non-empty string or number",
       );
@@ -1044,9 +976,7 @@ export default class FluentStream extends EventEmitter {
    * Copy codecs without re-encoding / Копировать кодеки без перекодирования
    */
   public copyCodecs(): this {
-    if (
-      this.args.some((_v, i, arr) => arr[i] === "-c" && arr[i + 1] === "copy")
-    ) {
+    if (this.args.some((_v, i, arr) => arr[i] === "-c" && arr[i + 1] === "copy")) {
       return this;
     }
     this.args.push("-c", "copy");
@@ -1073,10 +1003,7 @@ export default class FluentStream extends EventEmitter {
    * @param durationSec Crossfade duration in seconds (длительность в секундах)
    * @param options Crossfade options (опции кроссфейда)
    */
-  public crossfadeAudio(
-    durationSec: number,
-    options: CrossfadeAudioOptions = {},
-  ): this {
+  public crossfadeAudio(durationSec: number, options: CrossfadeAudioOptions = {}): this {
     this.requireClean("crossfadeAudio");
 
     if (
@@ -1095,9 +1022,7 @@ export default class FluentStream extends EventEmitter {
       const second = options.secondInput;
 
       if (typeof second === "string") {
-        const already = this.args.some(
-          (v, i) => v === "-i" && this.args[i + 1] === second,
-        );
+        const already = this.args.some((v, i) => v === "-i" && this.args[i + 1] === second);
         if (!already) {
           this.input(second);
         }
@@ -1153,14 +1078,12 @@ export default class FluentStream extends EventEmitter {
     this.requireClean("inputBlob");
 
     if (!blobUrl || typeof blobUrl !== "string") {
-      throw new FluentStreamValidationError(
-        "inputBlob(): blobUrl must be a non-empty string",
-      );
+      throw new FluentStreamValidationError("inputBlob(): blobUrl must be a non-empty string");
     }
 
     const inputIndex = index ?? this.inputSources.length;
     this.inputSources.push({ type: "blob", blobUrl, index: inputIndex });
-    this.args.push("-i", "pipe:0"); // FFmpeg will read from stdin
+    this.args.push("-i", `pipe:${inputIndex}`);
 
     return this;
   }
@@ -1175,8 +1098,6 @@ export default class FluentStream extends EventEmitter {
     this.complexFilters = [];
     this.isDirty = false;
     this.processorResult = null;
-    this._runInProgress = false;
-    this._runQueue = [];
     return this;
   }
 
@@ -1254,10 +1175,7 @@ export default class FluentStream extends EventEmitter {
     }
 
     // Add wall-time limit if specified
-    if (
-      typeof this.options.wallTimeLimit === "number" &&
-      this.options.wallTimeLimit > 0
-    ) {
+    if (typeof this.options.wallTimeLimit === "number" && this.options.wallTimeLimit > 0) {
       finalArgs.push("-timelimit", String(this.options.wallTimeLimit));
     }
 
@@ -1269,10 +1187,11 @@ export default class FluentStream extends EventEmitter {
    */
   public getInputSummary(): {
     stringInputs: string[];
+    urlInputs: string[];
     pipeStreams: string[];
     complexFilters: string[];
   } {
-    return summarizeInputs(this.args, this.inputStreams, this.complexFilters);
+    return summarizeInputs(this.args, this.inputStreams, this.complexFilters, this.inputSources);
   }
 
   /**
@@ -1281,9 +1200,10 @@ export default class FluentStream extends EventEmitter {
   public countInputs(): {
     streams: number;
     stringInputs: number;
+    urlInputs: number;
     total: number;
   } {
-    return countInputs(this.args, this.inputStreams);
+    return countInputs(this.args, this.inputStreams, this.inputSources);
   }
 
   /**
@@ -1292,43 +1212,20 @@ export default class FluentStream extends EventEmitter {
    * WARNING: Instance becomes dirty after this. Call .clear() before reusing!
    * ВНИМАНИЕ: Экземпляр становится "грязным" после этого. Вызовите .clear() перед переиспользованием!
    */
-  public async run(
-    extraOpts: Partial<ProcessorOptions> = {},
-  ): Promise<FFmpegRunResultExtended> {
-    // Защита от параллельного запуска
-    if (this._runInProgress) {
-      // Ожидание завершения текущего запуска
-      await new Promise<void>((resolve) => {
-        this._runQueue.push(resolve);
-      });
-    }
-
+  public async run(extraOpts: Partial<ProcessorOptions> = {}): Promise<FFmpegRunResultExtended> {
     if (this.isDirty) {
       throw new FluentStreamValidationError(
         "FluentStream is dirty — `.clear()` required before next `.run()`",
       );
     }
 
-    this._runInProgress = true;
+    const processor = this.createProcessor(extraOpts);
+    this.isDirty = true;
+    this.processorResult = await processor.run();
 
-    try {
-      const processor = this.createProcessor(extraOpts);
-      this.isDirty = true;
-      this.processorResult = await processor.run();
+    await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // Ожидание начала процесса
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      return this.processorResult;
-    } finally {
-      this._runInProgress = false;
-
-      // Обработка очереди
-      if (this._runQueue.length > 0) {
-        const next = this._runQueue.shift();
-        next?.();
-      }
-    }
+    return this.processorResult;
   }
 
   // ============================================================================
