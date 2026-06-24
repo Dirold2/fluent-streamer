@@ -94,6 +94,7 @@ export interface ProcessorOptions {
   tailSilenceMs?: number;
   useAudioProcessor?: boolean;
   audioProcessorOptions?: AudioProcessingOptions;
+  autoDrainOutput?: boolean;
 }
 
 export interface FFmpegProgress {

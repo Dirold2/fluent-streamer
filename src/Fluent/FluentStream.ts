@@ -752,10 +752,26 @@ export default class FluentStream extends EventEmitter {
     return countInputs(this.args, this.inputStreams, this.inputSources);
   }
 
+  /**
+   * Runs the FFmpeg process with the configured arguments and streams.
+   * * @remarks
+   * Once `.run()` is called, the FluentStream instance becomes **dirty** to prevent
+   * accidental multiple executions or state mutations. If you want to reuse this
+   * instance for another FFmpeg execution, you must call `.clear()` first.
+   * * @example
+   * ```ts
+   * const result = await stream.input("in.mp3").output("out.wav").run();
+   * await result.done;
+   * * // For the next run:
+   * stream.clear().input("next.mp3").output("next.wav").run();
+   * ```
+   * * @throws {FluentStreamValidationError} If the stream is dirty (already executed without `.clear()`)
+   */
   public async run(extraOpts: Partial<ProcessorOptions> = {}): Promise<FFmpegRunResultExtended> {
     if (this.isDirty) {
       throw new FluentStreamValidationError(
-        "FluentStream is dirty — `.clear()` required before next `.run()`",
+        "FluentStream is dirty — you cannot call `.run()` multiple times on the same configuration. " +
+          "Call `.clear()` to reset the builder state before the next execution.",
       );
     }
     const processor = this.createProcessor(extraOpts);

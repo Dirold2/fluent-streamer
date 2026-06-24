@@ -521,7 +521,9 @@ describe("FluentStream API", () => {
   it.skipIf(!hasFfmpeg)(
     "effects persist after process end for next run (requires FFmpeg)",
     async () => {
-      const stream = new FluentStream({ useAudioProcessor: true });
+      const stream = new FluentStream({
+        useAudioProcessor: true,
+      });
       stream.input("tests/320.mp3").format("s16le").output("pipe:1");
 
       const result1 = await stream.run();
@@ -558,7 +560,9 @@ describe("FluentStream API", () => {
   it.skipIf(!hasFfmpeg)(
     "re-runs after process completion with preserved audio effect state (requires FFmpeg)",
     async () => {
-      const stream = new FluentStream({ useAudioProcessor: true });
+      const stream = new FluentStream({
+        useAudioProcessor: true,
+      });
 
       stream.input("tests/320.mp3").format("s16le").output("pipe:1");
       const firstRun = await stream.run();

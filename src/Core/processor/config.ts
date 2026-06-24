@@ -24,6 +24,7 @@ export type ProcessorConfig = {
   useAudioProcessor: boolean;
   inputSources: InputSource[];
   audioProcessorOptions: AudioProcessingOptions;
+  autoDrainOutput: boolean;
 };
 
 export function buildProcessorConfig(options: ProcessorOptions = {}): ProcessorConfig {
@@ -58,5 +59,6 @@ export function buildProcessorConfig(options: ProcessorOptions = {}): ProcessorC
       compressor: false,
       normalize: false,
     },
+    autoDrainOutput: options.autoDrainOutput ?? true,
   };
 }

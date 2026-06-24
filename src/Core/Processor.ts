@@ -108,7 +108,16 @@ export class Processor extends EventEmitter {
   public setInputStreams(
     streams: Array<{ stream: ReadableStream<Uint8Array>; index: number }>,
   ): this {
-    this.inputStreams = Array.isArray(streams) ? [...streams] : [];
+    const validStreams = Array.isArray(streams) ? [...streams] : [];
+
+    if (validStreams.length > 1) {
+      throw new Error(
+        "[fluent-streamer] FFmpeg supports only a single ReadableStream via standard input (pipe:0). " +
+          "Multiple stream inputs are not supported in cross-runtime environments.",
+      );
+    }
+
+    this.inputStreams = validStreams;
     return this;
   }
 
@@ -241,7 +250,9 @@ export class Processor extends EventEmitter {
     this.throttledOutput = throttledOutput;
     this._pipelinePromise = pipelinePromise;
     this.outputStream = outputTransformStream.readable;
-    ensureOutputDrained(outputTransformStream.readable);
+    if (this.config.autoDrainOutput) {
+      ensureOutputDrained(outputTransformStream.readable);
+    }
     this._startStderrReader();
 
     this.process.onExit((code, signal) => {

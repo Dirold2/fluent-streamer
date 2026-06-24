@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.3] – 2026-06-24
+
+### Added
+- **Early Input Stream Validation:** Added a strict guard in `Processor.setInputStreams()` that explicitly throws an error if multiple `ReadableStream` inputs are provided. This prevents pipeline corruption and formalizes the cross-runtime limitation of a single standard input (`pipe:0`).
+
+### Changed
+- **Output Auto-Drain Lifecycle:** Removed the unconditional `ensureOutputDrained()` call from the default execution path in `Processor.run()`. Auto-draining is now strictly opt-in via `config.autoDrainOutput`, protecting the beginning of the user's output stream from race conditions and premature chunk consumption.
+- **Builder Re-run UX:** Enhanced developer feedback when encountering the `isDirty` state in `FluentStream.run()`. Added comprehensive JSDoc documentation and revised the validation error message to explicitly guide users to invoke `.clear()` before reusing the stream instance.
+
 ## [0.5.2] – 2026-06-24
 
 ### Added
