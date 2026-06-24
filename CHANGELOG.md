@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.2] – 2026-06-24
+
+### Added
+- **Automated FFmpeg Discovery:** Introduced intelligent resolution of the FFmpeg binary path (`resolveFfmpegPath`). It seamlessly falls back across explicit paths, optional npm packages (`ffmpeg-static`, `@ffmpeg-installer/ffmpeg`) using dynamic `createRequire`, and global system binaries across Node.js, Bun, and Deno environments.
+
+### Fixed
+- **FluentStream state cleanup:** Automatically clear `this.processorResult` once the underlying execution promise (`result.done`) settles, preventing memory retention and stale tracking states.
+- **Test environment stability:** Guarded functional audio effect tests with `it.skipIf(!hasFfmpeg)` to prevent failures in environments or CI pipelines lacking a local FFmpeg installation.
+
 ## [0.5.1] – 2026-06-24
 
 ### Fixed

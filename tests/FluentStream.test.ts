@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { FluentStream } from "../src/index.js";
+import {
+  isFfmpegAvailable,
+  resolveFfmpegPath,
+} from "../src/Core/processor/ffmpegPath.js";
+
+const hasFfmpeg = await isFfmpegAvailable();
 
 describe("FluentStream API", () => {
   let stream: FluentStream;
@@ -183,6 +189,12 @@ describe("FluentStream API", () => {
     const s = new FluentStream({ debug: true });
     s.input("a.wav").output("b.wav").getArgs();
     expect(logs.length).toBe(0);
+  });
+
+  it("uses explicit ffmpegPath before package or system discovery", async () => {
+    await expect(resolveFfmpegPath("/custom/ffmpeg")).resolves.toBe(
+      "/custom/ffmpeg",
+    );
   });
 
   it("crossfadeAudio throws if input < 2", () => {
@@ -506,45 +518,69 @@ describe("FluentStream API", () => {
     expect(a1).toEqual(a2);
   });
 
-  it("effects persist after process end for next run", async () => {
-    const stream = new FluentStream({ useAudioProcessor: true });
-    stream.input("tests/320.mp3").format("s16le").output("pipe:1");
+  it.skipIf(!hasFfmpeg)(
+    "effects persist after process end for next run (requires FFmpeg)",
+    async () => {
+      const stream = new FluentStream({ useAudioProcessor: true });
+      stream.input("tests/320.mp3").format("s16le").output("pipe:1");
 
-    const result1 = await stream.run();
-    await result1.done;
+      const result1 = await stream.run();
+      await result1.done;
 
-    stream.setBass(10);
-    stream.setTreble(5);
-    stream.setCompressor(true);
+      expect(stream.changeBass(10)).toBe(false);
+      stream.setBass(10);
+      stream.setTreble(5);
+      stream.setCompressor(true);
 
-    stream
-      .clear()
-      .input("tests/320.mp3")
-      .audioCodec("pcm_s16le")
-      .outputOptions(
-        "-f",
-        "s16le",
-        "-ar",
-        "48000",
-        "-ac",
-        "2",
-        "-af",
-        "volume=0.1",
-      )
-      .output("pipe:1");
-    const result2 = await stream.run();
+      stream
+        .clear()
+        .input("tests/320.mp3")
+        .audioCodec("pcm_s16le")
+        .outputOptions(
+          "-f",
+          "s16le",
+          "-ar",
+          "48000",
+          "-ac",
+          "2",
+          "-af",
+          "volume=0.1",
+        )
+        .output("pipe:1");
+      const result2 = await stream.run();
 
-    expect(result2.audioProcessor?.bass).toBe(0.5);
-    expect(result2.audioProcessor?.treble).toBe(0.25);
-    expect(result2.audioProcessor?.compressor).toBe(true);
+      expect(result2.audioProcessor?.bass).toBe(0.5);
+      expect(result2.audioProcessor?.treble).toBe(0.25);
+      expect(result2.audioProcessor?.compressor).toBe(true);
+    },
+  );
 
-    result2.stop();
-    try {
-      await result2.done;
-    } catch {
-      //
-    }
-  });
+  it.skipIf(!hasFfmpeg)(
+    "re-runs after process completion with preserved audio effect state (requires FFmpeg)",
+    async () => {
+      const stream = new FluentStream({ useAudioProcessor: true });
+
+      stream.input("tests/320.mp3").format("s16le").output("pipe:1");
+      const firstRun = await stream.run();
+      await firstRun.done;
+
+      stream.setEqualizer(10, 5, true);
+
+      const secondRun = await stream
+        .clear()
+        .input("tests/320.mp3")
+        .audioCodec("pcm_s16le")
+        .outputOptions("-f", "s16le", "-ar", "48000", "-ac", "2")
+        .output("pipe:1")
+        .run();
+
+      expect(secondRun.audioProcessor?.bass).toBe(0.5);
+      expect(secondRun.audioProcessor?.treble).toBe(0.25);
+      expect(secondRun.audioProcessor?.compressor).toBe(true);
+
+      await secondRun.done;
+    },
+  );
 
   it("inputBlob throws for invalid blobUrl", () => {
     const stream = new FluentStream();

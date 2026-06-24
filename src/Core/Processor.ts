@@ -22,6 +22,7 @@ import {
 } from "./processor/pipeline.js";
 import { createSilenceBuffer, createSilenceMs } from "./processor/silence.js";
 import { StderrTracker, buildProcessExitError, readStderrStream } from "./processor/stderr.js";
+import { resolveFfmpegPath } from "./processor/ffmpegPath.js";
 
 type ProcessorState = "idle" | "running" | "terminating" | "finished" | "failed" | "closed";
 type TerminationReason = "user" | "close" | "timeout" | "destroy" | null;
@@ -164,6 +165,7 @@ export class Processor extends EventEmitter {
     this._totalChunks = 0;
 
     await this._resolveBlobSources();
+    this.config.ffmpegPath = await resolveFfmpegPath(this.config.ffmpegPath);
 
     const fullArgs = this.getFullArgs();
     this._executeBeforeSpawnHook(fullArgs);

@@ -760,11 +760,19 @@ export default class FluentStream extends EventEmitter {
     }
     const processor = this.createProcessor(extraOpts);
     this.isDirty = true;
-    this.processorResult = await processor.run();
+    const result = await processor.run();
+    this.processorResult = result;
+
+    const clearProcessorResult = () => {
+      if (this.processorResult === result) {
+        this.processorResult = null;
+      }
+    };
+    result.done.then(clearProcessorResult, clearProcessorResult);
 
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    return this.processorResult;
+    return result;
   }
 
   static get stdout(): { pipe: string } {
