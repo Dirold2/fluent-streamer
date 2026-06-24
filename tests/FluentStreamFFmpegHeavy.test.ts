@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import FluentStream from "../src/Core/FluentStream.js";
+import { FluentStream } from "../src/index.js";
 import path from "path";
 import fs from "fs";
 
@@ -21,13 +21,12 @@ async function cleanupDir() {
       try {
         fs.unlinkSync(path.join(__outDir, file));
       } catch {
-        // Ignore cleanup errors
+        //
       }
     }
   }
 }
 
-// Мокаем работу runFfmpeg (заглушка)
 async function runFfmpeg(args: string[], opts: { fail?: boolean } = {}) {
   const out = args[args.length - 1];
   if (opts.fail)
@@ -77,7 +76,7 @@ describe("@FluentStream.ts heavy integration / ffmpeg testing", () => {
       expect(fs.existsSync(outWav)).toBe(true);
 
       const buf = fs.readFileSync(outWav);
-      expect(buf.slice(0, 4).toString("ascii")).toBe("RIFF");
+      expect(buf.subarray(0, 4).toString("ascii")).toBe("RIFF");
       expect(fs.statSync(outWav).size).toBeGreaterThan(1000);
       expect(fakeChecksum(outWav)).toMatch(/^[a-f0-9]{64}$/);
     },
@@ -137,9 +136,8 @@ describe("@FluentStream.ts heavy integration / ffmpeg testing", () => {
 
       const s = new FluentStream();
 
-      // ✅ ИСПРАВЛЕНИЕ 1: Используем разные файлы ИЛИ allowDuplicate: true
       s.input(TEST_AUDIO);
-      s.input(TEST_AUDIO, { allowDuplicate: true }); // Разрешаем дубликат
+      s.input(TEST_AUDIO, { allowDuplicate: true });
 
       s.audioCodec("libmp3lame");
       s.crossfadeAudio(9, {
@@ -151,24 +149,17 @@ describe("@FluentStream.ts heavy integration / ffmpeg testing", () => {
       const args = s.getArgs();
       const assembledArgs = s.assembleArgs();
 
-      // Проверяем наличие -filter_complex
       const filterIdx = assembledArgs.indexOf("-filter_complex");
       expect(filterIdx).toBeGreaterThan(-1);
 
       const filterString = assembledArgs[filterIdx + 1];
       expect(typeof filterString).toBe("string");
 
-      // ✅ ИСПРАВЛЕНИЕ 2: Правильные проверки синтаксиса
-      // Ожидаем: [0:a][1:a]acrossfade=d=9:c1=par:c2=exp[acf]
       expect(filterString).toMatch(/\[0:a\]\[1:a\]acrossfade=/);
       expect(filterString).toMatch(/d=9/);
-      expect(filterString).toMatch(/c1=par/); // Проверяем реальные значения
-      expect(filterString).toMatch(/c2=exp/); // Проверяем реальные значения
-      expect(filterString).toMatch(/\[acf\]$/); // Выходная метка в конце
-
-      // ✅ ИСПРАВЛЕНИЕ 3: Убираем неправильную проверку
-      // Удаляем эту строку, так как она проверяет неправильный формат:
-      // expect(assembledArgs[filterIdx + 1]).toContain("acrossfade=d=9:c1=tri:c2=tri:ns=1234[outL]:extra=1");
+      expect(filterString).toMatch(/c1=par/);
+      expect(filterString).toMatch(/c2=exp/);
+      expect(filterString).toMatch(/\[acf\]$/);
 
       await runFfmpeg(args);
       expect(fs.existsSync(out)).toBe(true);

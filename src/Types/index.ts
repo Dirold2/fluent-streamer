@@ -1,9 +1,5 @@
-import { PassThrough, Readable, Transform } from "stream";
-import { AudioProcessor } from "../Core/AudioProcessor.js";
+import { AudioProcessor } from "../Audio/AudioProcessor.js";
 
-/**
- * Unified logging interface used across Processor and any higher-level wrappers.
- */
 export interface Logger {
   debug(message: string, meta?: LogMeta): void;
   info(message: string, meta?: LogMeta): void;
@@ -12,9 +8,6 @@ export interface Logger {
   error(message: string | Error, meta?: LogMeta): void;
 }
 
-/**
- * Optional structured metadata sent with log messages.
- */
 export interface LogMeta {
   code?: string;
   stackTrace?: string;
@@ -24,37 +17,28 @@ export interface LogMeta {
   complexFilters?: string[];
 }
 
-/**
- * Configuration for audio post‑processing chain (AudioProcessor).
- * Все значения в «юзерских» единицах (0–1 или условные dB‑слайдеры),
- * нормализация в реальные коэффициенты происходит внутри AudioProcessor.
- */
 export interface AudioProcessingOptions {
-  volume: number; // 0–1
-  bass: number; // -1..1 (или любая твоя шкала, маппится через normalizeBass)
-  treble: number; // -1..1
+  volume: number;
+  bass: number;
+  treble: number;
   compressor: boolean;
   normalize: boolean;
 
-  sampleRate?: number; // Hz (default: 48000)
-  channels?: number; // 1=mono, 2=stereo (default: 2)
+  sampleRate?: number;
+  channels?: number;
 
   headers?: Record<string, string>;
   lowPassFrequency?: number;
   lowPassQ?: number;
 
   fade?: {
-    fadein: number; // ms
-    fadeout: number; // ms
+    fadein: number;
+    fadeout: number;
   };
 }
 
-/**
- * Input source type: stream, URL, or blob
- * Тип входного источника: поток, URL или blob
- */
 export type InputSource =
-  | { type: "stream"; stream: Readable; index: number }
+  | { type: "stream"; stream: ReadableStream<Uint8Array>; index: number }
   | {
       type: "url";
       url: string;
@@ -63,10 +47,6 @@ export type InputSource =
     }
   | { type: "blob"; blobUrl: string; index: number };
 
-/**
- * Global ffmpeg & processor configuration.
- * Определяет путь к ffmpeg, логирование, лимиты и т.д.
- */
 export interface ProcessorOptions {
   ffmpegPath?: string;
 
@@ -89,13 +69,16 @@ export interface ProcessorOptions {
   wallTimeLimit?: number;
   executionId?: string;
 
-  onBeforeChildProcessSpawn?: (ffmpegPath: string, ffmpegArgs: string[]) => void | Promise<void>;
+  onBeforeChildProcessSpawn?: (
+    ffmpegPath: string,
+    ffmpegArgs: string[],
+  ) => void | Promise<void>;
 
   stderrLogHandler?: (line: string) => void;
 
   headers?: Record<string, string> | string;
   userAgent?: string;
-  inputStreams?: Array<{ stream: Readable; index: number }>;
+  inputStreams?: Array<{ stream: ReadableStream<Uint8Array>; index: number }>;
   inputSources?: InputSource[];
 
   disableThrottling?: boolean;
@@ -111,20 +94,11 @@ export interface ProcessorOptions {
     | "debug"
     | "trace";
 
-  /**
-   * Длительность «хвостовой тишины» в конце стрима (ms) для чистого завершения.
-   * Реализовано в Processor через tailSilenceMs.
-   */
   tailSilenceMs?: number;
-
-  /** Включает использование AudioProcessor и его начальную конфигурацию. */
   useAudioProcessor?: boolean;
   audioProcessorOptions?: AudioProcessingOptions;
 }
 
-/**
- * Real‑time ffmpeg progress (parsed from stderr).
- */
 export interface FFmpegProgress {
   frame?: number;
   fps?: number;
@@ -148,9 +122,6 @@ export interface FFmpegProgress {
   chapter?: number;
 }
 
-/**
- * Statistics about a single ffmpeg execution session.
- */
 export interface FFmpegStats {
   startTime: Date;
   endTime?: Date;
@@ -163,40 +134,18 @@ export interface FFmpegStats {
   bytesProcessed: number;
 }
 
-/**
- * Minimal result of a Processor run (base for chaining).
- */
 export interface FFmpegRunResult {
-  /** Основной выходной поток (PCM / то, что идёт в Discord и т.п.). */
-  output: PassThrough;
-
-  /** Promise, который резолвится при нормальном завершении и реджектится при ошибке. */
+  output: ReadableStream<Uint8Array>;
   done: Promise<void>;
-
-  /** Мягкая остановка процесса (SIGTERM/kill внутри Processor). */
   stop: () => void;
 }
 
-/**
- * Extended Processor result with full audio control and lifecycle management.
- */
 export interface FFmpegRunResultExtended extends FFmpegRunResult {
-  /** Тот же PassThrough, что и output; оставлен для обратной совместимости. */
-  passthrough: PassThrough;
-
-  /** Грейсфул‑закрытие пайплайна (end + kill + ожидание done). */
+  passthrough: ReadableStream<Uint8Array>;
   close: () => Promise<void> | void;
-
-  /** AudioProcessor instance, если включён useAudioProcessor. */
   audioProcessor?: AudioProcessor;
-
-  /** Поток после ThrottleStream (ограничение байтов/сек для реального времени). */
-  throttledOutput?: Transform;
-
-  /** Текущее состояние fade (если запущен). */
+  throttledOutput?: ReadableStream<Uint8Array>;
   currentFade?: { target: number; duration?: number };
-
-  /** Audio effects control API (если AudioProcessor активен). */
   setVolume?: (volume: number) => void;
   setBass?: (bass: number) => void;
   setTreble?: (treble: number) => void;
@@ -205,17 +154,10 @@ export interface FFmpegRunResultExtended extends FFmpegRunResult {
   startFade?: (targetVolume: number, durationMs: number) => void;
 }
 
-/**
- * ffmpeg execution options where input can be либо URL/путь, либо Readable‑стрим.
- * Если используешь наш Processor, обычно передаёшь только inputStreams, а не input.
- */
 export interface StreamableFFmpegOptions extends ProcessorOptions {
-  input?: string | Readable;
+  input?: string | ReadableStream<Uint8Array>;
 }
 
-/**
- * Job queued for execution by some внешнего FFmpegManager.
- */
 export interface FFmpegJob {
   name: string;
   options: StreamableFFmpegOptions;
@@ -223,10 +165,6 @@ export interface FFmpegJob {
   reject: (err: Error) => void;
 }
 
-/**
- * Global settings for managing ffmpeg jobs (retry, concurrency, etc).
- * Сам менеджер у тебя пока не реализован — это интерфейс под будущее.
- */
 export interface FFmpegManagerOptions {
   maxRestarts?: number;
   concurrency?: number;
@@ -235,9 +173,6 @@ export interface FFmpegManagerOptions {
   autoRestart?: boolean;
 }
 
-/**
- * Debug information returned by Processor.debugDump().
- */
 export interface ProcessorDebugInfo {
   pid: number | null;
   args: string[];
@@ -263,37 +198,12 @@ export interface ProcessorDebugInfo {
   timestamp: string;
 }
 
-/**
- * Options for crossfadeAudio helper.
- * Опции для helper-функции crossfadeAudio.
- */
 export interface CrossfadeAudioOptions {
-  /** Second input URL or Readable stream */
-  secondInput?: string | Readable;
-
-  /** Number of inputs to crossfade (default: 2) */
+  secondInput?: string | ReadableStream<Uint8Array>;
   inputs?: number;
-
-  /**
-   * Curve for fading out first stream (default: 'tri')
-   * Valid values: tri, qsin, esin, hsin, log, ipar, qua, cub, squ, cbr, par, exp, iqsin, ihsin, dese, desi, losi, nofade
-   */
   curve1?: string;
-
-  /**
-   * Curve for fading in second stream (default: 'tri')
-   * Valid values: tri, qsin, esin, hsin, log, ipar, qua, cub, squ, cbr, par, exp, iqsin, ihsin, dese, desi, losi, nofade
-   */
   curve2?: string;
-
-  /** Custom input labels (e.g., ['0:a', '1:a']) */
   inputLabels?: string[];
-
-  /** Output label for the crossfaded audio (default: 'acf') */
   outputLabel?: string;
-
-  /** Extra filters to apply after crossfade (as separate filter chain) */
   extra?: string;
 }
-
-// Processor and AudioProcessor classes are exported from src/Core/index.ts

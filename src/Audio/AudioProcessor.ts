@@ -1,69 +1,27 @@
-import { Transform } from "node:stream";
+import { EventEmitter } from "eventemitter3";
 
 import type { AudioProcessingOptions } from "../Types/index.js";
+import type { BiquadCoeffs, BiquadState, FilterState } from "../Types/audio.js";
+import {
+  VOLUME_MIN,
+  VOLUME_MAX,
+  BASS_MIN,
+  BASS_MAX,
+  TREBLE_MIN,
+  TREBLE_MAX,
+} from "../Types/audio.js";
 
-// ============================================================================
-// CONSTANTS
-// ============================================================================
-
-/** Minimum volume level / Минимальный уровень громкости */
-export const VOLUME_MIN = 0;
-
-/** Maximum volume level / Максимальный уровень громкости */
-export const VOLUME_MAX = 1;
-
-/** Minimum bass level (dB) / Минимальный уровень баса */
-export const BASS_MIN = -20;
-
-/** Maximum bass level (dB) / Максимальный уровень баса */
-export const BASS_MAX = 20;
-
-/** Minimum treble level (dB) / Минимальный уровень верхних частот */
-export const TREBLE_MIN = -20;
-
-/** Maximum treble level (dB) / Максимальный уровень верхних частот */
-export const TREBLE_MAX = 20;
-
-// ============================================================================
-// UTILITY FUNCTIONS
-// ============================================================================
-
-/**
- * Convert user-facing volume value to linear gain multiplier
- * Преобразовать значение громкости пользователя в линейный множитель усиления
- *
- * @param userVal - Value from -1 to 1
- * @param maxDb - Maximum dB range
- * @returns Linear gain multiplier
- */
 export function userToGainLinear(userVal: number, maxDb = 12): number {
   const v = Math.max(-1, Math.min(1, userVal));
   const db = Math.sign(v) * Math.pow(Math.abs(v), 0.5) * maxDb;
   return Math.pow(10, db / 20);
 }
 
-/**
- * Convert user-facing value to dB gain
- * Преобразовать пользовательское значение в усиление в дБ
- *
- * @param userVal - Value from -1 to 1
- * @param maxDb - Maximum dB range
- * @returns Gain in dB
- */
 export function userToGainDb(userVal: number, maxDb = 15): number {
   const v = Math.max(-1, Math.min(1, userVal));
   return Math.sign(v) * Math.pow(Math.abs(v), 0.5) * maxDb;
 }
 
-/**
- * Apply dynamic range compression to a single sample
- * Применить динамическое сжатие диапазона к одному сэмплу
- *
- * @param value - Audio sample (-1.0 to 1.0)
- * @param threshold - Compression threshold
- * @param ratio - Compression ratio
- * @returns Compressed sample
- */
 export function compressSample(value: number, threshold = 0.8, ratio = 4): number {
   const abs = Math.abs(value);
   if (abs <= threshold) return value;
@@ -72,18 +30,10 @@ export function compressSample(value: number, threshold = 0.8, ratio = 4): numbe
   return Math.sign(value) * compressed;
 }
 
-/**
- * Clamp volume to valid range
- * Ограничить громкость допустимым диапазоном
- */
 export function clampVolume(volume: number): number {
   return Math.max(VOLUME_MIN, Math.min(VOLUME_MAX, volume));
 }
 
-/**
- * Normalize bass value to -1..1 range
- * Нормализовать значение баса к диапазону -1..1
- */
 export function normalizeBass(bass: number): number {
   const range = BASS_MAX - BASS_MIN;
   if (range === 0) return 0;
@@ -91,10 +41,6 @@ export function normalizeBass(bass: number): number {
   return Math.max(-1, Math.min(1, normalized));
 }
 
-/**
- * Normalize treble value to -1..1 range
- * Нормализовать значение верхних частот к диапазону -1..1
- */
 export function normalizeTreble(treble: number): number {
   const range = TREBLE_MAX - TREBLE_MIN;
   if (range === 0) return 0;
@@ -102,42 +48,6 @@ export function normalizeTreble(treble: number): number {
   return Math.max(-1, Math.min(1, normalized));
 }
 
-// ============================================================================
-// BIQUAD FILTER IMPLEMENTATION
-// ============================================================================
-
-/**
- * Коэффициенты biquad фильтра
- * Biquad filter coefficients
- */
-export interface BiquadCoeffs {
-  b0: number;
-  b1: number;
-  b2: number;
-  a1: number;
-  a2: number;
-}
-
-/**
- * Состояние biquad фильтра (Direct Form I)
- * Biquad filter state (Direct Form I)
- */
-export interface BiquadState {
-  x1: number; // x[n-1]
-  x2: number; // x[n-2]
-  y1: number; // y[n-1]
-  y2: number; // y[n-2]
-}
-
-/**
- * Расчет коэффициентов Low-Shelf фильтра
- * Calculate Low-Shelf filter coefficients
- *
- * @param freq - Частота среза (Hz)
- * @param sampleRate - Частота дискретизации (Hz)
- * @param gainDb - Усиление в dB
- * @param Q - Q-фактор (обычно 0.7 для плавного наклона)
- */
 export function calcLowShelfCoeffs(
   freq: number,
   sampleRate: number,
@@ -158,7 +68,6 @@ export function calcLowShelfCoeffs(
   const a1 = -2 * (A - 1 + (A + 1) * cosW0);
   const a2 = A + 1 + (A - 1) * cosW0 - sqrtA2Alpha;
 
-  // Нормализация на a0
   return {
     b0: b0 / a0,
     b1: b1 / a0,
@@ -168,15 +77,6 @@ export function calcLowShelfCoeffs(
   };
 }
 
-/**
- * Расчет коэффициентов High-Shelf фильтра
- * Calculate High-Shelf filter coefficients
- *
- * @param freq - Частота среза (Hz)
- * @param sampleRate - Частота дискретизации (Hz)
- * @param gainDb - Усиление в dB
- * @param Q - Q-фактор (обычно 0.7 для плавного наклона)
- */
 export function calcHighShelfCoeffs(
   freq: number,
   sampleRate: number,
@@ -197,7 +97,6 @@ export function calcHighShelfCoeffs(
   const a1 = 2 * (A - 1 - (A + 1) * cosW0);
   const a2 = A + 1 - (A - 1) * cosW0 - sqrtA2Alpha;
 
-  // Нормализация на a0
   return {
     b0: b0 / a0,
     b1: b1 / a0,
@@ -207,15 +106,6 @@ export function calcHighShelfCoeffs(
   };
 }
 
-/**
- * Расчет коэффициентов Peaking EQ фильтра
- * Calculate Peaking EQ filter coefficients
- *
- * @param freq - Центральная частота (Hz)
- * @param sampleRate - Частота дискретизации (Hz)
- * @param gainDb - Усиление в dB
- * @param Q - Q-фактор (ширина полосы)
- */
 export function calcPeakingCoeffs(
   freq: number,
   sampleRate: number,
@@ -235,7 +125,6 @@ export function calcPeakingCoeffs(
   const a1 = -2 * cosW0;
   const a2 = 1 - alpha / A;
 
-  // Нормализация на a0
   return {
     b0: b0 / a0,
     b1: b1 / a0,
@@ -245,17 +134,7 @@ export function calcPeakingCoeffs(
   };
 }
 
-/**
- * Применить biquad фильтр к сэмплу (Direct Form I)
- * Apply biquad filter to sample (Direct Form I)
- *
- * @param input - Входной сэмпл
- * @param coeffs - Коэффициенты фильтра
- * @param state - Состояние фильтра
- * @returns Выходной сэмпл
- */
 export function processBiquad(input: number, coeffs: BiquadCoeffs, state: BiquadState): number {
-  // Direct Form I: y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
   const output =
     coeffs.b0 * input +
     coeffs.b1 * state.x1 +
@@ -263,7 +142,6 @@ export function processBiquad(input: number, coeffs: BiquadCoeffs, state: Biquad
     coeffs.a1 * state.y1 -
     coeffs.a2 * state.y2;
 
-  // Обновить состояние
   state.x2 = state.x1;
   state.x1 = input;
   state.y2 = state.y1;
@@ -272,46 +150,25 @@ export function processBiquad(input: number, coeffs: BiquadCoeffs, state: Biquad
   return output;
 }
 
-// ============================================================================
-// AUDIO FILTER STATE
-// ============================================================================
-
-/**
- * State variables for improved audio equalizer filters
- * Переменные состояния для улучшенного эквалайзера
- */
-export interface FilterState {
-  // Bass section - используем 2 biquad фильтра
-  bassShelfL: BiquadState;
-  bassShelfR: BiquadState;
-  bassPeakL: BiquadState;
-  bassPeakR: BiquadState;
-
-  // Treble section - используем 2 biquad фильтра
-  trebleShelfL: BiquadState;
-  trebleShelfR: BiquadState;
-  treblePeakL: BiquadState;
-  treblePeakR: BiquadState;
-}
-
-/**
- * Initialize biquad state
- * Инициализация состояния biquad фильтра
- */
 function initBiquadState(): BiquadState {
   return { x1: 0, x2: 0, y1: 0, y2: 0 };
 }
 
-// ============================================================================
-// AUDIO PROCESSOR CLASS
-// ============================================================================
+function concatUint8(arrays: Uint8Array[]): Uint8Array {
+  const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const arr of arrays) {
+    result.set(arr, offset);
+    offset += arr.length;
+  }
+  return result;
+}
 
-/**
- * Real-time PCM audio processor with improved EQ filters
- * Процессор аудио-потока PCM в реальном времени с улучшенными фильтрами
- * Format: 48 kHz, 16-bit stereo PCM s16le
- */
-export class AudioProcessor extends Transform {
+export class AudioProcessor extends EventEmitter {
+  readonly readable: ReadableStream<Uint8Array>;
+  readonly writable: WritableStream<Uint8Array>;
+
   public volume: number;
   public bass: number;
   public treble: number;
@@ -329,7 +186,17 @@ export class AudioProcessor extends Transform {
     treblePeakR: initBiquadState(),
   };
 
+  private bassCoeffs: {
+    shelf: BiquadCoeffs;
+    peak: BiquadCoeffs | null;
+  } | null = null;
+  private trebleCoeffs: {
+    shelf: BiquadCoeffs;
+    peak: BiquadCoeffs | null;
+  } | null = null;
+
   private isDestroyed = false;
+  private isWritableEnded = false;
   private fadeActive = false;
   private fadeFrom = 1;
   private fadeTo = 1;
@@ -339,7 +206,15 @@ export class AudioProcessor extends Transform {
   private readonly sampleRate: number;
   private readonly channels: number;
   private readonly frameSizeBytes: number;
-  private leftover: Buffer | null = null;
+  private leftover: Uint8Array | null = null;
+
+  get destroyed(): boolean {
+    return this.isDestroyed;
+  }
+
+  get writableEnded(): boolean {
+    return this.isWritableEnded;
+  }
 
   constructor(
     options: AudioProcessingOptions & {
@@ -355,13 +230,7 @@ export class AudioProcessor extends Transform {
       channels: 2,
     },
   ) {
-    super({
-      readableObjectMode: false,
-      writableObjectMode: false,
-      allowHalfOpen: false,
-      decodeStrings: true,
-      highWaterMark: 4096,
-    });
+    super();
 
     this.sampleRate = options.sampleRate ?? 48000;
     this.channels = options.channels ?? 2;
@@ -372,6 +241,46 @@ export class AudioProcessor extends Transform {
     this.treble = normalizeTreble(options.treble ?? 0);
     this.compressor = !!options.compressor;
     this.normalize = !!options.normalize;
+
+    this.invalidateCoeffs();
+
+    const transform = new TransformStream<Uint8Array, Uint8Array>({
+      transform: (chunk, controller) => {
+        if (this.isTerminated()) return;
+
+        const input = this.leftover ? concatUint8([this.leftover, chunk]) : chunk;
+
+        const aligned = this.splitAligned(input);
+        this.leftover = aligned.remainder;
+
+        if (aligned.aligned.length > 0) {
+          const processed = this.processPcmBufferAligned(aligned.aligned);
+          controller.enqueue(processed);
+        }
+      },
+      flush: (controller) => {
+        if (this.leftover && this.leftover.length > 0) {
+          const padBytes =
+            (this.frameSizeBytes - (this.leftover.length % this.frameSizeBytes)) %
+            this.frameSizeBytes;
+
+          const padded = padBytes
+            ? concatUint8([this.leftover, new Uint8Array(padBytes)])
+            : this.leftover;
+
+          this.leftover = null;
+
+          const processed = this.processPcmBufferAligned(padded);
+          if (processed.length > 0) {
+            controller.enqueue(processed);
+          }
+        }
+        this.isWritableEnded = true;
+      },
+    });
+
+    this.readable = transform.readable;
+    this.writable = transform.writable;
 
     this.setupEventHandlers();
   }
@@ -412,6 +321,7 @@ export class AudioProcessor extends Transform {
     this.bass = normalizeBass(bass);
     this.treble = normalizeTreble(treble);
     this.compressor = compressor;
+    this.invalidateCoeffs();
   }
 
   public setCompressor(enabled: boolean): void {
@@ -436,7 +346,12 @@ export class AudioProcessor extends Transform {
   }
 
   private isTerminated(): boolean {
-    return this.isDestroyed || this.destroyed || this.writableEnded;
+    return this.isDestroyed || this.isWritableEnded;
+  }
+
+  private invalidateCoeffs(): void {
+    this.bassCoeffs = null;
+    this.trebleCoeffs = null;
   }
 
   private nextVolume(): number {
@@ -485,61 +400,45 @@ export class AudioProcessor extends Transform {
     return [outL, outR];
   }
 
-  /**
-   * Применить улучшенные басовые фильтры
-   * Apply improved bass filters
-   */
   private applyBassFilter(l: number, r: number): [number, number] {
-    const bassGainDb = userToGainDb(this.bass, 18);
+    if (!this.bassCoeffs) {
+      const gainDb = userToGainDb(this.bass, 18);
+      const shelf = calcLowShelfCoeffs(120, this.sampleRate, gainDb, 0.7);
+      let peak: BiquadCoeffs | null = null;
+      if (Math.abs(gainDb) > 6) {
+        peak = calcPeakingCoeffs(60, this.sampleRate, gainDb * 0.5, 1.0);
+      }
+      this.bassCoeffs = { shelf, peak };
+    }
 
-    // 1. Low-Shelf фильтр на 120 Hz (основной бас)
-    const shelfCoeffs = calcLowShelfCoeffs(120, this.sampleRate, bassGainDb, 0.7);
+    l = processBiquad(l, this.bassCoeffs.shelf, this.filterState.bassShelfL);
+    r = processBiquad(r, this.bassCoeffs.shelf, this.filterState.bassShelfR);
 
-    l = processBiquad(l, shelfCoeffs, this.filterState.bassShelfL);
-    r = processBiquad(r, shelfCoeffs, this.filterState.bassShelfR);
-
-    // 2. Peaking EQ на 60 Hz для глубокого баса (опционально при большом усилении)
-    if (Math.abs(bassGainDb) > 6) {
-      const peakQ = 1.0; // Узкая полоса для точного контроля
-      const peakCoeffs = calcPeakingCoeffs(
-        60,
-        this.sampleRate,
-        bassGainDb * 0.5, // Меньше усиления чем shelf
-        peakQ,
-      );
-
-      l = processBiquad(l, peakCoeffs, this.filterState.bassPeakL);
-      r = processBiquad(r, peakCoeffs, this.filterState.bassPeakR);
+    if (this.bassCoeffs.peak) {
+      l = processBiquad(l, this.bassCoeffs.peak, this.filterState.bassPeakL);
+      r = processBiquad(r, this.bassCoeffs.peak, this.filterState.bassPeakR);
     }
 
     return [l, r];
   }
 
-  /**
-   * Применить улучшенные фильтры высоких частот
-   * Apply improved treble filters
-   */
   private applyTrebleFilter(l: number, r: number): [number, number] {
-    const trebleGainDb = userToGainDb(this.treble, 12);
+    if (!this.trebleCoeffs) {
+      const gainDb = userToGainDb(this.treble, 12);
+      const shelf = calcHighShelfCoeffs(8000, this.sampleRate, gainDb, 0.7);
+      let peak: BiquadCoeffs | null = null;
+      if (gainDb > 3) {
+        peak = calcPeakingCoeffs(12000, this.sampleRate, gainDb * 0.3, 1.2);
+      }
+      this.trebleCoeffs = { shelf, peak };
+    }
 
-    // 1. High-Shelf фильтр на 8000 Hz (основные высокие частоты)
-    const shelfCoeffs = calcHighShelfCoeffs(8000, this.sampleRate, trebleGainDb, 0.7);
+    l = processBiquad(l, this.trebleCoeffs.shelf, this.filterState.trebleShelfL);
+    r = processBiquad(r, this.trebleCoeffs.shelf, this.filterState.trebleShelfR);
 
-    l = processBiquad(l, shelfCoeffs, this.filterState.trebleShelfL);
-    r = processBiquad(r, shelfCoeffs, this.filterState.trebleShelfR);
-
-    // 2. Peaking EQ на 12000 Hz для воздушности (опционально при усилении)
-    if (trebleGainDb > 3) {
-      const peakQ = 1.2; // Умеренная ширина
-      const peakCoeffs = calcPeakingCoeffs(
-        12000,
-        this.sampleRate,
-        trebleGainDb * 0.3, // Небольшое усиление для воздушности
-        peakQ,
-      );
-
-      l = processBiquad(l, peakCoeffs, this.filterState.treblePeakL);
-      r = processBiquad(r, peakCoeffs, this.filterState.treblePeakR);
+    if (this.trebleCoeffs.peak) {
+      l = processBiquad(l, this.trebleCoeffs.peak, this.filterState.treblePeakL);
+      r = processBiquad(r, this.trebleCoeffs.peak, this.filterState.treblePeakR);
     }
 
     return [l, r];
@@ -552,13 +451,18 @@ export class AudioProcessor extends Transform {
     });
   }
 
-  private processPcmBufferAligned(buffer: Buffer): Buffer {
+  private processPcmBufferAligned(buffer: Uint8Array): Uint8Array {
     if (buffer.length === 0) return buffer;
     if (this.shouldBypass()) {
       return buffer;
     }
 
-    const out = Buffer.from(buffer);
+    let out = buffer;
+
+    if (out.byteOffset % 2 !== 0) {
+      out = out.slice();
+    }
+
     const samples = new Int16Array(out.buffer, out.byteOffset, out.byteLength / 2);
 
     const frameCount = out.byteLength / this.frameSizeBytes;
@@ -605,15 +509,15 @@ export class AudioProcessor extends Transform {
     return out;
   }
 
-  private splitAligned(input: Buffer): {
-    aligned: Buffer;
-    remainder: Buffer | null;
+  private splitAligned(input: Uint8Array): {
+    aligned: Uint8Array;
+    remainder: Uint8Array | null;
   } {
     const remainderBytes = input.length % this.frameSizeBytes;
     const alignedBytes = input.length - remainderBytes;
 
     if (alignedBytes === 0) {
-      return { aligned: Buffer.alloc(0), remainder: input };
+      return { aligned: new Uint8Array(0), remainder: input };
     }
 
     const aligned = input.subarray(0, alignedBytes);
@@ -622,99 +526,42 @@ export class AudioProcessor extends Transform {
     return { aligned, remainder };
   }
 
-  override _transform(
-    chunk: Buffer,
-    _encoding: string,
-    callback: (err?: Error | null, data?: Buffer) => void,
-  ): void {
-    try {
-      if (this.isTerminated()) return callback();
-
-      const input = this.leftover ? Buffer.concat([this.leftover, chunk]) : chunk;
-
-      const { aligned, remainder } = this.splitAligned(input);
-      this.leftover = remainder;
-
-      if (aligned.length === 0) {
-        return callback();
-      }
-
-      const processed = this.processPcmBufferAligned(aligned);
-      return callback(undefined, processed);
-    } catch (err) {
-      this.destroy(err as Error);
-      return callback();
-    }
-  }
-
-  override _flush(callback: (error?: Error | null, data?: Buffer) => void): void {
-    try {
-      if (this.leftover && this.leftover.length > 0) {
-        const padBytes =
-          (this.frameSizeBytes - (this.leftover.length % this.frameSizeBytes)) %
-          this.frameSizeBytes;
-
-        const padded = padBytes
-          ? Buffer.concat([this.leftover, Buffer.alloc(padBytes, 0)])
-          : this.leftover;
-
-        this.leftover = null;
-
-        const processed = this.processPcmBufferAligned(padded);
-        if (processed.length > 0) {
-          this.push(processed);
-        }
-      }
-
-      callback();
-    } catch (e) {
-      callback(e as Error);
-    }
-  }
-
-  override destroy(error?: Error): this {
-    if (this.isDestroyed) return this;
-    this.isDestroyed = true;
-    this.leftover = null;
-    return super.destroy(error);
-  }
-
-  public processBuffer(buffer: Buffer): Buffer {
+  public processBuffer(buffer: Uint8Array): Uint8Array {
     if (this.isTerminated()) {
-      return Buffer.alloc(0);
+      return new Uint8Array(0);
     }
 
     if (buffer.length === 0) {
-      return Buffer.alloc(0);
+      return new Uint8Array(0);
     }
 
-    const input = this.leftover ? Buffer.concat([this.leftover, buffer]) : buffer;
+    const input = this.leftover ? concatUint8([this.leftover, buffer]) : buffer;
 
     const { aligned, remainder } = this.splitAligned(input);
     this.leftover = remainder;
 
     if (aligned.length === 0) {
-      return Buffer.alloc(0);
+      return new Uint8Array(0);
     }
 
     return this.processPcmBufferAligned(aligned);
   }
 
-  public flushBuffer(): Buffer {
+  public flushBuffer(): Uint8Array {
     if (this.isTerminated()) {
       this.leftover = null;
-      return Buffer.alloc(0);
+      return new Uint8Array(0);
     }
 
     if (!this.leftover || this.leftover.length === 0) {
-      return Buffer.alloc(0);
+      return new Uint8Array(0);
     }
 
     const padBytes =
       (this.frameSizeBytes - (this.leftover.length % this.frameSizeBytes)) % this.frameSizeBytes;
 
     const padded = padBytes
-      ? Buffer.concat([this.leftover, Buffer.alloc(padBytes, 0)])
+      ? concatUint8([this.leftover, new Uint8Array(padBytes)])
       : this.leftover;
 
     this.leftover = null;

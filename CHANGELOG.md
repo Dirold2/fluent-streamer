@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] – 2026-06-24
+
+### Added
+
+- **Multi-runtime support:** automatic FFmpeg runner selection for Node.js, Bun, Deno, and Browser
+- **Browser runner:** optional `@ffmpeg/ffmpeg` + `@ffmpeg/core` integration via `BrowserFFmpegRunner`
+- **Web Streams API:** `run()` returns `ReadableStream<Uint8Array>`; Node.js streams are adapted internally for input
+- **Module layout:** `Fluent/` (API), `Core/` (Processor), `Runner/` (platform runners), `Audio/` (effects), `Types/` (split types)
+- **`FFmpegRunner` abstraction:** `spawn`, `resolveBlobUrl`, and lazy `FFmpegManager` for runtime-specific process handling
+- **Property accessors:** `volume`, `bass`, `treble`, `compressor`, `useAudioProcessor` on `FluentStream` with live effect updates during playback
+
+### Changed
+
+- **Breaking:** package exports are named — use `import { FluentStream } from "fluent-streamer"` (default export removed from public API)
+- **Breaking:** `.run()` is now `async` and returns `Promise<FFmpegRunResultExtended>`
+- **`FluentStream`** moved from `Core/` to `Fluent/`; **`AudioProcessor`** moved to `Audio/`
+- **`Processor`** refactored to use platform runners and Web Streams throughout the pipeline
+- **Types** split into `Types/core.ts`, `Types/audio.ts`, and `Types/index.ts`
+- **Tooling:** ESLint/Prettier replaced with oxlint/oxfmt (`oxlintrc.json`)
+
+### Fixed
+
+- Stream input/output handling aligned with cross-runtime Web Streams contract
+- Blob URL resolution delegated to the active runner when available
+
 ## [0.4.0] — 2026-06-23
 
 ### Bug Fixes

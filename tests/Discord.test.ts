@@ -1,9 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { Transform } from "stream";
-import { EventEmitter } from "events";
-import FluentStream from "../src/Core/FluentStream.js";
+import { EventEmitter } from "eventemitter3";
+import { FluentStream } from "../src/index.js";
 
-// Use local test file to avoid network calls in tests
 const AUDIO_TEST_URL = "tests/320.mp3";
 class AudioService extends EventEmitter {
   public ffmpeg?: InstanceType<typeof FluentStream>;
@@ -21,7 +19,7 @@ class AudioService extends EventEmitter {
       bass: number;
       headers?: Record<string, string>;
     }>,
-  ): Promise<{ stream: Transform; type: string }> {
+  ): Promise<{ stream: ReadableStream<Uint8Array>; type: string }> {
     if (options) Object.assign(this.currentOptions, options);
     const filters = [`volume=${this.currentOptions.volume}`];
 
@@ -68,7 +66,6 @@ class AudioService extends EventEmitter {
 
     this.ffmpeg = fluent;
 
-    // Запуск процесса
     const { output, done } = await fluent.run();
 
     done
@@ -81,7 +78,7 @@ class AudioService extends EventEmitter {
     this.pipelineReady = true;
     this.emit("debug", `[AudioService] Stream created for ${url}`);
 
-    return { stream: output as Transform, type: "raw" };
+    return { stream: output as ReadableStream<Uint8Array>, type: "raw" };
   }
 
   async destroy() {
@@ -103,16 +100,17 @@ describe("AudioService / FluentStream integration", () => {
     await service.destroy();
   });
 
-  // Helper function to handle network errors gracefully
   async function safeAudioStreamCreation(url: string, options?: any) {
     try {
       return await service.createAudioStreamForDiscord(url, options);
       // oxlint-disable-next-line no-unused-vars
     } catch (_error) {
-      // In test environment, network failures are expected
-      // Return mock result to allow testing of non-network functionality
       return {
-        stream: new Transform(),
+        stream: new ReadableStream<Uint8Array>({
+          start(c) {
+            c.close();
+          },
+        }),
         type: "raw",
       };
     }
@@ -121,7 +119,7 @@ describe("AudioService / FluentStream integration", () => {
   it("создаёт audio stream", async () => {
     const result = await safeAudioStreamCreation(AUDIO_TEST_URL);
     expect(result).toHaveProperty("stream");
-    expect(result.stream).toBeInstanceOf(Transform);
+    expect(result.stream).toBeInstanceOf(ReadableStream);
     expect(result.type).toBe("raw");
   });
 

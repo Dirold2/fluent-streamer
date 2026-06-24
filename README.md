@@ -2,17 +2,18 @@
 
 [Перейти на русскую версию](./lang/ru/README.md)
 
-_Fluent_ FFmpeg wrapper for Node.js, written in TypeScript. **v0.4.0**  
+_Fluent_ FFmpeg wrapper for TypeScript runtimes, **v0.5.0**  
 Offers a fluent, chainable API for media/audio/video processing with FFmpeg, supporting streams, crossfade, audio effects, timeouts, and progress tracking.
 
 - **TypeScript-first**: typed, chainable, and modern
-- **Streaming**: easy integration with Node streams
+- **Cross-runtime**: Node.js, Bun, Deno, and Browser (via `@ffmpeg/ffmpeg`)
+- **Web Streams**: native `ReadableStream`/`WritableStream` with Node.js stream compatibility
 - **Audio processing**: built-in EQ, volume, compression controls
 - **Human-friendly**: good defaults and self-describing API
 - **Advanced features**: crossfade, format conversion, codec control, kill/timeout, progress
 
 > Powered by [FFmpeg](https://ffmpeg.org/).  
-> Works in Node.js and supports streaming (no file required).
+> Works in Node.js, Bun, Deno, and the browser. Streaming does not require files on disk.
 
 ---
 
@@ -35,12 +36,29 @@ pnpm install github:dirold2/fluent-streamer
 bun install github:dirold2/fluent-streamer
 ```
 
+**Browser (optional):** install FFmpeg WASM bindings alongside the package:
+
+```bash
+npm install @ffmpeg/ffmpeg @ffmpeg/core
+```
+
+The browser runner is selected automatically when `window` is defined.
+
+### Migrating from 0.4.x
+
+| 0.4.x | 0.5.0 |
+|-------|-------|
+| `import FluentStream from "fluent-streamer"` | `import { FluentStream } from "fluent-streamer"` |
+| `const { done } = fs.run()` | `const { done } = await fs.run()` |
+| `output: Readable` (Node.js) | `output: ReadableStream<Uint8Array>` |
+| `.output(fs.createWriteStream(...))` | `.output("file.wav")` or pipe `output` from `.run()` |
+
 ---
 
 ## Usage
 
 ```ts
-import FluentStream from "fluent-streamer";
+import { FluentStream } from "fluent-streamer";
 
 // Basic conversion example
 const fs = new FluentStream()
@@ -49,8 +67,9 @@ const fs = new FluentStream()
   .audioBitrate("192k")
   .output("output.m4a");
 
-const { done } = fs.run();
-done.then(() => console.log("Conversion finished."));
+const { done } = await fs.run();
+await done;
+console.log("Conversion finished.");
 ```
 
 ---
@@ -58,20 +77,35 @@ done.then(() => console.log("Conversion finished."));
 ### Stream Processing
 
 ```ts
-import FluentStream from "fluent-streamer";
+import { FluentStream } from "fluent-streamer";
 import fs from "node:fs";
 
+// Node.js streams are accepted as input (adapted to Web Streams internally)
 const input = fs.createReadStream("track.mp3");
-const output = fs.createWriteStream("new.wav");
 
 const f = new FluentStream()
   .input(input)
   .format("wav")
-  .output(output);
+  .output("new.wav");
 
-f.run().done.then(() => {
-  console.log("Done streaming!");
-});
+await f.run();
+console.log("Done streaming!");
+```
+
+For piped output, use `pipe:1` and consume the returned stream:
+
+```ts
+const { output, done } = await new FluentStream()
+  .input(input)
+  .format("wav")
+  .output("pipe:1")
+  .run();
+
+// Pipe Web Stream to a destination (Node.js 18+)
+import { Writable } from "node:stream";
+const file = fs.createWriteStream("new.wav");
+await output.pipeTo(Writable.toWeb(file));
+await done;
 ```
 
 ---
@@ -79,8 +113,9 @@ f.run().done.then(() => {
 ### Crossfade Example
 
 ```ts
-const streamer = new FluentStream();
-streamer
+import { FluentStream } from "fluent-streamer";
+
+await new FluentStream()
   .input("a.mp3")
   .input("b.mp3")
   .crossfadeAudio(2.5)    // 2.5 seconds crossfade
@@ -91,33 +126,35 @@ streamer
 ### Advanced Streaming Example
 
 ```ts
-const https = require('https');
+import { FluentStream } from "fluent-streamer";
+import { Readable } from "node:stream";
 
 // Stream from HTTP source to response
-app.get('/audio/:fileId', async (req, res) => {
+app.get("/audio/:fileId", async (req, res) => {
   const audioUrl = `https://cdn.example.com/audio/${req.params.fileId}.mp3`;
 
   try {
     const streamer = new FluentStream()
       .input(audioUrl)
       .setHeaders({
-        'Authorization': 'Bearer token',
-        'X-Client-Id': 'my-app'
+        Authorization: "Bearer token",
+        "X-Client-Id": "my-app",
       })
-      .audioCodec('aac')
-      .audioBitrate('128k')
-      .format('mp3')
+      .audioCodec("aac")
+      .audioBitrate("128k")
+      .format("mp3")
       .output(FluentStream.stdout);
 
-    const { output } = await streamer.run();
+    const { output, done } = await streamer.run();
 
-    res.setHeader('Content-Type', 'audio/mpeg');
-    res.setHeader('Content-Disposition', 'inline; filename="converted.mp3"');
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Content-Disposition", 'inline; filename="converted.mp3"');
 
-    output.pipe(res);
+    Readable.fromWeb(output).pipe(res);
+    await done;
   } catch (error) {
-    console.error('Audio stream error:', error);
-    res.status(500).send('Streaming failed');
+    console.error("Audio stream error:", error);
+    res.status(500).send("Streaming failed");
   }
 });
 ```
@@ -125,30 +162,31 @@ app.get('/audio/:fileId', async (req, res) => {
 ### Real-time Audio Effects
 
 ```ts
+import { FluentStream } from "fluent-streamer";
+
 // Create streamer for live audio processing
 const streamer = new FluentStream({
   enableProgressTracking: true,
-  useAudioProcessor: true
+  useAudioProcessor: true,
 });
 
-const inputStream = getAudioSource();
-const outputStream = fs.createWriteStream('processed.wav');
+const inputStream = getAudioSource(); // ReadableStream<Uint8Array> or Node.js Readable
 
-const { output, done } = streamer
+const { output, done } = await streamer
   .input(inputStream)
-  .audioCodec('pcm_s16le')
+  .audioCodec("pcm_s16le")
   .audioFrequency(44100)
   .audioChannels(2)
-  .output(outputStream)
+  .output("pipe:1")
   .run();
 
-// Adjust audio effects in real-time
-streamer.changeVolume(1.5);  // Boost volume by 50%
-streamer.changeBass(5);      // Increase bass
-streamer.changeTreble(-3);   // Reduce treble
+// Adjust audio effects in real-time (property accessors or change* methods)
+streamer.volume = 1.5;   // Boost volume by 50%
+streamer.bass = 5;       // Increase bass
+streamer.treble = -3;    // Reduce treble
 
 // Listen for progress events
-streamer.on('progress', (progress) => {
+streamer.on("progress", (progress) => {
   console.log(`Processing: ${progress.progress}%`);
 });
 
@@ -158,21 +196,23 @@ await done;
 ### Fade Effects and Transitions
 
 ```ts
+import { FluentStream } from "fluent-streamer";
+
 // Fade in/out example
 const streamer = new FluentStream()
-  .input('background-music.mp3')
-  .setVolume(0)  // Start silent
-  .output('fade-demo.mp3');
+  .input("background-music.mp3")
+  .setVolume(0) // Start silent
+  .output("fade-demo.mp3");
+
+const { done } = await streamer.run();
 
 // Fade in over 2 seconds
-await new Promise(resolve => setTimeout(resolve, 1000));
-streamer.fadeIn(1, 2000);  // Target volume 1, fade time 2000ms
+await new Promise((resolve) => setTimeout(resolve, 1000));
+streamer.fadeIn(1, 2000); // Target volume 1, fade time 2000ms
 
-await new Promise(resolve => setTimeout(resolve, 8000));
-// Fade out over 3 seconds
-streamer.fadeOut(3000);
+await new Promise((resolve) => setTimeout(resolve, 8000));
+streamer.fadeOut(3000); // Fade out over 3 seconds
 
-const { done } = streamer.run();
 await done;
 ```
 
@@ -181,20 +221,21 @@ await done;
 ### Audio Effects Control
 
 ```ts
-// Real-time audio adjustments during playback
+import { FluentStream } from "fluent-streamer";
+
 const streamer = new FluentStream({
   enableProgressTracking: true,
-  useAudioProcessor: true
+  useAudioProcessor: true,
 })
   .input("music.mp3")
-  .setVolume(1.5)     // Increase volume by 50%
-  .setBass(8)         // Boost bass
-  .setTreble(-3)      // Cut treble slightly
+  .setVolume(1.5)      // Increase volume by 50%
+  .setBass(8)          // Boost bass
+  .setTreble(-3)       // Cut treble slightly
   .setCompressor(true) // Enable dynamic compression
   .output("enhanced.wav");
 
-// Adjust effects during playback
-await streamer.run().done;
+const { done } = await streamer.run();
+await done;
 ```
 
 ---
@@ -204,7 +245,9 @@ await streamer.run().done;
 `FluentStream` provides a _fluent_ interface:
 
 ```ts
-new FluentStream()
+import { FluentStream } from "fluent-streamer";
+
+await new FluentStream()
   .input("song.mp3")
   .seekInput(30)          // seek to 30s
   .audioCodec("opus")
@@ -214,8 +257,8 @@ new FluentStream()
 ```
 
 Main methods:
-- `.input(src)` — add file/stream input
-- `.output(dst)` — set the output (file/stream/fd)
+- `.input(src)` — add file/URL/stream input (`string`, `ReadableStream<Uint8Array>`, or Node.js Readable)
+- `.output(dst)` — set the output (file path, pipe object, or fd)
 - `.audioCodec(codec)` / `.videoCodec(codec)` — set codecs
 - `.audioBitrate(bps)` / `.videoBitrate(bps)`
 - `.format(fmt)` — set output format (e.g. 'mp3', 'wav')
@@ -223,7 +266,7 @@ Main methods:
 - `.overwrite()` — overwrite output file(s)
 - `.map(spec)` — select specific streams
 - `.crossfadeAudio(seconds, options?)` — crossfade (audio)
-- `.run()` — start processing (returns output, done, stop)
+- `.run()` — start processing (async; returns `output`, `done`, `stop`)
 
 ---
 
@@ -247,8 +290,8 @@ Creates a new FluentStream instance with optional processor options.
 
 ### Input/Output Methods
 
-#### `.input(source: string | Readable, options?: InputOptions)`
-Add file, URL, or stream input.
+#### `.input(source: string | ReadableStream<Uint8Array> | NodeJS.Readable, options?: InputOptions)`
+Add file, URL, blob URL, or stream input.
 ```ts
 // File input
 .input('/path/to/audio.mp3')
@@ -256,7 +299,10 @@ Add file, URL, or stream input.
 // HTTP URL with custom headers
 .input('https://cdn.com/track.mp3')
 
-// Stream input
+// Web Stream input
+.input(readableStream)
+
+// Node.js stream input (adapted internally)
 .input(fs.createReadStream('input.wav'), { pipeIndex: 0 })
 ```
 
@@ -265,21 +311,18 @@ Add file, URL, or stream input.
 - `pipeIndex?: number` - Custom pipe index for streams
 - `allowDuplicate?: boolean` - Allow duplicate inputs
 
-#### `.output(destination: string | Readable | number | PipeObject)`
+#### `.output(destination: string | number | PipeObject)`
 Set output destination.
 ```ts
 // File output (auto-overwrites if .overwrite() called)
 .output('/path/to/output.mp4')
 
-// Stream output
-.output(fs.createWriteStream('out.wav'))
-
-// Stdout
+// Stdout / pipe
 .output(FluentStream.stdout)
-
-// Pipe
 .output({ pipe: 'pipe:1' })
 ```
+
+For stream consumers, use `pipe:1` and read the `output` stream returned by `.run()`.
 
 ### Audio/Video Configuration
 
@@ -388,13 +431,16 @@ Add FFmpeg arguments at specific positions.
 
 ### Runtime Control
 
-#### `.run(options?) → Promise<FFmpegRunResult>`
-Start processing. Returns:
+#### `.run(options?) → Promise<FFmpegRunResultExtended>`
+Start processing asynchronously. Returns:
 ```ts
 {
-  output: Readable,     // Output stream if piped
-  done: Promise<void>,  // Completion promise
-  stop: () => void      // Stop function
+  output: ReadableStream<Uint8Array>,  // Output stream when piped
+  done: Promise<void>,                 // Completion promise
+  stop: () => void,                    // Stop function
+  passthrough: ReadableStream<Uint8Array>,
+  close: () => Promise<void> | void,
+  setVolume?, setBass?, setTreble?, setCompressor?, setEqualizer?, startFade?
 }
 ```
 
@@ -431,9 +477,10 @@ Check instance state.
 
 ## Types & Extensibility
 
-- **Written in TypeScript:** All primary objects (FluentStream, Processor) are strongly typed
-- **Built-in Audio processing:** Volume, EQ, compression effects through `AudioProcessor` class
-- **Extensible architecture:** Built-in audio filters with real-time capabilities
+- **Written in TypeScript:** All primary objects (`FluentStream`, `Processor`) are strongly typed
+- **Modular layout:** `Fluent/` (API), `Core/` (execution), `Runner/` (platform FFmpeg), `Audio/` (effects)
+- **Built-in audio processing:** Volume, EQ, compression via `AudioProcessor` and `AudioEffectController`
+- **Extensible runners:** Implement `FFmpegRunner` for custom process spawning or blob resolution
 
 ---
 
@@ -535,8 +582,8 @@ console.log('Debug info:', streamer.debugInfo());
 
 ### Compatibility
 
-**Node.js versions:** 18+ recommended
-**FFmpeg versions:** 4.0+ required, 5.0+ recommended
+**Runtimes:** Node.js 18+, Bun, Deno, Browser (with `@ffmpeg/ffmpeg`)  
+**FFmpeg versions:** 4.0+ required, 5.0+ recommended (native runtimes)  
 **OS support:** Linux, macOS, Windows, Docker containers
 
 **Known limitations:**
@@ -561,10 +608,21 @@ npm test
 
 ### Code Style
 
-- **TypeScript:** Strict typing required, ESLint compliant
+- **TypeScript:** Strict typing required, oxlint compliant
 - **Naming:** CamelCase for classes, camelCase for methods/properties
 - **Documentation:** JSDoc comments for all public APIs
 - **Tests:** Vitest-based, aim for >90% coverage
+
+### Project Structure
+
+```
+src/
+  Fluent/     — FluentStream builder API
+  Core/       — Processor, ThrottleStream, utilities
+  Runner/     — FFmpegRunner + platform runners (node, bun, deno, browser)
+  Audio/      — AudioProcessor, AudioEffectController
+  Types/      — Shared TypeScript interfaces
+```
 
 ### Adding Features
 
@@ -578,10 +636,9 @@ npm test
 
 The `AudioProcessor` class provides built-in audio effects that can be extended:
 
-- **Real-time effects**: Volume, EQ, compression available during playback
-- **Custom AudioProcessor**: Extend `AudioProcessor` class for new effects
-- **Integration**: Effects are automatically applied to PCM audio streams
-- **Performance**: C++ bindings ensure low-latency processing
+- **Real-time effects:** Volume, EQ, compression available during playback
+- **Custom AudioProcessor:** Extend `AudioProcessor` for new effects
+- **Integration:** Effects are applied to PCM audio streams in the processing pipeline
 
 ### Reporting Issues
 
@@ -595,7 +652,7 @@ When reporting bugs, please include:
 ### Features Roadmap
 
 - Enhanced video processing filters
-- WebAssembly audio processing for browsers
+- Improved browser/WASM audio processing
 - GPU acceleration for video encoding
 - Advanced audio analysis features
 - Streaming server integrations

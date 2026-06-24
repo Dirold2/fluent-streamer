@@ -1,9 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import FluentStream from "../src/Core/FluentStream.js";
-import { Readable } from "stream";
-
-// NOTE: These tests reflect the current FluentStream API contract (architecture).
-
+import { FluentStream } from "../src/index.js";
 
 describe("FluentStream API", () => {
   let stream: FluentStream;
@@ -18,7 +14,10 @@ describe("FluentStream API", () => {
   });
 
   it("puts globalOptions first", () => {
-    stream.input("in.mp3").output("out.mp3").globalOptions("-y", "-hide_banner");
+    stream
+      .input("in.mp3")
+      .output("out.mp3")
+      .globalOptions("-y", "-hide_banner");
     const args = stream.getArgs();
     expect(args[0]).toBe("-y");
     expect(args).toContain("-hide_banner");
@@ -43,12 +42,17 @@ describe("FluentStream API", () => {
       .audioBitrate("192k")
       .output("bar.mkv");
     expect(stream.getArgs()).toEqual([
-      "-i", "foo.mp4",
-      "-c:v", "libx264",
-      "-c:a", "aac",
-      "-b:v", "1M",
-      "-b:a", "192k",
-      "bar.mkv"
+      "-i",
+      "foo.mp4",
+      "-c:v",
+      "libx264",
+      "-c:a",
+      "aac",
+      "-b:v",
+      "1M",
+      "-b:a",
+      "192k",
+      "bar.mkv",
     ]);
   });
 
@@ -96,15 +100,8 @@ describe("FluentStream API", () => {
   it("complexFilter passes correct args to getArgs", () => {
     stream.input("a.wav").complexFilter("[0:a]loudnorm[aout]").output("b.wav");
     const args = stream.getArgs();
-    // The test only expects -i and output because complexFilter may not always push -filter_complex into args if no output or if implementation omits empty filters,
-    // so loosen the test: check that -filter_complex and the filter are present somewhere, but keep main .toEqual for minimal arg list
-    expect(args).toEqual([
-      "-i", "a.wav", "b.wav"
-    ]);
-    // But also check that the filter IS tracked (for coverage)
+    expect(args).toEqual(["-i", "a.wav", "b.wav"]);
     expect(stream["complexFilters"]).toContain("[0:a]loudnorm[aout]");
-    // Additionally, check "-filter_complex" in args, if present,
-    // it should always be followed by the correct filter string.
     const filterIdx = args.indexOf("-filter_complex");
     if (filterIdx !== -1) {
       expect(args[filterIdx + 1]).toBe("[0:a]loudnorm[aout]");
@@ -114,32 +111,36 @@ describe("FluentStream API", () => {
   it("crossfadeAudio appends acrossfade filter with correct syntax", () => {
     const s = new FluentStream();
     s.input("a.mp3").input("b.mp3").crossfadeAudio(2.5);
-    
+
     const filters = s["complexFilters"];
-    
-    // Проверяем количество фильтров
+
     expect(filters).toHaveLength(1);
-    
-    // Проверяем структуру: входы + фильтр + параметры + выход
+
     const filter = filters[0];
-    expect(filter).toMatch(/^\[0:a\]\[1:a\]/);           // Входные метки
-    expect(filter).toContain("acrossfade=");             // Название фильтра
-    expect(filter).toContain("d=2.5");                   // Длительность
-    expect(filter).toContain("c1=tri");                  // Кривая 1
-    expect(filter).toContain("c2=tri");                  // Кривая 2
-    expect(filter).toMatch(/\[acf\]$/);                  // Выходная метка
-    
-    // Или полная проверка
+    expect(filter).toMatch(/^\[0:a\]\[1:a\]/);
+    expect(filter).toContain("acrossfade=");
+    expect(filter).toContain("d=2.5");
+    expect(filter).toContain("c1=tri");
+    expect(filter).toContain("c2=tri");
+    expect(filter).toMatch(/\[acf\]$/);
     expect(filter).toBe("[0:a][1:a]acrossfade=d=2.5:c1=tri:c2=tri[acf]");
   });
 
-
-
-  it("throws if adding a 2nd Readable input with duplicate pipeIndex", () => {
-    const readable1 = new Readable({ read() {} });
-    const readable2 = new Readable({ read() {} });
+  it("throws if adding a 2nd ReadableStream input with duplicate pipeIndex", () => {
+    const readable1 = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.close();
+      },
+    });
+    const readable2 = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.close();
+      },
+    });
     stream.input(readable1);
-    expect(() => stream.input(readable2, { pipeIndex: 0 })).toThrow(/duplicate pipe index|Cannot add multiple streams|already has a stream/i);
+    expect(() => stream.input(readable2, { pipeIndex: 0 })).toThrow(
+      /duplicate pipe index|Cannot add multiple streams|already has a stream/i,
+    );
   });
 
   it("getArgs returns a copy, not reference", () => {
@@ -154,7 +155,6 @@ describe("FluentStream API", () => {
     stream.input("a.wav").output("b.wav");
     stream.clear();
     expect(stream.getArgs()).toEqual([]);
-    // Verify that clear actually resets by checking that new inputs work
     stream.input("c.wav").output("d.wav");
     expect(stream.getArgs()).toEqual(["-i", "c.wav", "d.wav"]);
   });
@@ -168,10 +168,14 @@ describe("FluentStream API", () => {
   });
 
   it("chained input/output is supported", () => {
-    stream.input("foo1.mp3").input("foo2.mp3").output("bar1.aac").output("bar2.aac");
+    stream
+      .input("foo1.mp3")
+      .input("foo2.mp3")
+      .output("bar1.aac")
+      .output("bar2.aac");
     const args = stream.getArgs();
-    expect(args.filter(x => x === "-i").length).toBe(2);
-    expect(args.filter(x => x.endsWith(".aac")).length).toBe(2);
+    expect(args.filter((x) => x === "-i").length).toBe(2);
+    expect(args.filter((x) => x.endsWith(".aac")).length).toBe(2);
   });
 
   it("constructor logger is accepted", () => {
@@ -223,7 +227,10 @@ describe("FluentStream API", () => {
   it("format keeps last value if called multiple times", () => {
     stream.input("a.wav").format("mp3").format("aac").output("res.aac");
     const args = stream.getArgs();
-    const fIdxs = args.reduce<number[]>((arr, v, i) => v === "-f" ? arr.concat(i) : arr, []);
+    const fIdxs = args.reduce<number[]>(
+      (arr, v, i) => (v === "-f" ? arr.concat(i) : arr),
+      [],
+    );
     expect(fIdxs.length).toBe(1);
     expect(args[args.indexOf("-f") + 1]).toBe("aac");
   });
@@ -231,12 +238,16 @@ describe("FluentStream API", () => {
   it("copyCodecs does not duplicate args on multiple calls", () => {
     stream.input("a.mkv").copyCodecs().copyCodecs().output("b.mkv");
     const args = stream.getArgs();
-    expect(args.filter(v => v === "-c").length).toBe(1);
-    expect(args.filter(v => v === "copy").length).toBe(1);
+    expect(args.filter((v) => v === "-c").length).toBe(1);
+    expect(args.filter((v) => v === "copy").length).toBe(1);
   });
 
-  it("input supports Readable as pipe:0", () => {
-    const r = new Readable({ read() {} });
+  it("input supports ReadableStream as pipe:0", () => {
+    const r = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.close();
+      },
+    });
     stream.input(r).output("a.wav");
     expect(stream.getArgs()).toEqual(["-i", "pipe:0", "a.wav"]);
   });
@@ -252,8 +263,16 @@ describe("FluentStream API", () => {
   });
 
   it("supports two pipe inputs", () => {
-    const r1 = new Readable({ read() {} });
-    const r2 = new Readable({ read() {} });
+    const r1 = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.close();
+      },
+    });
+    const r2 = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.close();
+      },
+    });
     stream.input(r1);
     stream.input(r2);
     const args = stream.getArgs();
@@ -262,7 +281,11 @@ describe("FluentStream API", () => {
   });
 
   it("clear clears inputStreams", () => {
-    const r = new Readable({ read() {} });
+    const r = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.close();
+      },
+    });
     stream.input(r);
     stream.clear();
   });
@@ -278,19 +301,32 @@ describe("FluentStream API", () => {
     stream.input("a.wav").duration(0).output("b.wav");
     const idx = stream.getArgs().indexOf("-t");
     expect(idx).toBeGreaterThan(-1);
-    expect(stream.getArgs()[idx+1]).toBe("0");
+    expect(stream.getArgs()[idx + 1]).toBe("0");
   });
 
   it("multiple output works", () => {
     stream.input("in.wav").output("a.mp3").output("b.ogg");
-    expect(stream.getArgs().filter(a => a.endsWith(".mp3") || a.endsWith(".ogg"))).toEqual(["a.mp3", "b.ogg"]);
+    expect(
+      stream.getArgs().filter((a) => a.endsWith(".mp3") || a.endsWith(".ogg")),
+    ).toEqual(["a.mp3", "b.ogg"]);
   });
 
   it("combines input/output/globalOptions sequences", () => {
-    stream.input("a.wav").output("o1.mp3").globalOptions("-act").input("b.wav").output("o2.mp3");
-    expect(stream.getArgs()).toEqual(
-      ["-act", "-i", "a.wav", "o1.mp3", "-i", "b.wav", "o2.mp3"]
-    );
+    stream
+      .input("a.wav")
+      .output("o1.mp3")
+      .globalOptions("-act")
+      .input("b.wav")
+      .output("o2.mp3");
+    expect(stream.getArgs()).toEqual([
+      "-act",
+      "-i",
+      "a.wav",
+      "o1.mp3",
+      "-i",
+      "b.wav",
+      "o2.mp3",
+    ]);
   });
 
   it("object headers in options serialize properly", () => {
@@ -298,14 +334,17 @@ describe("FluentStream API", () => {
     const humanityHeader = {
       "X-Human-Intent": "true",
       "X-Request-Attention": "just-want-to-do-my-best",
-      "User-Agent": "FluentStream/1.0 (friendly bot)"
+      "User-Agent": "FluentStream/1.0 (friendly bot)",
     };
     const allHeaders = { ..._headers, ...humanityHeader };
     const origGetArgs = stream.getArgs.bind(stream);
     stream.getArgs = function () {
       const baseArgs = origGetArgs();
       const mergedHeaders = { ..._headers, ...humanityHeader };
-      const hdrString = Object.entries(mergedHeaders).map(([k, v]) => `${k}: ${v}`).join("\r\n") + "\r\n";
+      const hdrString =
+        Object.entries(mergedHeaders)
+          .map(([k, v]) => `${k}: ${v}`)
+          .join("\r\n") + "\r\n";
       return [...baseArgs, "-headers", hdrString];
     };
     const args = stream.getArgs();
@@ -315,10 +354,14 @@ describe("FluentStream API", () => {
     expect(hdrString).toMatch(/foo: bar/i);
     expect(hdrString).toMatch(/baz: quux/i);
     expect(hdrString).toMatch(/X-Human-Intent: true/);
-    expect(hdrString).toMatch(/User-Agent: FluentStream\/1\.0 \(friendly bot\)/i);
+    expect(hdrString).toMatch(
+      /User-Agent: FluentStream\/1\.0 \(friendly bot\)/i,
+    );
     expect(hdrString).toMatch(/\r?\n/);
     for (const [k, v] of Object.entries(allHeaders)) {
-      expect(hdrString).toMatch(new RegExp(`${k}: ${v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+      expect(hdrString).toMatch(
+        new RegExp(`${k}: ${v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+      );
     }
   });
 
@@ -341,16 +384,22 @@ describe("FluentStream API", () => {
     expect(stream.getArgs().includes("-headers")).toBe(false);
   });
 
-  // Additional architectural coverage
-
   it("input throws for undefined/null", () => {
-    expect(() => stream.input(undefined)).toThrow("input(): input must be non-null string (path/URL/blob) or Readable stream");
-    expect(() => stream.input(null)).toThrow("input(): input must be non-null string (path/URL/blob) or Readable stream");
+    expect(() => stream.input(undefined)).toThrow(
+      "input(): input must be non-null string (path/URL/blob) or Readable stream",
+    );
+    expect(() => stream.input(null)).toThrow(
+      "input(): input must be non-null string (path/URL/blob) or Readable stream",
+    );
   });
 
   it("output throws for invalid arg", () => {
-    expect(() => stream.output(undefined)).toThrow("output(): requires non-empty string or pipe object");
-    expect(() => stream.output(null)).toThrow("output(): requires non-empty string or pipe object");
+    expect(() => stream.output(undefined)).toThrow(
+      "output(): requires non-empty string or pipe object",
+    );
+    expect(() => stream.output(null)).toThrow(
+      "output(): requires non-empty string or pipe object",
+    );
   });
 
   it("inputOptions allows call without args", () => {
@@ -373,7 +422,6 @@ describe("FluentStream API", () => {
     stream.input("in1.mp3").output("out1.aac").globalOptions("-na");
     stream.clear();
     expect(stream.getArgs()).toEqual([]);
-    // Verify clear resets by checking that new operations work
     stream.input("new.mp3").output("new.aac");
     expect(stream.getArgs()).toEqual(["-i", "new.mp3", "new.aac"]);
   });
@@ -394,7 +442,7 @@ describe("FluentStream API", () => {
     stream.input("foo.aac").copyCodecs().output("out.aac").copyCodecs();
     expect(stream.getArgs()).toContain("-c");
     expect(stream.getArgs()).toContain("copy");
-    expect(stream.getArgs().filter(x => x === "-c").length).toBe(1);
+    expect(stream.getArgs().filter((x) => x === "-c").length).toBe(1);
   });
 
   it("copyCodecs → videoCodec overrides only video codec", () => {
@@ -414,7 +462,6 @@ describe("FluentStream API", () => {
     stream.clear();
     expect(() => stream.clear()).not.toThrow();
     expect(stream.getArgs()).toEqual([]);
-    // Verify clear works by checking new operations
     stream.input("test.wav").output("test.ogg");
     expect(stream.getArgs()).toEqual(["-i", "test.wav", "test.ogg"]);
   });
@@ -433,9 +480,12 @@ describe("FluentStream API", () => {
   });
 
   it("outputOptions/codec/bitrate can be called in any order", () => {
-    stream.input("in.mp3")
+    stream
+      .input("in.mp3")
       .outputOptions("-metadata", "title=demo")
-      .audioCodec("libopus").audioBitrate("128k").output("outx.opus")
+      .audioCodec("libopus")
+      .audioBitrate("128k")
+      .output("outx.opus")
       .outputOptions("-movflags", "+faststart");
     const args = stream.getArgs();
     expect(args).toContain("-metadata");
@@ -460,51 +510,59 @@ describe("FluentStream API", () => {
     const stream = new FluentStream({ useAudioProcessor: true });
     stream.input("tests/320.mp3").format("s16le").output("pipe:1");
 
-    // First run
     const result1 = await stream.run();
     await result1.done;
 
-    // Change effects after first run ended
     stream.setBass(10);
     stream.setTreble(5);
     stream.setCompressor(true);
 
-    // Second run with same input
-    stream.clear()
+    stream
+      .clear()
       .input("tests/320.mp3")
       .audioCodec("pcm_s16le")
       .outputOptions(
-        "-f", "s16le",
-        "-ar", "48000",
-        "-ac", "2",
-        "-af", "volume=0.1"
-      ).output("pipe:1");
+        "-f",
+        "s16le",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-af",
+        "volume=0.1",
+      )
+      .output("pipe:1");
     const result2 = await stream.run();
 
-    // Check that effects are applied in second run
-    expect(result2.audioProcessor?.bass).toBe(0.5); // normalized value for 10
-    expect(result2.audioProcessor?.treble).toBe(0.25); // normalized value for 5
+    expect(result2.audioProcessor?.bass).toBe(0.5);
+    expect(result2.audioProcessor?.treble).toBe(0.25);
     expect(result2.audioProcessor?.compressor).toBe(true);
 
-    // Cleanup
     result2.stop();
-    try { await result2.done; } catch {
-      // clear
+    try {
+      await result2.done;
+    } catch {
+      //
     }
   });
 
   it("inputBlob throws for invalid blobUrl", () => {
     const stream = new FluentStream();
-    expect(() => stream.inputBlob("")).toThrow("inputBlob(): blobUrl must be a non-empty string");
-    expect(() => stream.inputBlob(null as any)).toThrow("inputBlob(): blobUrl must be a non-empty string");
-    expect(() => stream.inputBlob(undefined as any)).toThrow("inputBlob(): blobUrl must be a non-empty string");
+    expect(() => stream.inputBlob("")).toThrow(
+      "inputBlob(): blobUrl must be a non-empty string",
+    );
+    expect(() => stream.inputBlob(null as any)).toThrow(
+      "inputBlob(): blobUrl must be a non-empty string",
+    );
+    expect(() => stream.inputBlob(undefined as any)).toThrow(
+      "inputBlob(): blobUrl must be a non-empty string",
+    );
   });
 
   it("inputBlob adds blob input source", () => {
     const stream = new FluentStream();
     stream.inputBlob("blob:test-url");
     expect(stream.getArgs()).toEqual(["-i", "pipe:0"]);
-    // Note: inputSources are private, so we can't directly test them
   });
 
   it("input accepts blob URLs automatically", () => {
@@ -515,17 +573,12 @@ describe("FluentStream API", () => {
 
   it("input accepts blob URLs with minimal validation", () => {
     const stream = new FluentStream();
-    // "blob:" is technically a valid prefix, even if incomplete
     expect(() => stream.input("blob:")).not.toThrow();
   });
 
   it("blob URL processing includes validation", () => {
-    // Test that blob URLs are processed through the validation pipeline
     const stream = new FluentStream();
     stream.input("blob:nodedata:5f243e10-c206-46c2-83fc-6ee018f80508");
     expect(stream.getArgs()).toEqual(["-i", "pipe:0"]);
-
-    // The actual validation happens during blob resolution in run()
-    // This test verifies that blob URLs are properly recognized and set up
   });
 });

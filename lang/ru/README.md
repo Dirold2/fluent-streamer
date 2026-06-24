@@ -2,17 +2,18 @@
 
 [Switch to the English version](../../README.md)
 
-_Fluent_ — обёртка для FFmpeg на Node.js, написанная на TypeScript.  
+_Fluent_ — обёртка для FFmpeg на TypeScript, **v0.5.0**.  
 Предлагает современный, цепочный API для обработки медиа/аудио/видео через FFmpeg, поддерживает потоки, кроссфейд, аудио-эффекты, таймауты и отслеживание прогресса.
 
 - **TypeScript-first**: типизированный, цепочный и современный API
-- **Потоковая обработка**: простая интеграция с потоками Node.js
+- **Кросс-рантайм**: Node.js, Bun, Deno и Browser (через `@ffmpeg/ffmpeg`)
+- **Web Streams**: нативные `ReadableStream`/`WritableStream`, совместимость с потоками Node.js
 - **Аудио-обработка**: встроенные EQ, volume, compression эффекты
 - **Дружелюбность**: хорошие значения по умолчанию и понятный API
 - **Доп. функции**: кроссфейд, конвертация форматов, управление кодеками, авто-остановка/таймаут, отслеживание прогресса
 
 > Работает на базе [FFmpeg](https://ffmpeg.org/).  
-> Работает в Node.js и поддерживает потоковую обработку (без необходимости файлов).
+> Поддерживает Node.js, Bun, Deno и браузер. Потоковая обработка не требует файлов на диске.
 
 ---
 
@@ -35,12 +36,18 @@ pnpm install github:dirold2/fluent-streamer
 bun install github:dirold2/fluent-streamer
 ```
 
+**Браузер (опционально):** установите WASM-биндинги FFmpeg:
+
+```bash
+npm install @ffmpeg/ffmpeg @ffmpeg/core
+```
+
 ---
 
 ## Пример использования
 
 ```ts
-import FluentStream from "fluent-streamer";
+import { FluentStream } from "fluent-streamer";
 
 // Пример конвертации
 const fs = new FluentStream()
@@ -49,8 +56,9 @@ const fs = new FluentStream()
   .audioBitrate("192k")
   .output("output.m4a");
 
-const { done } = fs.run();
-done.then(() => console.log("Конвертация завершена."));
+const { done } = await fs.run();
+await done;
+console.log("Конвертация завершена.");
 ```
 
 ---
@@ -58,20 +66,18 @@ done.then(() => console.log("Конвертация завершена."));
 ### Работа с потоками
 
 ```ts
-import FluentStream from "fluent-streamer";
+import { FluentStream } from "fluent-streamer";
 import fs from "node:fs";
 
 const input = fs.createReadStream("track.mp3");
-const output = fs.createWriteStream("new.wav");
 
 const f = new FluentStream()
   .input(input)
   .format("wav")
-  .output(output);
+  .output("new.wav");
 
-f.run().done.then(() => {
-  console.log("Поток завершён!");
-});
+await f.run();
+console.log("Поток завершён!");
 ```
 
 ---
@@ -79,11 +85,12 @@ f.run().done.then(() => {
 ### Пример кроссфейда
 
 ```ts
-const streamer = new FluentStream();
-streamer
+import { FluentStream } from "fluent-streamer";
+
+await new FluentStream()
   .input("a.mp3")
   .input("b.mp3")
-  .crossfadeAudio(2.5)    // Кроссфейд 2.5 секунды
+  .crossfadeAudio(2.5) // Кроссфейд 2.5 секунды
   .output("x.mp3")
   .run();
 ```
@@ -91,20 +98,21 @@ streamer
 ### Аудио-эффекты и управление
 
 ```ts
-// Реал-тайм аудио-регулировка во время воспроизведения
+import { FluentStream } from "fluent-streamer";
+
 const streamer = new FluentStream({
   enableProgressTracking: true,
-  useAudioProcessor: true
+  useAudioProcessor: true,
 })
   .input("music.mp3")
-  .setVolume(1.5)     // Увеличить громкость на 50%
-  .setBass(8)         // Усилить бас
-  .setTreble(-3)      // Ослабить верхние частоты
-  .setCompressor(true) // Включить динамическое сжатие
+  .setVolume(1.5)
+  .setBass(8)
+  .setTreble(-3)
+  .setCompressor(true)
   .output("enhanced.wav");
 
-// Настройка эффектов во время воспроизведения
-await streamer.run().done;
+const { done } = await streamer.run();
+await done;
 ```
 
 ---
@@ -114,9 +122,11 @@ await streamer.run().done;
 `FluentStream` предоставляет _флюентный_ интерфейс:
 
 ```ts
-new FluentStream()
+import { FluentStream } from "fluent-streamer";
+
+await new FluentStream()
   .input("song.mp3")
-  .seekInput(30)          // перейти к 30 секунде
+  .seekInput(30)
   .audioCodec("opus")
   .audioBitrate("128k")
   .output("clip.opus")
@@ -124,8 +134,8 @@ new FluentStream()
 ```
 
 Главные методы:
-- `.input(src)` — добавить входной файл/поток
-- `.output(dst)` — задать выход (файл/поток/дескриптор)
+- `.input(src)` — добавить входной файл/URL/поток
+- `.output(dst)` — задать выход (путь к файлу или pipe)
 - `.audioCodec(codec)` / `.videoCodec(codec)` — выбрать кодеки
 - `.audioBitrate(bps)` / `.videoBitrate(bps)` — битрейт аудио/видео
 - `.format(fmt)` — задать формат выхода (например, 'mp3', 'wav')
@@ -133,7 +143,7 @@ new FluentStream()
 - `.overwrite()` — перезаписать файлы назначения
 - `.map(spec)` — выбрать определённые потоки
 - `.crossfadeAudio(seconds, options?)` — кроссфейд для аудио
-- `.run()` — запускает обработку (возвращает output, done, stop)
+- `.run()` — запускает обработку асинхронно (возвращает `output`, `done`, `stop`)
 
 ---
 
@@ -148,9 +158,10 @@ new FluentStream()
 
 ## Типизация и расширение
 
-- **Написано на TypeScript:** Все основные объекты (FluentStream, Processor) строго типизированы
-- **Встроенная аудио-обработка:** Объём, EQ, compression эффекты через класс `AudioProcessor`
-- **Расширяемая архитектура:** Встроенные фильтры с возможностями реального времени
+- **Написано на TypeScript:** `FluentStream`, `Processor` и типы строго типизированы
+- **Модульная архитектура:** `Fluent/`, `Core/`, `Runner/`, `Audio/`, `Types/`
+- **Встроенная аудио-обработка:** Volume, EQ, compression через `AudioProcessor`
+- **Расширяемые раннеры:** реализуйте `FFmpegRunner` для кастомного запуска FFmpeg
 
 ---
 
