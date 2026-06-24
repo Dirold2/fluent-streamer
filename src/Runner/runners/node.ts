@@ -9,6 +9,7 @@ class NodeFFmpegProcess implements FFmpegProcess {
 
   private process: ReturnType<typeof spawn>;
   private exitCallbacks: Array<(code: number | null, signal: string | null) => void> = [];
+  private errorCallbacks: Array<(error: Error) => void> = [];
 
   constructor(process: ReturnType<typeof spawn>) {
     this.process = process;
@@ -66,9 +67,9 @@ class NodeFFmpegProcess implements FFmpegProcess {
       this.exitCallbacks = [];
     });
 
-    process.on("error", (_err) => {
-      for (const cb of this.exitCallbacks) cb(null, null);
-      this.exitCallbacks = [];
+    process.on("error", (err) => {
+      for (const cb of this.errorCallbacks) cb(err);
+      this.errorCallbacks = [];
     });
   }
 
@@ -78,6 +79,10 @@ class NodeFFmpegProcess implements FFmpegProcess {
 
   onExit(cb: (code: number | null, signal: string | null) => void): void {
     this.exitCallbacks.push(cb);
+  }
+
+  onError(cb: (error: Error) => void): void {
+    this.errorCallbacks.push(cb);
   }
 }
 

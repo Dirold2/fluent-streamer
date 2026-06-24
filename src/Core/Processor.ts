@@ -23,6 +23,9 @@ import {
 import { createSilenceBuffer, createSilenceMs } from "./processor/silence.js";
 import { StderrTracker, buildProcessExitError, readStderrStream } from "./processor/stderr.js";
 
+type ProcessorState = "idle" | "running" | "terminating" | "finished" | "failed" | "closed";
+type TerminationReason = "user" | "close" | "timeout" | "destroy" | null;
+
 export class Processor extends EventEmitter {
   private process: FFmpegProcess | null = null;
   private outputStream: ReadableStream<Uint8Array> | null = null;
@@ -34,9 +37,12 @@ export class Processor extends EventEmitter {
     stream: WritableStream<Uint8Array>;
     index: number;
   }> = [];
+  private processState: ProcessorState = "idle";
+  private terminationReason: TerminationReason = null;
   private isTerminating = false;
   private hasFinished = false;
   private isClosed = false;
+  private doneSettled = false;
   private timeoutHandle?: ReturnType<typeof setTimeout>;
   private doneResolve!: () => void;
   private doneReject!: (err: Error) => void;
@@ -153,6 +159,7 @@ export class Processor extends EventEmitter {
 
     this._resetRunState();
     this._initPromise();
+    this.processState = "running";
     this._startTime = Date.now();
     this._totalChunks = 0;
 
@@ -169,16 +176,22 @@ export class Processor extends EventEmitter {
       this.config.logger.error?.(
         `[${getTimeString()}] [${this.config.loggerTag}] Failed to spawn ffmpeg: ${(ex as Error).message}`,
       );
-      this._finalize(ex as Error);
+      this._finalize(ex as Error, "failed");
       throw ex;
     }
+
+    this.process.onError?.((error) => {
+      if (this.hasFinished) return;
+      this.emit("error", error);
+      this._finalize(error, "failed");
+    });
 
     this._handleTimeout();
 
     pipeInputStreams(this.process, this.inputStreams, {
       onError: (err) => {
         this.emit("error", err);
-        this._finalize(err);
+        this._finalize(err, "failed");
       },
       hasFinished: () => this.hasFinished,
       isTerminating: () => this.isTerminating,
@@ -214,7 +227,7 @@ export class Processor extends EventEmitter {
       {
         onError: (err) => {
           this.emit("error", err);
-          this._finalize(err);
+          this._finalize(err, "failed");
         },
         onPipelineComplete: () => {
           this._runEnded = true;
@@ -270,8 +283,10 @@ export class Processor extends EventEmitter {
   }
 
   public async close(): Promise<void> {
-    if (this.isClosed) return;
+    if (this.isClosed || this.processState === "closed") return;
     this.isClosed = true;
+    this.terminationReason = "close";
+    if (this.processState === "running") this.processState = "terminating";
     this._runEmittedEnd = true;
     this.outputStream = null;
 
@@ -283,12 +298,13 @@ export class Processor extends EventEmitter {
 
     await this.kill();
     await this.donePromise;
-    this._finalize();
   }
 
   public async kill(signal: string = "SIGTERM"): Promise<void> {
     if (this.process && !this.isTerminating) {
       this.isTerminating = true;
+      this.terminationReason ??= "user";
+      if (this.processState === "running") this.processState = "terminating";
       this._skipInProgress = true;
 
       if (this.config.verbose) {
@@ -357,9 +373,10 @@ export class Processor extends EventEmitter {
         `[${getTimeString()}] [${this.config.loggerTag}] Processor force destroy() called`,
       );
     }
+    this.terminationReason = "destroy";
     this._cleanup();
     void this.kill("SIGKILL");
-    this._finalize(new Error("Destroyed by user"));
+    this._finalize(new Error("Destroyed by user"), "failed");
     this.removeAllListeners();
   }
 
@@ -385,6 +402,7 @@ export class Processor extends EventEmitter {
       isClosed: this.isClosed,
       hasFinished: this.hasFinished,
       isTerminating: this.isTerminating,
+      state: this.processState,
       running: !!this.process,
       runEnded: this._runEnded,
       runEmittedEnd: this._runEmittedEnd,
@@ -500,8 +518,11 @@ export class Processor extends EventEmitter {
     this._runEnded = false;
     this._runEmittedEnd = false;
     this._pendingProcessExitLog = null;
+    this.processState = "idle";
+    this.terminationReason = null;
     this.isClosed = false;
     this.hasFinished = false;
+    this.doneSettled = false;
     this.isTerminating = false;
     this.stderrTracker.reset();
     this.process = null;
@@ -541,6 +562,8 @@ export class Processor extends EventEmitter {
           `[${getTimeString()}] [${this.config.loggerTag}] Process timeout after ${this.config.timeout}ms. Terminating.`,
         );
       }
+      this.terminationReason = "timeout";
+      if (this.processState === "running") this.processState = "terminating";
       this.kill("SIGKILL");
     }, this.config.timeout);
   }
@@ -558,7 +581,15 @@ export class Processor extends EventEmitter {
   private _onProcessExit(code: number | null, signal: string | null): void {
     if (this.hasFinished) return;
 
-    if (code === 0 || (signal !== null && this.isTerminating)) {
+    const isUserTermination =
+      this.isTerminating &&
+      (this.terminationReason === "user" ||
+        this.terminationReason === "close" ||
+        this.terminationReason === "destroy");
+    const isTimeout = this.terminationReason === "timeout";
+    const exitedCleanly = code === 0 && signal === null;
+
+    if (!isTimeout && (exitedCleanly || isUserTermination)) {
       if (this.isTerminating) {
         setTimeout(() => {
           this.emit("terminated", signal ?? "SIGTERM");
@@ -578,9 +609,13 @@ export class Processor extends EventEmitter {
             this.endSequenceFn();
           }
         }, 0);
+      } else {
+        this._finalize(undefined, this.terminationReason === "close" ? "closed" : "finished");
       }
     } else {
-      const error = buildProcessExitError(code, signal, this.stderrTracker.getBuffer());
+      const error = isTimeout
+        ? new Error(`FFmpeg process timed out after ${this.config.timeout}ms`)
+        : buildProcessExitError(code, signal, this.stderrTracker.getBuffer());
       const tail = this.stderrTracker.getBuffer().trim().slice(-4000);
 
       if (tail && this.config.verbose) {
@@ -590,13 +625,22 @@ export class Processor extends EventEmitter {
       }
 
       this.emit("error", error);
-      this._finalize(error);
+      this._finalize(error, "failed");
     }
   }
 
-  private _finalize(error?: Error): void {
+  private _finalize(error?: Error, finalState?: ProcessorState): void {
     if (this.hasFinished) return;
     this.hasFinished = true;
+    if (finalState) {
+      this.processState = finalState;
+    } else if (this.isClosed || this.terminationReason === "close") {
+      this.processState = "closed";
+    } else if (error) {
+      this.processState = "failed";
+    } else {
+      this.processState = "finished";
+    }
 
     try {
       if (this.timeoutHandle) clearTimeout(this.timeoutHandle);
@@ -619,15 +663,22 @@ export class Processor extends EventEmitter {
         this.emit("end");
       }
 
-      if (error) {
-        this.doneReject(error);
-      } else {
-        this.doneResolve();
-      }
+      this._settleDone(error);
     } finally {
       this.process = null;
       this.outputStream = null;
       this.timeoutHandle = undefined;
+    }
+  }
+
+  private _settleDone(error?: Error): void {
+    if (this.doneSettled) return;
+    this.doneSettled = true;
+
+    if (error) {
+      this.doneReject(error);
+    } else {
+      this.doneResolve();
     }
   }
 

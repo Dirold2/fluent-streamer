@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] – 2026-06-24
+
+### Fixed
+
+- **Processor lifecycle:** added an explicit process state model (`idle`, `running`, `terminating`, `finished`, `failed`, `closed`) for predictable `run()`, `kill()`, `close()`, timeout and error handling
+- **Completion handling:** guarded `done` promise settlement so resolve/reject happens exactly once across exit, error and cleanup paths
+- **Termination semantics:** separated normal exits, user-initiated `kill()`/`close()`, timeout kills and spawn/process failures
+- **Node child process exits:** treat `code === null` as an abnormal process result unless it belongs to an intentional user termination
+- **Process errors:** Node runner forwards child process `error` events separately from exit callbacks, preserving errors such as `spawn ffmpeg ENOENT`
+
 ## [0.5.0] – 2026-06-24
 
 ### Added

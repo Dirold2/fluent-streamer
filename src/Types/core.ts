@@ -7,6 +7,7 @@ export interface FFmpegProcess {
   readonly stderr: ReadableStream<Uint8Array>;
   kill(signal: string): void;
   onExit(cb: (code: number | null, signal: string | null) => void): void;
+  onError?(cb: (error: Error) => void): void;
 }
 
 export interface FFmpegRunner {

@@ -69,10 +69,7 @@ export interface ProcessorOptions {
   wallTimeLimit?: number;
   executionId?: string;
 
-  onBeforeChildProcessSpawn?: (
-    ffmpegPath: string,
-    ffmpegArgs: string[],
-  ) => void | Promise<void>;
+  onBeforeChildProcessSpawn?: (ffmpegPath: string, ffmpegArgs: string[]) => void | Promise<void>;
 
   stderrLogHandler?: (line: string) => void;
 
@@ -178,6 +175,7 @@ export interface ProcessorDebugInfo {
   args: string[];
   fullArgs: string[];
 
+  state?: "idle" | "running" | "terminating" | "finished" | "failed" | "closed";
   isClosed: boolean;
   hasFinished: boolean;
   isTerminating: boolean;

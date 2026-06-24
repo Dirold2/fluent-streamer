@@ -1,8 +1,8 @@
 # Fluent Streamer
 
-[Перейти на русскую версию](./lang/ru/README.md)
+[Перейти на русскую версию](https://github.com/Dirold2/fluent-streamer/tree/main/lang/ru)
 
-_Fluent_ FFmpeg wrapper for TypeScript runtimes, **v0.5.0**  
+_Fluent_ FFmpeg wrapper for TypeScript runtimes, **v0.5.1**  
 Offers a fluent, chainable API for media/audio/video processing with FFmpeg, supporting streams, crossfade, audio effects, timeouts, and progress tracking.
 
 - **TypeScript-first**: typed, chainable, and modern
@@ -46,7 +46,7 @@ The browser runner is selected automatically when `window` is defined.
 
 ### Migrating from 0.4.x
 
-| 0.4.x | 0.5.0 |
+| 0.4.x | 0.5.x |
 |-------|-------|
 | `import FluentStream from "fluent-streamer"` | `import { FluentStream } from "fluent-streamer"` |
 | `const { done } = fs.run()` | `const { done } = await fs.run()` |
@@ -436,13 +436,15 @@ Start processing asynchronously. Returns:
 ```ts
 {
   output: ReadableStream<Uint8Array>,  // Output stream when piped
-  done: Promise<void>,                 // Completion promise
-  stop: () => void,                    // Stop function
+  done: Promise<void>,                 // Settles exactly once on completion/failure
+  stop: () => void,                    // User stop/kill helper
   passthrough: ReadableStream<Uint8Array>,
   close: () => Promise<void> | void,
   setVolume?, setBass?, setTreble?, setCompressor?, setEqualizer?, startFade?
 }
 ```
+
+`done` resolves for normal process completion and intentional user `stop()`/`close()` calls. It rejects for spawn/process errors, non-zero FFmpeg exits and timeouts. In Node.js, child process errors such as `spawn ffmpeg ENOENT` are surfaced as process errors instead of ambiguous `code === null` exits.
 
 #### `.clear()`
 Reset instance for reuse (required before `.run()` after previous use).
@@ -468,10 +470,10 @@ Check instance state.
 
 ## Advanced
 
-- **Timeout:** Set the `timeout` option to auto-kill long FFmpeg jobs.
+- **Timeout:** Set the `timeout` option to auto-kill long FFmpeg jobs; timeout termination rejects `done`.
 - **Progress:** Get real-time progress events by enabling `.options({ enableProgressTracking: true })` and listening for `"progress"` events.
 - **Headers:** Default humanity headers are sent to FFmpeg HTTP(S) sources; override with `.setHeaders(obj)`.
-- **Kill:** `run()` returns a stop function to terminate process safely.
+- **Kill/close:** `run()` returns `stop()` and `close()` helpers for intentional user termination; these are tracked separately from FFmpeg errors.
 
 ---
 
