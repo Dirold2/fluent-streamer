@@ -23,6 +23,7 @@ export interface AudioProcessingOptions {
   treble: number;
   compressor: boolean;
   normalize: boolean;
+  cloneInput?: boolean;
 
   sampleRate?: number;
   channels?: number;
@@ -69,7 +70,10 @@ export interface ProcessorOptions {
   wallTimeLimit?: number;
   executionId?: string;
 
-  onBeforeChildProcessSpawn?: (ffmpegPath: string, ffmpegArgs: string[]) => void | Promise<void>;
+  onBeforeChildProcessSpawn?: (
+    ffmpegPath: string,
+    ffmpegArgs: string[],
+  ) => void | Promise<void>;
 
   stderrLogHandler?: (line: string) => void;
 
@@ -148,7 +152,7 @@ export interface FFmpegRunResultExtended extends FFmpegRunResult {
   setBass?: (bass: number) => void;
   setTreble?: (treble: number) => void;
   setCompressor?: (enabled: boolean) => void;
-  setEqualizer?: (bass: number, treble: number, compressor: boolean) => void;
+  setNormalize?: (enabled: boolean) => void;
   startFade?: (targetVolume: number, durationMs: number) => void;
 }
 

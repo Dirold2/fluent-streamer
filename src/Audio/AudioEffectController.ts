@@ -12,6 +12,7 @@ export class AudioEffectController {
   private _bass: number;
   private _treble: number;
   private _compressor: boolean;
+  private _normalize: boolean;
 
   constructor(
     audioProcessor: AudioProcessor,
@@ -21,23 +22,26 @@ export class AudioEffectController {
       bass: number;
       treble: number;
       compressor: boolean;
+      normalize: boolean;
     },
   ) {
     this.audioProcessor = audioProcessor;
     this.logger = config.logger;
     this.loggerTag = config.loggerTag;
     this.verbose = config.verbose ?? false;
+
     this._volume = initialState.volume;
     this._bass = initialState.bass;
     this._treble = initialState.treble;
     this._compressor = initialState.compressor;
+    this._normalize = initialState.normalize ?? false;
   }
 
   setVolume(v: number): void {
     const oldValue = this._volume;
     this._volume = v;
     if (this.canUpdate()) {
-      this.audioProcessor.setVolume(v);
+      this.audioProcessor.volume = v;
     }
     this.logChange("Volume", oldValue, v);
   }
@@ -46,7 +50,7 @@ export class AudioEffectController {
     const oldValue = this._bass;
     this._bass = b;
     if (this.canUpdate()) {
-      this.audioProcessor.setEqualizer(b, this._treble, this._compressor);
+      this.audioProcessor.bass = b;
     }
     this.logChange("Bass", oldValue, b);
   }
@@ -55,7 +59,7 @@ export class AudioEffectController {
     const oldValue = this._treble;
     this._treble = t;
     if (this.canUpdate()) {
-      this.audioProcessor.setEqualizer(this._bass, t, this._compressor);
+      this.audioProcessor.treble = t;
     }
     this.logChange("Treble", oldValue, t);
   }
@@ -64,7 +68,7 @@ export class AudioEffectController {
     const oldValue = this._compressor;
     this._compressor = c;
     if (this.canUpdate()) {
-      this.audioProcessor.setCompressor(c);
+      this.audioProcessor.compressor = c;
     }
     if (this.verbose) {
       this.logger.info?.(
@@ -73,17 +77,23 @@ export class AudioEffectController {
     }
   }
 
-  setEqualizer(b: number, t: number, c: boolean): void {
-    this._bass = b;
-    this._treble = t;
-    this._compressor = c;
+  setNormalize(n: boolean): void {
+    const oldValue = this._normalize;
+    this._normalize = n;
     if (this.canUpdate()) {
-      this.audioProcessor.setEqualizer(b, t, c);
+      this.audioProcessor.normalize = n; // Управление новым эффектом авто-нормализации
+    }
+    if (this.verbose) {
+      this.logger.info?.(
+        `[${getTimeString()}] [${this.loggerTag}] Normalize changed: ${String(oldValue)} → ${String(n)}`,
+      );
     }
   }
 
   startFade(targetVolume: number, durationMs: number): void {
-    this.audioProcessor?.startFade(targetVolume, durationMs);
+    if (this.canUpdate()) {
+      this.audioProcessor.startFade(targetVolume, durationMs);
+    }
   }
 
   private canUpdate(): boolean {

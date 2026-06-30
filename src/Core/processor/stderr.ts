@@ -203,6 +203,7 @@ export async function readStderrStream(
   stderr: ReadableStream<Uint8Array>,
   onChunk: (chunk: Uint8Array) => void,
   logHandler?: (text: string) => void,
+  onError?: (err: Error) => void,
 ): Promise<void> {
   const reader = stderr.getReader();
   try {
@@ -217,8 +218,8 @@ export async function readStderrStream(
         //
       }
     }
-  } catch {
-    //
+  } catch (err) {
+    onError?.(err instanceof Error ? err : new Error(String(err)));
   } finally {
     reader.releaseLock();
   }

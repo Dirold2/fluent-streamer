@@ -8,11 +8,11 @@ import type {
   FFmpegRunResultExtended,
   ProcessorOptions,
   Logger,
-  AudioProcessingOptions,
   LogMeta,
   CrossfadeAudioOptions,
   InputSource,
 } from "../Types/index.js";
+import { FluentAudioState } from "./FluentAudioState.js";
 
 export default class FluentStream extends EventEmitter {
   static readonly HUMANITY_HEADERS = HUMANITY_HEADERS;
@@ -28,76 +28,65 @@ export default class FluentStream extends EventEmitter {
   private headers: Record<string, string> | undefined;
   private isDirty = false;
 
-  private audioVolume = 1;
-  private audioBass = 0;
-  private audioTreble = 0;
-  private audioCompressor = false;
-  private enabledAudioProcessor = false;
-  private cachedAudioOptions: AudioProcessingOptions | null = null;
-  private cachedOptionsHash = "";
+  private audio: FluentAudioState;
 
   private logger: Logger;
   private processorResult: FFmpegRunResultExtended | null = null;
 
   public get volume(): number {
-    return this.audioVolume;
+    return this.audio.volume;
   }
   public set volume(value: number) {
-    this.audioVolume = value;
-    if (this.processorResult?.setVolume) {
-      this.processorResult.setVolume(value);
-    }
+    this.audio.setVolume(value);
   }
 
   public get bass(): number {
-    return this.audioBass;
+    return this.audio.bass;
   }
   public set bass(value: number) {
-    this.audioBass = value;
-    if (this.processorResult?.setBass) {
-      this.processorResult.setBass(value);
-    }
+    this.audio.setBass(value);
   }
 
   public get treble(): number {
-    return this.audioTreble;
+    return this.audio.treble;
   }
   public set treble(value: number) {
-    this.audioTreble = value;
-    if (this.processorResult?.setTreble) {
-      this.processorResult.setTreble(value);
-    }
+    this.audio.setTreble(value);
   }
 
   public get compressor(): boolean {
-    return this.audioCompressor;
+    return this.audio.compressor;
   }
   public set compressor(value: boolean) {
-    this.audioCompressor = value;
-    if (this.processorResult?.setCompressor) {
-      this.processorResult.setCompressor(value);
-    }
+    this.audio.setCompressor(value);
   }
 
   public get useAudioProcessor(): boolean {
-    return this.enabledAudioProcessor;
+    return this.audio.enabled;
   }
   public set useAudioProcessor(value: boolean) {
-    this.enabledAudioProcessor = value;
+    this.audio.enable(value);
   }
 
   constructor(options: ProcessorOptions = {}) {
     super();
     this.options = { ...options };
     this.headers =
-      typeof options.headers === "object" && options.headers !== null ? options.headers : undefined;
+      typeof options.headers === "object" && options.headers !== null
+        ? options.headers
+        : undefined;
     this.logger = options.logger ?? DEFAULT_LOGGER;
 
-    this.enabledAudioProcessor = options.useAudioProcessor ?? false;
-    this.audioVolume = options.audioProcessorOptions?.volume ?? 1;
-    this.audioBass = options.audioProcessorOptions?.bass ?? 0;
-    this.audioTreble = options.audioProcessorOptions?.treble ?? 0;
-    this.audioCompressor = options.audioProcessorOptions?.compressor ?? false;
+    const ap = options.audioProcessorOptions;
+    this.audio = new FluentAudioState({
+      volume: ap?.volume,
+      bass: ap?.bass,
+      treble: ap?.treble,
+      compressor: ap?.compressor,
+      enabled: options.useAudioProcessor ?? false,
+      sampleRate: ap?.sampleRate,
+      channels: ap?.channels,
+    });
   }
 
   private emitLog(
@@ -114,26 +103,6 @@ export default class FluentStream extends EventEmitter {
     }
   }
 
-  private buildAudioOptions(): AudioProcessingOptions {
-    const hash = `${this.audioVolume}-${this.audioBass}-${this.audioTreble}-${this.audioCompressor}`;
-    if (this.cachedAudioOptions && this.cachedOptionsHash === hash) {
-      return this.cachedAudioOptions;
-    }
-
-    this.cachedAudioOptions = {
-      volume: this.audioVolume,
-      bass: this.audioBass,
-      treble: this.audioTreble,
-      compressor: this.audioCompressor,
-      normalize: false,
-      sampleRate: this.options.audioProcessorOptions?.sampleRate,
-      channels: this.options.audioProcessorOptions?.channels,
-    };
-    this.cachedOptionsHash = hash;
-
-    return this.cachedAudioOptions;
-  }
-
   private getMergedHeaders(): Record<string, string> {
     if (!this.headers || Object.keys(this.headers).length === 0) {
       return { ...HUMANITY_HEADERS };
@@ -141,14 +110,20 @@ export default class FluentStream extends EventEmitter {
     return { ...this.headers };
   }
 
-  private createProcessor(extraOpts: Partial<ProcessorOptions> = {}): Processor {
+  private createProcessor(
+    extraOpts: Partial<ProcessorOptions> = {},
+  ): Processor {
     const mergedHeaders = this.getMergedHeaders();
+    const ap = this.options.audioProcessorOptions;
     const finalOptions: ProcessorOptions = {
       ...this.options,
       ...extraOpts,
       headers: mergedHeaders,
-      useAudioProcessor: this.enabledAudioProcessor,
-      audioProcessorOptions: this.buildAudioOptions(),
+      useAudioProcessor: this.audio.enabled,
+      audioProcessorOptions: this.audio.buildOptions(
+        ap?.sampleRate,
+        ap?.channels,
+      ),
       inputStreams: this.inputStreams,
       inputSources: this.inputSources,
     };
@@ -171,98 +146,58 @@ export default class FluentStream extends EventEmitter {
   }
 
   public setVolume(value: number): this {
-    this.volume = value;
+    this.audio.setVolume(value);
     return this;
   }
 
   public fadeIn(targetVolume: number = 1, durationMs: number = 1000): this {
-    this.audioVolume = targetVolume;
-    if (this.processorResult?.startFade) {
-      this.processorResult.startFade(targetVolume, durationMs);
-    }
+    this.audio.fadeIn(targetVolume, durationMs);
     return this;
   }
 
   public fadeOut(durationMs: number = 1000): this {
-    this.audioVolume = 0;
-    if (this.processorResult?.startFade) {
-      this.processorResult.startFade(0, durationMs);
-    }
+    this.audio.fadeOut(durationMs);
     return this;
   }
 
   public setBass(value: number): this {
-    this.bass = value;
+    this.audio.setBass(value);
     return this;
   }
 
   public setTreble(value: number): this {
-    this.treble = value;
+    this.audio.setTreble(value);
     return this;
   }
 
   public setCompressor(enabled: boolean): this {
-    this.compressor = enabled;
-    return this;
-  }
-
-  public setEqualizer(bass: number, treble: number, compressor: boolean): this {
-    this.bass = bass;
-    this.treble = treble;
-    this.compressor = compressor;
+    this.audio.setCompressor(enabled);
     return this;
   }
 
   public enableAudioProcessing(enable: boolean = true): this {
-    this.enabledAudioProcessor = enable;
+    this.audio.enable(enable);
     return this;
   }
 
   public changeVolume(value: number): boolean {
-    if (this.processorResult?.setVolume) {
-      this.processorResult.setVolume(value);
-      this.audioVolume = value;
-      return true;
-    }
-    return false;
+    return this.audio.changeVolume(value);
   }
 
   public changeBass(value: number): boolean {
-    if (this.processorResult?.setBass) {
-      this.processorResult.setBass(value);
-      this.audioBass = value;
-      return true;
-    }
-    return false;
+    return this.audio.changeBass(value);
   }
 
   public changeTreble(value: number): boolean {
-    if (this.processorResult?.setTreble) {
-      this.processorResult.setTreble(value);
-      this.audioTreble = value;
-      return true;
-    }
-    return false;
+    return this.audio.changeTreble(value);
   }
 
   public changeCompressor(enabled: boolean): boolean {
-    if (this.processorResult?.setCompressor) {
-      this.processorResult.setCompressor(enabled);
-      this.audioCompressor = enabled;
-      return true;
-    }
-    return false;
+    return this.audio.changeCompressor(enabled);
   }
 
-  public changeEqualizer(bass: number, treble: number, compressor: boolean): boolean {
-    if (this.processorResult?.setEqualizer) {
-      this.processorResult.setEqualizer(bass, treble, compressor);
-      this.audioBass = bass;
-      this.audioTreble = treble;
-      this.audioCompressor = compressor;
-      return true;
-    }
-    return false;
+  public changeNormalize(enabled: boolean): boolean {
+    return this.audio.changeNormalize(enabled);
   }
 
   public input(
@@ -295,9 +230,13 @@ export default class FluentStream extends EventEmitter {
           !opts?.allowDuplicate &&
           this.inputSources.some((s) => s.type === "url" && s.url === input)
         ) {
-          this.emitLog("warn", `input(): Duplicate URL input detected: "${input}"`, {
-            code: "FluentStream-duplicate-url-input",
-          });
+          this.emitLog(
+            "warn",
+            `input(): Duplicate URL input detected: "${input}"`,
+            {
+              code: "FluentStream-duplicate-url-input",
+            },
+          );
           return this;
         }
         const index = this.inputSources.length;
@@ -309,9 +248,13 @@ export default class FluentStream extends EventEmitter {
         !opts?.allowDuplicate &&
         this.args.some((v, i) => v === "-i" && this.args[i + 1] === input)
       ) {
-        this.emitLog("warn", `input(): Duplicate string input detected: "${input}"`, {
-          code: "FluentStream-duplicate-string-input",
-        });
+        this.emitLog(
+          "warn",
+          `input(): Duplicate string input detected: "${input}"`,
+          {
+            code: "FluentStream-duplicate-string-input",
+          },
+        );
         return this;
       }
 
@@ -321,14 +264,16 @@ export default class FluentStream extends EventEmitter {
 
     let isReadableStream = typeof (input as any).getReader === "function";
     let isNodeReadable =
-      typeof (input as any).on === "function" && typeof (input as any).pipe === "function";
+      typeof (input as any).on === "function" &&
+      typeof (input as any).pipe === "function";
 
     if (isNodeReadable && !isReadableStream) {
       const nodeStream = input as any;
       const webStream = new ReadableStream<Uint8Array>({
         start(controller) {
           nodeStream.on("data", (chunk: any) => {
-            const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+            const bytes =
+              chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
             controller.enqueue(bytes);
           });
           nodeStream.on("end", () => controller.close());
@@ -347,19 +292,32 @@ export default class FluentStream extends EventEmitter {
     if (isReadableStream) {
       let streamIdx: number;
 
-      if (opts?.pipeIndex != null && Number.isFinite(opts.pipeIndex) && opts.pipeIndex >= 0) {
+      if (
+        opts?.pipeIndex != null &&
+        Number.isFinite(opts.pipeIndex) &&
+        opts.pipeIndex >= 0
+      ) {
         if (this.inputStreams.some((entry) => entry.index === opts.pipeIndex)) {
-          throw new FluentStreamValidationError(`input(): Duplicate pipe index: ${opts.pipeIndex}`);
+          throw new FluentStreamValidationError(
+            `input(): Duplicate pipe index: ${opts.pipeIndex}`,
+          );
         }
         streamIdx = opts.pipeIndex;
       } else {
         streamIdx = this.inputStreams.length;
       }
 
-      if (!opts?.allowDuplicate && this.inputStreams.some((s) => s.stream === input)) {
-        this.emitLog("warn", "input(): Duplicate Readable stream detected (skipped)", {
-          code: "FluentStream-duplicate-pipe",
-        });
+      if (
+        !opts?.allowDuplicate &&
+        this.inputStreams.some((s) => s.stream === input)
+      ) {
+        this.emitLog(
+          "warn",
+          "input(): Duplicate Readable stream detected (skipped)",
+          {
+            code: "FluentStream-duplicate-pipe",
+          },
+        );
         return this;
       }
 
@@ -378,14 +336,31 @@ export default class FluentStream extends EventEmitter {
   }
 
   public output(
-    output: string | ReadableStream<Uint8Array> | number | { pipe?: string } | undefined | null,
+    output:
+      | string
+      | ReadableStream<Uint8Array>
+      | number
+      | { pipe?: string }
+      | undefined
+      | null,
   ): this {
     this.requireClean("output");
-    if (output && typeof output === "object" && "pipe" in output && output.pipe) {
+    if (
+      output &&
+      typeof output === "object" &&
+      "pipe" in output &&
+      output.pipe
+    ) {
       const pipeName = output.pipe;
 
-      if (pipeName === "stdout" || pipeName === "stderr" || pipeName === "1" || pipeName === "2") {
-        const pipeTarget = pipeName === "stdout" || pipeName === "1" ? "pipe:1" : "pipe:2";
+      if (
+        pipeName === "stdout" ||
+        pipeName === "stderr" ||
+        pipeName === "1" ||
+        pipeName === "2"
+      ) {
+        const pipeTarget =
+          pipeName === "stdout" || pipeName === "1" ? "pipe:1" : "pipe:2";
         this.args.push(pipeTarget);
         return this;
       }
@@ -395,11 +370,18 @@ export default class FluentStream extends EventEmitter {
         return this;
       }
 
-      throw new FluentStreamValidationError(`output(): Invalid pipe target: ${String(pipeName)}`);
+      throw new FluentStreamValidationError(
+        `output(): Invalid pipe target: ${String(pipeName)}`,
+      );
     }
 
-    if (output == null || (typeof output === "string" && output.trim().length === 0)) {
-      throw new FluentStreamValidationError("output(): requires non-empty string or pipe object");
+    if (
+      output == null ||
+      (typeof output === "string" && output.trim().length === 0)
+    ) {
+      throw new FluentStreamValidationError(
+        "output(): requires non-empty string or pipe object",
+      );
     }
 
     this.args.push(String(output));
@@ -410,7 +392,10 @@ export default class FluentStream extends EventEmitter {
     return this.getMergedHeaders();
   }
 
-  public setHeaders(headers?: Record<string, string> | null, opts?: { merge?: boolean }): this {
+  public setHeaders(
+    headers?: Record<string, string> | null,
+    opts?: { merge?: boolean },
+  ): this {
     this.requireClean("setHeaders");
     if (headers == null) {
       this.headers = undefined;
@@ -425,8 +410,11 @@ export default class FluentStream extends EventEmitter {
 
   public userAgent(userAgent?: string | null): this {
     this.requireClean("userAgent");
-    for (let i = 0; i < this.args.length; ) {
-      if (this.args[i] === "-user_agent" && typeof this.args[i + 1] === "string") {
+    for (let i = 0; i < this.args.length;) {
+      if (
+        this.args[i] === "-user_agent" &&
+        typeof this.args[i + 1] === "string"
+      ) {
         this.args.splice(i, 2);
       } else {
         i++;
@@ -443,7 +431,9 @@ export default class FluentStream extends EventEmitter {
 
       const hasHTTPInput = this.args.some(
         (v, idx, arr) =>
-          v === "-i" && typeof arr[idx + 1] === "string" && /^https?:\/\//.test(arr[idx + 1]!),
+          v === "-i" &&
+          typeof arr[idx + 1] === "string" &&
+          /^https?:\/\//.test(arr[idx + 1]!),
       );
 
       if (!hasHTTPInput) {
@@ -510,7 +500,7 @@ export default class FluentStream extends EventEmitter {
   }
 
   public format(fmt: string): this {
-    for (let i = 0; i < this.args.length - 1; ) {
+    for (let i = 0; i < this.args.length - 1;) {
       if (this.args[i] === "-f") {
         this.args.splice(i, 2);
       } else {
@@ -553,7 +543,10 @@ export default class FluentStream extends EventEmitter {
 
   public seekInput(position: number | string): this {
     this.requireClean("seekInput");
-    if (position == null || (typeof position === "string" && !position.trim())) {
+    if (
+      position == null ||
+      (typeof position === "string" && !position.trim())
+    ) {
       throw new FluentStreamValidationError(
         "seekInput: position must be non-empty string or number",
       );
@@ -591,14 +584,19 @@ export default class FluentStream extends EventEmitter {
   }
 
   public copyCodecs(): this {
-    if (this.args.some((_v, i, arr) => arr[i] === "-c" && arr[i + 1] === "copy")) {
+    if (
+      this.args.some((_v, i, arr) => arr[i] === "-c" && arr[i + 1] === "copy")
+    ) {
       return this;
     }
     this.args.push("-c", "copy");
     return this;
   }
 
-  public crossfadeAudio(durationSec: number, options: CrossfadeAudioOptions = {}): this {
+  public crossfadeAudio(
+    durationSec: number,
+    options: CrossfadeAudioOptions = {},
+  ): this {
     this.requireClean("crossfadeAudio");
     if (
       durationSec == null ||
@@ -615,7 +613,9 @@ export default class FluentStream extends EventEmitter {
       const second = options.secondInput;
 
       if (typeof second === "string") {
-        const already = this.args.some((v, i) => v === "-i" && this.args[i + 1] === second);
+        const already = this.args.some(
+          (v, i) => v === "-i" && this.args[i + 1] === second,
+        );
         if (!already) {
           this.input(second);
         }
@@ -657,7 +657,9 @@ export default class FluentStream extends EventEmitter {
   public inputBlob(blobUrl: string, index?: number): this {
     this.requireClean("inputBlob");
     if (!blobUrl || typeof blobUrl !== "string") {
-      throw new FluentStreamValidationError("inputBlob(): blobUrl must be a non-empty string");
+      throw new FluentStreamValidationError(
+        "inputBlob(): blobUrl must be a non-empty string",
+      );
     }
 
     const inputIndex = index ?? this.inputSources.length;
@@ -727,7 +729,10 @@ export default class FluentStream extends EventEmitter {
       }
     }
 
-    if (typeof this.options.wallTimeLimit === "number" && this.options.wallTimeLimit > 0) {
+    if (
+      typeof this.options.wallTimeLimit === "number" &&
+      this.options.wallTimeLimit > 0
+    ) {
       finalArgs.push("-timelimit", String(this.options.wallTimeLimit));
     }
 
@@ -740,7 +745,12 @@ export default class FluentStream extends EventEmitter {
     pipeStreams: string[];
     complexFilters: string[];
   } {
-    return summarizeInputs(this.args, this.inputStreams, this.complexFilters, this.inputSources);
+    return summarizeInputs(
+      this.args,
+      this.inputStreams,
+      this.complexFilters,
+      this.inputSources,
+    );
   }
 
   public countInputs(): {
@@ -767,7 +777,9 @@ export default class FluentStream extends EventEmitter {
    * ```
    * * @throws {FluentStreamValidationError} If the stream is dirty (already executed without `.clear()`)
    */
-  public async run(extraOpts: Partial<ProcessorOptions> = {}): Promise<FFmpegRunResultExtended> {
+  public async run(
+    extraOpts: Partial<ProcessorOptions> = {},
+  ): Promise<FFmpegRunResultExtended> {
     if (this.isDirty) {
       throw new FluentStreamValidationError(
         "FluentStream is dirty — you cannot call `.run()` multiple times on the same configuration. " +
@@ -778,10 +790,12 @@ export default class FluentStream extends EventEmitter {
     this.isDirty = true;
     const result = await processor.run();
     this.processorResult = result;
+    this.audio.attachResult(result);
 
     const clearProcessorResult = () => {
       if (this.processorResult === result) {
         this.processorResult = null;
+        this.audio.attachResult(null);
       }
     };
     result.done.then(clearProcessorResult, clearProcessorResult);
@@ -838,11 +852,11 @@ export default class FluentStream extends EventEmitter {
       })),
       filters: [...this.complexFilters],
       audioState: {
-        volume: this.audioVolume,
-        bass: this.audioBass,
-        treble: this.audioTreble,
-        compressor: this.audioCompressor,
-        audioProcessor: this.enabledAudioProcessor,
+        volume: this.audio.volume,
+        bass: this.audio.bass,
+        treble: this.audio.treble,
+        compressor: this.audio.compressor,
+        audioProcessor: this.audio.enabled,
       },
     };
   }

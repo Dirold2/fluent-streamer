@@ -568,7 +568,9 @@ describe("FluentStream API", () => {
       const firstRun = await stream.run();
       await firstRun.done;
 
-      stream.setEqualizer(10, 5, true);
+      stream.setBass(10);
+      stream.setTreble(5);
+      stream.setCompressor(true);
 
       const secondRun = await stream
         .clear()

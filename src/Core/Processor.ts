@@ -11,7 +11,10 @@ import { AudioEffectController } from "../Audio/AudioEffectController.js";
 import { getTimeString } from "./utils.js";
 import { buildFullArgs } from "./processor/args.js";
 import { resolveBlobToStream } from "./processor/blob.js";
-import { buildProcessorConfig, type ProcessorConfig } from "./processor/config.js";
+import {
+  buildProcessorConfig,
+  type ProcessorConfig,
+} from "./processor/config.js";
 import { buildAcrossfadeFilter } from "./processor/acrossfade.js";
 import {
   ensureOutputDrained,
@@ -21,10 +24,15 @@ import {
   updateThrottleBitrate,
 } from "./processor/pipeline.js";
 import { createSilenceBuffer, createSilenceMs } from "./processor/silence.js";
-import { StderrTracker, buildProcessExitError, readStderrStream } from "./processor/stderr.js";
+import {
+  StderrTracker,
+  buildProcessExitError,
+  readStderrStream,
+} from "./processor/stderr.js";
 import { resolveFfmpegPath } from "./processor/ffmpegPath.js";
 
-type ProcessorState = "idle" | "running" | "terminating" | "finished" | "failed" | "closed";
+type ProcessorState =
+  "idle" | "running" | "terminating" | "finished" | "failed" | "closed";
 type TerminationReason = "user" | "close" | "timeout" | "destroy" | null;
 
 export class Processor extends EventEmitter {
@@ -55,12 +63,14 @@ export class Processor extends EventEmitter {
   private _pendingProcessExitLog: (() => void) | null = null;
   private useAudioProcessor = false;
   private endSequenceFn: (() => void) | null = null;
-  private throttledOutput: TransformStream<Uint8Array, Uint8Array> | null = null;
+  private throttledOutput: TransformStream<Uint8Array, Uint8Array> | null =
+    null;
   private _pipelinePromise: Promise<void> | null = null;
   private currentVolume = 1;
   private currentBass = 0;
   private currentTreble = 0;
   private currentCompressor = false;
+  private currentNormalize = false;
   private _startTime = 0;
   private _totalChunks = 0;
   private _skipInProgress = false;
@@ -82,7 +92,8 @@ export class Processor extends EventEmitter {
     this.currentVolume = this.config.audioProcessorOptions?.volume ?? 1;
     this.currentBass = this.config.audioProcessorOptions?.bass ?? 0;
     this.currentTreble = this.config.audioProcessorOptions?.treble ?? 0;
-    this.currentCompressor = this.config.audioProcessorOptions?.compressor ?? false;
+    this.currentCompressor =
+      this.config.audioProcessorOptions?.compressor ?? false;
 
     this.stderrTracker = new StderrTracker(this.config, {
       onProgress: (progress) => this.emit("progress", progress),
@@ -277,6 +288,7 @@ export class Processor extends EventEmitter {
       bass: this.currentBass,
       treble: this.currentTreble,
       compressor: this.currentCompressor,
+      normalize: this.currentNormalize ?? false,
     });
 
     return {
@@ -290,7 +302,7 @@ export class Processor extends EventEmitter {
       setBass: (b) => controller.setBass(b),
       setTreble: (t) => controller.setTreble(t),
       setCompressor: (c) => controller.setCompressor(c),
-      setEqualizer: (b, t, c) => controller.setEqualizer(b, t, c),
+      setNormalize: (n) => controller.setNormalize(n),
       startFade: (tv, dur) => controller.startFade(tv, dur),
     };
   }
@@ -394,10 +406,19 @@ export class Processor extends EventEmitter {
   }
 
   public createSilenceMs(durationMs = 100, sampleRate = 48000, channels = 2) {
-    return createSilenceMs(durationMs, sampleRate, channels, this.stderrTracker.getBitrate());
+    return createSilenceMs(
+      durationMs,
+      sampleRate,
+      channels,
+      this.stderrTracker.getBitrate(),
+    );
   }
 
-  public createSilenceBuffer(durationMs = 100, sampleRate = 48000, channels = 2) {
+  public createSilenceBuffer(
+    durationMs = 100,
+    sampleRate = 48000,
+    channels = 2,
+  ) {
     return createSilenceBuffer(durationMs, sampleRate, channels);
   }
 
@@ -513,7 +534,9 @@ export class Processor extends EventEmitter {
       };
 
       if (this._pipelinePromise) {
-        this._pipelinePromise.then(finalizeAfterDelay).catch(() => finalizeAfterDelay());
+        this._pipelinePromise
+          .then(finalizeAfterDelay)
+          .catch(() => finalizeAfterDelay());
       } else {
         finalizeAfterDelay();
       }
@@ -588,6 +611,10 @@ export class Processor extends EventEmitter {
       this.process.stderr,
       (chunk) => this.stderrTracker.handleChunk(chunk),
       (text) => this.config.stderrLogHandler?.(text),
+      (err) => {
+        this.emit("error", err);
+        this._finalize(err, "failed");
+      },
     );
   }
 
@@ -623,7 +650,10 @@ export class Processor extends EventEmitter {
           }
         }, 0);
       } else {
-        this._finalize(undefined, this.terminationReason === "close" ? "closed" : "finished");
+        this._finalize(
+          undefined,
+          this.terminationReason === "close" ? "closed" : "finished",
+        );
       }
     } else {
       const error = isTimeout
@@ -697,12 +727,18 @@ export class Processor extends EventEmitter {
 
   private _cleanup(): void {
     try {
+      if (this.process) {
+        try {
+          this.process.kill("SIGKILL");
+        } catch {
+          //
+        }
+        this.process = null;
+      }
       this.outputStream = null;
-    } catch {
-      //
-    }
-    try {
       this.throttledOutput = null;
+      this._pipelinePromise = null;
+      this.endSequenceFn = null;
     } catch {
       //
     }

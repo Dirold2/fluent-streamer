@@ -2,7 +2,7 @@
 
 [Перейти на русскую версию](https://github.com/Dirold2/fluent-streamer/tree/main/lang/ru)
 
-_Fluent_ FFmpeg wrapper for TypeScript runtimes, **v0.5.1**  
+_Fluent_ FFmpeg wrapper for TypeScript runtimes, **v0.5.4**  
 Offers a fluent, chainable API for media/audio/video processing with FFmpeg, supporting streams, crossfade, audio effects, timeouts, and progress tracking.
 
 - **TypeScript-first**: typed, chainable, and modern
@@ -284,7 +284,7 @@ Creates a new FluentStream instance with optional processor options.
 - `failFast?: boolean` - Stop processing on first error
 - `wallTimeLimit?: number` - Maximum wall clock time limit
 - `useAudioProcessor?: boolean` - Enable built-in audio processing
-- `audioProcessorOptions?: AudioProcessingOptions` - Audio effect defaults (volume, bass, treble, compressor, sampleRate, channels)
+- `audioProcessorOptions?: AudioProcessingOptions` - Audio effect defaults (volume, bass, treble, compressor, normalize, sampleRate, channels, cloneInput)
 - `logger?: Logger` - Custom logger instance (debug, info, warn, error)
 - `verbose?: boolean` - Enable debug log output
 
@@ -386,8 +386,8 @@ Adjust treble level (-20 to 20): `0` (neutral), `5` (boost), `-3` (cut).
 #### `.setCompressor(enabled: boolean)`
 Enable/disable audio compression for consistency.
 
-#### `.setEqualizer(bass, treble, compressor)`
-Set all EQ parameters at once.
+#### `.setNormalize(enabled: boolean)`
+Enable/disable automatic peak normalization for PCM audio.
 
 #### `.fadeIn(targetVolume?: number, durationMs?: number)`
 Fade in from current volume to target volume.
@@ -400,7 +400,7 @@ Fade out to silence.
 - `.changeBass(value: number)` — boolean success
 - `.changeTreble(value: number)` — boolean success
 - `.changeCompressor(enabled: boolean)` — boolean success
-- `.changeEqualizer(bass, treble, compressor)` — boolean success
+- `.changeNormalize(enabled: boolean)` — boolean success
 
 ### Advanced Features
 
@@ -440,7 +440,7 @@ Start processing asynchronously. Returns:
   stop: () => void,                    // User stop/kill helper
   passthrough: ReadableStream<Uint8Array>,
   close: () => Promise<void> | void,
-  setVolume?, setBass?, setTreble?, setCompressor?, setEqualizer?, startFade?
+  setVolume?, setBass?, setTreble?, setCompressor?, setNormalize?, startFade?
 }
 ```
 

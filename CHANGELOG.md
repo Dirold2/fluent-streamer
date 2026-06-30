@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.4] – 2026-07-01
+
+### Added
+- **Normalizer audio effect:** New `normalize` property on `FluentStream` and `AudioProcessor` for automatic peak normalization of PCM audio. Accessible via `.setNormalize(true)` on the `run()` result and `FluentStream` property accessor.
+- **`cloneInput` option:** Added to `AudioProcessingOptions` — when `true`, the audio processor clones input buffers before processing to avoid mutation of shared `Uint8Array` instances.
+- **`FluentAudioState` class:** Extracted audio state management from `FluentStream` into a dedicated class, reducing `FluentStream` boilerplate.
+
+### Changed
+- **Audio Processor refactored into modular effects system:** The monolithic `AudioProcessor.processPcmBufferAligned()` DSP logic has been decomposed into separate effect classes under `src/Audio/effects/` — `VolumeEffect`, `FadeEffect`, `BassEffect`, `TrebleEffect`, `CompressorEffect`, and `NormalizerEffect`. Each class owns its biquad filter state and coefficient computation.
+- **Replaced `setEqualizer` with `setNormalize`:** `Processor.run()` result and `FFmpegRunResultExtended` now expose `setNormalize(enabled)` instead of `setEqualizer(bass, treble, compressor)`. Use individual `setBass`, `setTreble`, `setCompressor` methods instead.
+- **`AudioEffectController` updated:** Replaced `setEqualizer()` with per-effect setters (`setBass`, `setTreble`, `setCompressor`, `setNormalize`). Updated to set properties directly on `AudioProcessor` (e.g. `audioProcessor.bass = b`).
+- **`ThrottleStream` rewritten:** Uses `performance.now()` instead of `Date.now()`, proper pending timer management with cancellation, and a shorter 500ms window for more responsive throttling.
+- **Processor cleanup improvements:** `_cleanup()` now kills the FFmpeg child process with `SIGKILL` before nullifying references. `readStderrStream` forwards errors through a new `onError` callback, which `Processor` uses to emit `'error'` and finalize the run.
+- **`FluentStream` audio state delegation:** All audio property accessors (`volume`, `bass`, `treble`, `compressor`, `useAudioProcessor`) and chain methods (`setVolume`, `setBass`, etc.) now delegate to `FluentAudioState` instead of managing state directly.
+
+### Fixed
+- **`AudioProcessor` bypass detection:** Fade effect active state is now checked via `this.fadeEffect.active` instead of a stale `fadeActive` boolean flag.
+- **`fade-end` event emission:** The fade completion event is now emitted once after the loop, rather than inline during `nextVolume()`.
+
 ## [0.5.3] – 2026-06-24
 
 ### Added
