@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/Core/index.ts"],
+  "sourcesContent": ["export { default as Processor } from \"./Processor.js\";\n"],
+  "mappings": "aAAA,OAAS,WAAW,cAAiB",
+  "names": []
+}

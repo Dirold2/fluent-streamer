@@ -1,0 +1,2 @@
+"use strict";export class NormalizerEffect{enabled;prevScale=1;SMOOTHING=.85;constructor(e){this.enabled=e}set(e){this.enabled=e}calculateScale(e){if(!this.enabled)return 1;let t=0;const s=e.length;for(let a=0;a<s;a++){const l=e[a],c=l<0?-l:l;c>t&&(t=c)}const r=t>0?32767/t:1;return this.prevScale=this.prevScale*this.SMOOTHING+r*(1-this.SMOOTHING),this.prevScale}}
+//# sourceMappingURL=normalizer.js.map

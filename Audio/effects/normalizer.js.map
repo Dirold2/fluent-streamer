@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../src/Audio/effects/normalizer.ts"],
+  "sourcesContent": ["export class NormalizerEffect {\n  public enabled: boolean;\n  private prevScale = 1;\n  private readonly SMOOTHING = 0.85;\n\n  constructor(enabled: boolean) {\n    this.enabled = enabled;\n  }\n\n  public set(enabled: boolean): void {\n    this.enabled = enabled;\n  }\n\n  public calculateScale(samples: Int16Array): number {\n    if (!this.enabled) return 1;\n\n    let peak = 0;\n    const totalSamples = samples.length;\n    for (let i = 0; i < totalSamples; i++) {\n      const v = samples[i]!;\n      const abs = v < 0 ? -v : v;\n      if (abs > peak) peak = abs;\n    }\n\n    const rawScale = peak > 0 ? 32767 / peak : 1;\n    this.prevScale =\n      this.prevScale * this.SMOOTHING + rawScale * (1 - this.SMOOTHING);\n    return this.prevScale;\n  }\n}\n"],
+  "mappings": "aAAM,aAAO,gBAAgB,CACpB,QACC,UAAY,EACH,UAAY,IAE7B,YAAYA,EAAgB,CAC1B,KAAK,QAAUA,CACjB,CAEO,IAAIA,EAAgB,CACzB,KAAK,QAAUA,CACjB,CAEO,eAAeC,EAAmB,CACvC,GAAI,CAAC,KAAK,QAAS,MAAO,GAE1B,IAAIC,EAAO,EACX,MAAMC,EAAeF,EAAQ,OAC7B,QAASG,EAAI,EAAGA,EAAID,EAAcC,IAAK,CACrC,MAAMC,EAAIJ,EAAQG,CAAC,EACbE,EAAMD,EAAI,EAAI,CAACA,EAAIA,EACrBC,EAAMJ,IAAMA,EAAOI,EACzB,CAEA,MAAMC,EAAWL,EAAO,EAAI,MAAQA,EAAO,EAC3C,YAAK,UACH,KAAK,UAAY,KAAK,UAAYK,GAAY,EAAI,KAAK,WAClD,KAAK,SACd",
+  "names": ["enabled", "samples", "peak", "totalSamples", "i", "v", "abs", "rawScale"]
+}

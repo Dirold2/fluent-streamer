@@ -1,0 +1,2 @@
+"use strict";export function createSilenceMs(e=100,t=48e3,n=2,i=128){const a=t*n*2,r=Math.floor(e/1e3*a),l=Math.min(512,Math.max(128,i/128*256)),u=Math.min(l,r);let c=0;return new ReadableStream({pull(s){if(c>=r){s.close();return}const S=r-c,o=Math.min(u,S);s.enqueue(new Uint8Array(o)),c+=o}})}export function createSilenceBuffer(e=100,t=48e3,n=2){const a=Math.floor(e/1e3*t*n*2);return new Uint8Array(a)}
+//# sourceMappingURL=silence.js.map

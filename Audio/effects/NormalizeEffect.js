@@ -1,0 +1,2 @@
+"use strict";export class NormalizeEffect{name="normalize";_enabled;constructor(e){this._enabled=e}get enabled(){return this._enabled}setEnabled(e){this._enabled=e}isActive(){return this._enabled}process(e,a,c){if(!this._enabled)return;let n=0;for(let t=0;t<e.length;t++){const r=e[t],s=r<0?-r:r;s>n&&(n=s)}if(n<=0)return;const l=1/n;for(let t=0;t<e.length;t++)e[t]=e[t]*l}reset(){}}
+//# sourceMappingURL=NormalizeEffect.js.map

@@ -1,0 +1,1 @@
+{"version":3,"file":"BaseEffect.d.ts","sourceRoot":"","sources":["../../../src/Audio/effects/BaseEffect.ts"],"names":[],"mappings":"AAAA,MAAM,WAAW,WAAW;IAC1B,QAAQ,CAAC,IAAI,EAAE,MAAM,CAAC;IACtB,QAAQ,IAAI,OAAO,CAAC;IACpB,OAAO,CAAC,OAAO,EAAE,YAAY,EAAE,QAAQ,EAAE,MAAM,EAAE,MAAM,EAAE,MAAM,GAAG,IAAI,CAAC;IACvE,KAAK,IAAI,IAAI,CAAC;CACf"}

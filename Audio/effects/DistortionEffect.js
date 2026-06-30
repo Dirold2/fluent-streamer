@@ -1,0 +1,2 @@
+"use strict";export class DistortionEffect{name="distortion";_drive;_outputGain;constructor(t){this._drive=t?.drive??.5,this._outputGain=t?.outputGain??.7}get drive(){return this._drive}get outputGain(){return this._outputGain}setDrive(t){this._drive=Math.max(0,Math.min(1,t))}setOutputGain(t){this._outputGain=Math.max(0,Math.min(1,t))}isActive(){return this._drive>0}process(t,u,o){if(this._drive<=0)return;const e=this._drive*5,r=this._outputGain;for(let i=0;i<t.length;i++){const s=t[i];t[i]=Math.tanh(s*e)*r}}reset(){}}
+//# sourceMappingURL=DistortionEffect.js.map

@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../src/Audio/effects/index.ts"],
+  "sourcesContent": ["export type { AudioEffect } from \"./BaseEffect.js\";\nexport { VolumeEffect } from \"./VolumeEffect.js\";\nexport { BiquadEffect, calcLowShelfCoeffs, calcHighShelfCoeffs, calcPeakingCoeffs, processBiquad } from \"./BiquadEffect.js\";\nexport { BassEffect } from \"./BassEffect.js\";\nexport { TrebleEffect } from \"./TrebleEffect.js\";\nexport { CompressorEffect } from \"./CompressorEffect.js\";\nexport { FadeEffect } from \"./FadeEffect.js\";\nexport { NormalizeEffect } from \"./NormalizeEffect.js\";\nexport { DelayEffect } from \"./DelayEffect.js\";\nexport { ReverbEffect } from \"./ReverbEffect.js\";\nexport { DistortionEffect } from \"./DistortionEffect.js\";\nexport { userToGainLinear, userToGainDb, compressSample, clampVolume, normalizeBass, normalizeTreble } from \"./utils.js\";\n"],
+  "mappings": "aACA,OAAS,iBAAoB,oBAC7B,OAAS,aAAc,mBAAoB,oBAAqB,kBAAmB,kBAAqB,oBACxG,OAAS,eAAkB,kBAC3B,OAAS,iBAAoB,oBAC7B,OAAS,qBAAwB,wBACjC,OAAS,eAAkB,kBAC3B,OAAS,oBAAuB,uBAChC,OAAS,gBAAmB,mBAC5B,OAAS,iBAAoB,oBAC7B,OAAS,qBAAwB,wBACjC,OAAS,iBAAkB,aAAc,eAAgB,YAAa,cAAe,oBAAuB",
+  "names": []
+}

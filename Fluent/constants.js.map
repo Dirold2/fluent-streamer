@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/Fluent/constants.ts"],
+  "sourcesContent": ["import type { Logger } from \"../Types/index.js\";\n\nexport const HUMANITY_HEADERS = Object.freeze({\n  \"X-Human-Intent\": \"true\",\n  \"X-Request-Attention\": \"just-want-to-do-my-best\",\n  \"User-Agent\": \"FluentStream/1.0 (friendly bot)\",\n});\n\nexport const DEFAULT_LOGGER: Logger = {\n  debug: () => {},\n  info: () => {},\n  log: () => {},\n  warn: () => {},\n  error: () => {},\n};\n"],
+  "mappings": "aAEO,aAAM,iBAAmB,OAAO,OAAO,CAC5C,iBAAkB,OAClB,sBAAuB,0BACvB,aAAc,kCACf,EAEY,eAAyB,CACpC,MAAO,IAAK,CAAE,EACd,KAAM,IAAK,CAAE,EACb,IAAK,IAAK,CAAE,EACZ,KAAM,IAAK,CAAE,EACb,MAAO,IAAK,CAAE",
+  "names": []
+}

@@ -1,0 +1,55 @@
+import { EventEmitter } from "eventemitter3";
+import type { AudioProcessingOptions } from "../Types/index.js";
+import type { FilterState } from "../Types/audio.js";
+import { compressSample } from "./effects/compressor.js";
+export { compressSample };
+export declare class AudioProcessor extends EventEmitter {
+    readonly readable: ReadableStream<Uint8Array>;
+    readonly writable: WritableStream<Uint8Array>;
+    private volumeEffect;
+    private fadeEffect;
+    private bassEffect;
+    private trebleEffect;
+    private compressorEffect;
+    private normalizerEffect;
+    private isDestroyed;
+    private isWritableEnded;
+    private readonly sampleRate;
+    private readonly channels;
+    private readonly frameSizeBytes;
+    private leftover;
+    cloneInput: boolean;
+    get volume(): number;
+    set volume(v: number);
+    get bass(): number;
+    set bass(v: number);
+    get treble(): number;
+    set treble(v: number);
+    get compressor(): boolean;
+    set compressor(v: boolean);
+    get normalize(): boolean;
+    set normalize(v: boolean);
+    get filterState(): FilterState;
+    get destroyed(): boolean;
+    get writableEnded(): boolean;
+    constructor(options: AudioProcessingOptions & {
+        sampleRate?: number;
+        channels?: number;
+    });
+    getSampleRate(): number;
+    getChannels(): number;
+    setVolume(volume: number): void;
+    startFade(targetVolume: number, durationMs: number): void;
+    setEqualizer(bass: number, treble: number, compressor: boolean): void;
+    setCompressor(enabled: boolean): void;
+    setNormalize(enabled: boolean): void;
+    private shouldBypass;
+    private isTerminated;
+    private processStereoSample;
+    private processPcmBufferAligned;
+    private splitAligned;
+    processBuffer(buffer: Uint8Array): Uint8Array;
+    flushBuffer(): Uint8Array;
+    private setupEventHandlers;
+}
+//# sourceMappingURL=AudioProcessor.d.ts.map

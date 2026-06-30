@@ -1,0 +1,1 @@
+{"version":3,"file":"browser.d.ts","sourceRoot":"","sources":["../../../src/Runner/runners/browser.ts"],"names":[],"mappings":"AAAA,OAAO,KAAK,EAAE,YAAY,EAAE,aAAa,EAAE,MAAM,qBAAqB,CAAC;AAqPvE,qBAAa,mBAAoB,YAAW,YAAY;IACtD,KAAK,CAAC,WAAW,EAAE,MAAM,EAAE,IAAI,EAAE,MAAM,EAAE,GAAG,aAAa;CAG1D"}

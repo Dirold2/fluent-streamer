@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../src/Audio/effects/CompressorEffect.ts"],
+  "sourcesContent": ["import type { AudioEffect } from \"./BaseEffect.js\";\nimport { compressSample } from \"./utils.js\";\n\nexport class CompressorEffect implements AudioEffect {\n  readonly name = \"compressor\";\n  private _enabled: boolean;\n\n  constructor(enabled: boolean) {\n    this._enabled = enabled;\n  }\n\n  get enabled(): boolean {\n    return this._enabled;\n  }\n\n  setEnabled(v: boolean): void {\n    this._enabled = v;\n  }\n\n  isActive(): boolean {\n    return this._enabled;\n  }\n\n  process(samples: Float64Array, _channels: number, _frames: number): void {\n    if (!this._enabled) return;\n    for (let i = 0; i < samples.length; i++) {\n      samples[i] = compressSample(samples[i]!);\n    }\n  }\n\n  reset(): void {\n    // no state\n  }\n}\n"],
+  "mappings": "aACA,OAAS,kBAAAA,MAAsB,aAEzB,aAAO,gBAAgB,CAClB,KAAO,aACR,SAER,YAAYC,EAAgB,CAC1B,KAAK,SAAWA,CAClB,CAEA,IAAI,SAAO,CACT,OAAO,KAAK,QACd,CAEA,WAAWC,EAAU,CACnB,KAAK,SAAWA,CAClB,CAEA,UAAQ,CACN,OAAO,KAAK,QACd,CAEA,QAAQC,EAAuBC,EAAmBC,EAAe,CAC/D,GAAK,KAAK,SACV,QAASC,EAAI,EAAGA,EAAIH,EAAQ,OAAQG,IAClCH,EAAQG,CAAC,EAAIN,EAAeG,EAAQG,CAAC,CAAE,CAE3C,CAEA,OAAK,CAEL,CAAA",
+  "names": ["compressSample", "enabled", "v", "samples", "_channels", "_frames", "i"]
+}

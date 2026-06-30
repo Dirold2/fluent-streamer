@@ -1,0 +1,1 @@
+{"version":3,"file":"volume.d.ts","sourceRoot":"","sources":["../../../src/Audio/effects/volume.ts"],"names":[],"mappings":"AAEA,wBAAgB,WAAW,CAAC,MAAM,EAAE,MAAM,GAAG,MAAM,CAElD;AAED,qBAAa,YAAY;IAChB,KAAK,EAAE,MAAM,CAAC;gBAET,aAAa,EAAE,MAAM;IAI1B,GAAG,CAAC,MAAM,EAAE,MAAM,GAAG,IAAI;CAGjC"}

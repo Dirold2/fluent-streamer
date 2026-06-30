@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../src/index.ts"],
+  "sourcesContent": ["export { Processor } from \"./Core/index.js\";\nexport { FluentStream } from \"./Fluent/index.js\";\n\nexport type * from \"./Types/index.js\";\n"],
+  "mappings": "aAAA,OAAS,cAAiB,kBAC1B,OAAS,iBAAoB",
+  "names": []
+}

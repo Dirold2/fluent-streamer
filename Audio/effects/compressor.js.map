@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../src/Audio/effects/compressor.ts"],
+  "sourcesContent": ["export function compressSample(\n  value: number,\n  threshold = 0.8,\n  ratio = 4,\n): number {\n  const abs = Math.abs(value);\n  if (abs <= threshold) return value;\n  const excess = abs - threshold;\n  const compressed = threshold + excess / ratio;\n  return Math.sign(value) * compressed;\n}\n\nexport class CompressorEffect {\n  public enabled: boolean;\n\n  constructor(enabled: boolean) {\n    this.enabled = enabled;\n  }\n\n  public set(enabled: boolean): void {\n    this.enabled = enabled;\n  }\n}\n"],
+  "mappings": "aAAM,gBAAU,eACdA,EACAC,EAAY,GACZC,EAAQ,EAAC,CAET,MAAMC,EAAM,KAAK,IAAIH,CAAK,EAC1B,GAAIG,GAAOF,EAAW,OAAOD,EAC7B,MAAMI,EAASD,EAAMF,EACfI,EAAaJ,EAAYG,EAASF,EACxC,OAAO,KAAK,KAAKF,CAAK,EAAIK,CAC5B,CAEM,aAAO,gBAAgB,CACpB,QAEP,YAAYC,EAAgB,CAC1B,KAAK,QAAUA,CACjB,CAEO,IAAIA,EAAgB,CACzB,KAAK,QAAUA,CACjB",
+  "names": ["value", "threshold", "ratio", "abs", "excess", "compressed", "enabled"]
+}

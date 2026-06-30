@@ -1,0 +1,1 @@
+{"version":3,"file":"normalizer.d.ts","sourceRoot":"","sources":["../../../src/Audio/effects/normalizer.ts"],"names":[],"mappings":"AAAA,qBAAa,gBAAgB;IACpB,OAAO,EAAE,OAAO,CAAC;IACxB,OAAO,CAAC,SAAS,CAAK;IACtB,OAAO,CAAC,QAAQ,CAAC,SAAS,CAAQ;gBAEtB,OAAO,EAAE,OAAO;IAIrB,GAAG,CAAC,OAAO,EAAE,OAAO,GAAG,IAAI;IAI3B,cAAc,CAAC,OAAO,EAAE,UAAU,GAAG,MAAM;CAgBnD"}

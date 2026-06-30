@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/Types/audio.ts"],
+  "sourcesContent": ["export const VOLUME_MIN = 0;\nexport const VOLUME_MAX = 1;\nexport const BASS_MIN = -20;\nexport const BASS_MAX = 20;\nexport const TREBLE_MIN = -20;\nexport const TREBLE_MAX = 20;\n\nexport interface BiquadCoeffs {\n  b0: number;\n  b1: number;\n  b2: number;\n  a1: number;\n  a2: number;\n}\n\nexport interface BiquadState {\n  x1: number;\n  x2: number;\n  y1: number;\n  y2: number;\n}\n\nexport interface FilterState {\n  bassShelfL: BiquadState;\n  bassShelfR: BiquadState;\n  bassPeakL: BiquadState;\n  bassPeakR: BiquadState;\n  trebleShelfL: BiquadState;\n  trebleShelfR: BiquadState;\n  treblePeakL: BiquadState;\n  treblePeakR: BiquadState;\n}\n"],
+  "mappings": "aAAO,aAAM,WAAa,EACb,WAAa,EACb,SAAW,IACX,SAAW,GACX,WAAa,IACb,WAAa",
+  "names": []
+}

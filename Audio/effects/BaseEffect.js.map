@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["BaseEffect.js"],
+  "sourcesContent": ["export {};\n//# sourceMappingURL=BaseEffect.js.map"],
+  "mappings": "aAAA",
+  "names": []
+}

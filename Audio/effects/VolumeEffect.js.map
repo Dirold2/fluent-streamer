@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../src/Audio/effects/VolumeEffect.ts"],
+  "sourcesContent": ["import type { AudioEffect } from \"./BaseEffect.js\";\nimport { clampVolume } from \"./utils.js\";\n\nexport class VolumeEffect implements AudioEffect {\n  readonly name = \"volume\";\n  private _volume: number;\n\n  constructor(volume: number) {\n    this._volume = clampVolume(volume);\n  }\n\n  get volume(): number {\n    return this._volume;\n  }\n\n  setVolume(v: number): void {\n    this._volume = clampVolume(v);\n  }\n\n  isActive(): boolean {\n    return this._volume !== 1;\n  }\n\n  process(samples: Float64Array, _channels: number, _frames: number): void {\n    if (this._volume === 1) return;\n    const vol = this._volume;\n    for (let i = 0; i < samples.length; i++) {\n      samples[i] = samples[i]! * vol;\n    }\n  }\n\n  reset(): void {\n    // no state\n  }\n}\n"],
+  "mappings": "aACA,OAAS,eAAAA,MAAmB,aAEtB,aAAO,YAAY,CACd,KAAO,SACR,QAER,YAAYC,EAAc,CACxB,KAAK,QAAUD,EAAYC,CAAM,CACnC,CAEA,IAAI,QAAM,CACR,OAAO,KAAK,OACd,CAEA,UAAUC,EAAS,CACjB,KAAK,QAAUF,EAAYE,CAAC,CAC9B,CAEA,UAAQ,CACN,OAAO,KAAK,UAAY,CAC1B,CAEA,QAAQC,EAAuBC,EAAmBC,EAAe,CAC/D,GAAI,KAAK,UAAY,EAAG,OACxB,MAAMC,EAAM,KAAK,QACjB,QAASC,EAAI,EAAGA,EAAIJ,EAAQ,OAAQI,IAClCJ,EAAQI,CAAC,EAAIJ,EAAQI,CAAC,EAAKD,CAE/B,CAEA,OAAK,CAEL,CAAA",
+  "names": ["clampVolume", "volume", "v", "samples", "_channels", "_frames", "vol", "i"]
+}
