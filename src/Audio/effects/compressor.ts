@@ -1,8 +1,4 @@
-export function compressSample(
-  value: number,
-  threshold = 0.8,
-  ratio = 4,
-): number {
+export function compressSample(value: number, threshold = 0.8, ratio = 4): number {
   const abs = Math.abs(value);
   if (abs <= threshold) return value;
   const excess = abs - threshold;

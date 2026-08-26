@@ -33,10 +33,7 @@ export class FadeEffect {
       return { volume: currentVolume, justFinished: false };
     }
 
-    const progress =
-      this.samplesTotal > 0
-        ? Math.min(1, this.samplesDone / this.samplesTotal)
-        : 1;
+    const progress = this.samplesTotal > 0 ? Math.min(1, this.samplesDone / this.samplesTotal) : 1;
     const current = this.from + (this.to - this.from) * progress;
     this.samplesDone++;
 

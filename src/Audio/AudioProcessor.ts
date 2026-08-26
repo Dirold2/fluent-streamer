@@ -1,4 +1,4 @@
-import { EventEmitter } from "eventemitter3";
+import { MiniEmitter } from "hemmiter";
 
 import type { AudioProcessingOptions } from "../Types/index.js";
 import type { FilterState } from "../Types/audio.js";
@@ -23,7 +23,13 @@ function concatUint8(arrays: Uint8Array[]): Uint8Array {
   return result;
 }
 
-export class AudioProcessor extends EventEmitter {
+type AudioProcessorEvents = {
+  "fade-start": [event: { from: number; to: number; durationMs: number }];
+  "fade-end": [event: { to: number }];
+  close: [];
+};
+
+export class AudioProcessor extends MiniEmitter<AudioProcessorEvents> {
   readonly readable: ReadableStream<Uint8Array>;
   readonly writable: WritableStream<Uint8Array>;
 
@@ -120,9 +126,7 @@ export class AudioProcessor extends EventEmitter {
     const transform = new TransformStream<Uint8Array, Uint8Array>({
       transform: (chunk, controller) => {
         if (this.isTerminated()) return;
-        const input = this.leftover
-          ? concatUint8([this.leftover, chunk])
-          : chunk;
+        const input = this.leftover ? concatUint8([this.leftover, chunk]) : chunk;
         const aligned = this.splitAligned(input);
         this.leftover = aligned.remainder;
 
@@ -133,8 +137,7 @@ export class AudioProcessor extends EventEmitter {
       flush: (controller) => {
         if (this.leftover && this.leftover.length > 0) {
           const padBytes =
-            (this.frameSizeBytes -
-              (this.leftover.length % this.frameSizeBytes)) %
+            (this.frameSizeBytes - (this.leftover.length % this.frameSizeBytes)) %
             this.frameSizeBytes;
           const padded = padBytes
             ? concatUint8([this.leftover, new Uint8Array(padBytes)])
@@ -206,26 +209,12 @@ export class AudioProcessor extends EventEmitter {
     return this.isDestroyed || this.isWritableEnded;
   }
 
-  private processStereoSample(
-    left: number,
-    right: number,
-    volume: number,
-  ): [number, number] {
+  private processStereoSample(left: number, right: number, volume: number): [number, number] {
     let l = (left * volume) / 32768;
     let r = (right * volume) / 32768;
 
-    [l, r] = this.bassEffect.processStereo(
-      l,
-      r,
-      this.channels,
-      this.sampleRate,
-    );
-    [l, r] = this.trebleEffect.processStereo(
-      l,
-      r,
-      this.channels,
-      this.sampleRate,
-    );
+    [l, r] = this.bassEffect.processStereo(l, r, this.channels, this.sampleRate);
+    [l, r] = this.trebleEffect.processStereo(l, r, this.channels, this.sampleRate);
 
     if (this.compressorEffect.enabled) {
       l = compressSample(l);
@@ -247,11 +236,7 @@ export class AudioProcessor extends EventEmitter {
 
     const needSlice = this.cloneInput || buffer.byteOffset % 2 !== 0;
     const out = needSlice ? buffer.slice() : buffer;
-    const samples = new Int16Array(
-      out.buffer,
-      out.byteOffset,
-      out.byteLength / 2,
-    );
+    const samples = new Int16Array(out.buffer, out.byteOffset, out.byteLength / 2);
 
     const frameCount = out.byteLength / this.frameSizeBytes;
     let currentVolume = this.volumeEffect.value;
@@ -298,8 +283,7 @@ export class AudioProcessor extends EventEmitter {
   } {
     const remainderBytes = input.length % this.frameSizeBytes;
     const alignedBytes = input.length - remainderBytes;
-    if (alignedBytes === 0)
-      return { aligned: new Uint8Array(0), remainder: input };
+    if (alignedBytes === 0) return { aligned: new Uint8Array(0), remainder: input };
 
     const aligned = input.subarray(0, alignedBytes);
     const remainder = remainderBytes > 0 ? input.subarray(alignedBytes) : null;
@@ -322,8 +306,7 @@ export class AudioProcessor extends EventEmitter {
       return new Uint8Array(0);
     }
     const padBytes =
-      (this.frameSizeBytes - (this.leftover.length % this.frameSizeBytes)) %
-      this.frameSizeBytes;
+      (this.frameSizeBytes - (this.leftover.length % this.frameSizeBytes)) % this.frameSizeBytes;
     const padded = padBytes
       ? concatUint8([this.leftover, new Uint8Array(padBytes)])
       : this.leftover;

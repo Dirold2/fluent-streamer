@@ -1,7 +1,4 @@
-import type {
-  AudioProcessingOptions,
-  FFmpegRunResultExtended,
-} from "../Types/index.js";
+import type { AudioProcessingOptions, FFmpegRunResultExtended } from "../Types/index.js";
 
 export class FluentAudioState {
   public enabled = false;
@@ -132,8 +129,7 @@ export class FluentAudioState {
     this.sampleRate ??= sampleRate;
     this.channels ??= channels;
     const hash = `${this.volume}-${this.bass}-${this.treble}-${this.compressor}`;
-    if (this.cachedOptions && this.cachedHash === hash)
-      return this.cachedOptions;
+    if (this.cachedOptions && this.cachedHash === hash) return this.cachedOptions;
     this.cachedOptions = {
       volume: this.volume,
       bass: this.bass,

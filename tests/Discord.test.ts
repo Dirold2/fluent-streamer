@@ -1,9 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { EventEmitter } from "eventemitter3";
+import { MiniEmitter } from "hemmiter";
 import { FluentStream } from "../src/index.js";
 
 const AUDIO_TEST_URL = "tests/320.mp3";
-class AudioService extends EventEmitter {
+type AudioServiceEvents = {
+  debug: [message: string];
+  error: [error: Error];
+};
+
+class AudioService extends MiniEmitter<AudioServiceEvents> {
   public ffmpeg?: InstanceType<typeof FluentStream>;
   public currentOptions: {
     volume: number;

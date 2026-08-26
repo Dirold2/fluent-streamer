@@ -16,8 +16,7 @@ export function normalizeTreble(treble: number): number {
 
 export class TrebleEffect {
   public value = 0;
-  public coeffs: { shelf: BiquadCoeffs; peak: BiquadCoeffs | null } | null =
-    null;
+  public coeffs: { shelf: BiquadCoeffs; peak: BiquadCoeffs | null } | null = null;
 
   public shelfL: BiquadState = { x1: 0, x2: 0, y1: 0, y2: 0 };
   public shelfR: BiquadState = { x1: 0, x2: 0, y1: 0, y2: 0 };

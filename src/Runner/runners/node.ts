@@ -11,7 +11,16 @@ class NodeFFmpegProcess implements FFmpegProcess {
   private exitCallbacks: Array<(code: number | null, signal: string | null) => void> = [];
   private errorCallbacks: Array<(error: Error) => void> = [];
 
+  private exitResult: { code: number | null; signal: string | null } | null = null;
+  private processError: Error | null = null;
+
   constructor(process: ReturnType<typeof spawn>) {
+    process.once("exit", (code, signal) => {
+      this.exitResult = { code, signal };
+    });
+    process.once("error", (err) => {
+      this.processError = err;
+    });
     this.process = process;
     this.pid = process.pid ?? null;
 
@@ -78,10 +87,18 @@ class NodeFFmpegProcess implements FFmpegProcess {
   }
 
   onExit(cb: (code: number | null, signal: string | null) => void): void {
+    if (this.exitResult) {
+      queueMicrotask(() => cb(this.exitResult!.code, this.exitResult!.signal));
+      return;
+    }
     this.exitCallbacks.push(cb);
   }
 
   onError(cb: (error: Error) => void): void {
+    if (this.processError) {
+      queueMicrotask(() => cb(this.processError!));
+      return;
+    }
     this.errorCallbacks.push(cb);
   }
 }

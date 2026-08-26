@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url"
 import { defineConfig } from 'vitest/config'
 import { config as loadEnv } from 'dotenv'
 
@@ -17,7 +18,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      'src': '/home/dirold2/dev/git/ffmpeg-streamer/src',
+      'src': fileURLToPath(new URL("./src", import.meta.url)),
     },
   },
 })

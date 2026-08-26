@@ -70,10 +70,7 @@ export interface ProcessorOptions {
   wallTimeLimit?: number;
   executionId?: string;
 
-  onBeforeChildProcessSpawn?: (
-    ffmpegPath: string,
-    ffmpegArgs: string[],
-  ) => void | Promise<void>;
+  onBeforeChildProcessSpawn?: (ffmpegPath: string, ffmpegArgs: string[]) => void | Promise<void>;
 
   stderrLogHandler?: (line: string) => void;
 

@@ -145,7 +145,7 @@ describe("FluentStream API", () => {
     });
     stream.input(readable1);
     expect(() => stream.input(readable2, { pipeIndex: 0 })).toThrow(
-      /duplicate pipe index|Cannot add multiple streams|already has a stream/i,
+      /duplicate pipe index|Cannot add multiple streams|Multiple ReadableStream inputs|already has a stream/i,
     );
   });
 
@@ -523,6 +523,7 @@ describe("FluentStream API", () => {
     async () => {
       const stream = new FluentStream({
         useAudioProcessor: true,
+        autoDrainOutput: true,
       });
       stream.input("tests/320.mp3").format("s16le").output("pipe:1");
 
@@ -562,6 +563,7 @@ describe("FluentStream API", () => {
     async () => {
       const stream = new FluentStream({
         useAudioProcessor: true,
+        autoDrainOutput: true,
       });
 
       stream.input("tests/320.mp3").format("s16le").output("pipe:1");

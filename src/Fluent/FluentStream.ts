@@ -1,4 +1,4 @@
-import { EventEmitter } from "eventemitter3";
+import { MiniEmitter } from "hemmiter";
 import Processor from "../Core/Processor.js";
 import { HUMANITY_HEADERS, DEFAULT_LOGGER } from "./constants.js";
 import { FluentStreamValidationError } from "./errors.js";
@@ -11,10 +11,18 @@ import type {
   LogMeta,
   CrossfadeAudioOptions,
   InputSource,
+  FFmpegProgress,
 } from "../Types/index.js";
 import { FluentAudioState } from "./FluentAudioState.js";
 
-export default class FluentStream extends EventEmitter {
+type FluentStreamEvents = {
+  progress: [progress: Partial<FFmpegProgress>];
+  error: [error: Error];
+  end: [];
+  terminated: [signal: string];
+};
+
+export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
   static readonly HUMANITY_HEADERS = HUMANITY_HEADERS;
 
   private args: string[] = [];
@@ -72,9 +80,7 @@ export default class FluentStream extends EventEmitter {
     super();
     this.options = { ...options };
     this.headers =
-      typeof options.headers === "object" && options.headers !== null
-        ? options.headers
-        : undefined;
+      typeof options.headers === "object" && options.headers !== null ? options.headers : undefined;
     this.logger = options.logger ?? DEFAULT_LOGGER;
 
     const ap = options.audioProcessorOptions;
@@ -110,9 +116,7 @@ export default class FluentStream extends EventEmitter {
     return { ...this.headers };
   }
 
-  private createProcessor(
-    extraOpts: Partial<ProcessorOptions> = {},
-  ): Processor {
+  private createProcessor(extraOpts: Partial<ProcessorOptions> = {}): Processor {
     const mergedHeaders = this.getMergedHeaders();
     const ap = this.options.audioProcessorOptions;
     const finalOptions: ProcessorOptions = {
@@ -120,10 +124,7 @@ export default class FluentStream extends EventEmitter {
       ...extraOpts,
       headers: mergedHeaders,
       useAudioProcessor: this.audio.enabled,
-      audioProcessorOptions: this.audio.buildOptions(
-        ap?.sampleRate,
-        ap?.channels,
-      ),
+      audioProcessorOptions: this.audio.buildOptions(ap?.sampleRate, ap?.channels),
       inputStreams: this.inputStreams,
       inputSources: this.inputSources,
     };
@@ -230,13 +231,9 @@ export default class FluentStream extends EventEmitter {
           !opts?.allowDuplicate &&
           this.inputSources.some((s) => s.type === "url" && s.url === input)
         ) {
-          this.emitLog(
-            "warn",
-            `input(): Duplicate URL input detected: "${input}"`,
-            {
-              code: "FluentStream-duplicate-url-input",
-            },
-          );
+          this.emitLog("warn", `input(): Duplicate URL input detected: "${input}"`, {
+            code: "FluentStream-duplicate-url-input",
+          });
           return this;
         }
         const index = this.inputSources.length;
@@ -248,13 +245,9 @@ export default class FluentStream extends EventEmitter {
         !opts?.allowDuplicate &&
         this.args.some((v, i) => v === "-i" && this.args[i + 1] === input)
       ) {
-        this.emitLog(
-          "warn",
-          `input(): Duplicate string input detected: "${input}"`,
-          {
-            code: "FluentStream-duplicate-string-input",
-          },
-        );
+        this.emitLog("warn", `input(): Duplicate string input detected: "${input}"`, {
+          code: "FluentStream-duplicate-string-input",
+        });
         return this;
       }
 
@@ -264,16 +257,14 @@ export default class FluentStream extends EventEmitter {
 
     let isReadableStream = typeof (input as any).getReader === "function";
     let isNodeReadable =
-      typeof (input as any).on === "function" &&
-      typeof (input as any).pipe === "function";
+      typeof (input as any).on === "function" && typeof (input as any).pipe === "function";
 
     if (isNodeReadable && !isReadableStream) {
       const nodeStream = input as any;
       const webStream = new ReadableStream<Uint8Array>({
         start(controller) {
           nodeStream.on("data", (chunk: any) => {
-            const bytes =
-              chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+            const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
             controller.enqueue(bytes);
           });
           nodeStream.on("end", () => controller.close());
@@ -292,32 +283,19 @@ export default class FluentStream extends EventEmitter {
     if (isReadableStream) {
       let streamIdx: number;
 
-      if (
-        opts?.pipeIndex != null &&
-        Number.isFinite(opts.pipeIndex) &&
-        opts.pipeIndex >= 0
-      ) {
+      if (opts?.pipeIndex != null && Number.isFinite(opts.pipeIndex) && opts.pipeIndex >= 0) {
         if (this.inputStreams.some((entry) => entry.index === opts.pipeIndex)) {
-          throw new FluentStreamValidationError(
-            `input(): Duplicate pipe index: ${opts.pipeIndex}`,
-          );
+          throw new FluentStreamValidationError(`input(): Duplicate pipe index: ${opts.pipeIndex}`);
         }
         streamIdx = opts.pipeIndex;
       } else {
         streamIdx = this.inputStreams.length;
       }
 
-      if (
-        !opts?.allowDuplicate &&
-        this.inputStreams.some((s) => s.stream === input)
-      ) {
-        this.emitLog(
-          "warn",
-          "input(): Duplicate Readable stream detected (skipped)",
-          {
-            code: "FluentStream-duplicate-pipe",
-          },
-        );
+      if (!opts?.allowDuplicate && this.inputStreams.some((s) => s.stream === input)) {
+        this.emitLog("warn", "input(): Duplicate Readable stream detected (skipped)", {
+          code: "FluentStream-duplicate-pipe",
+        });
         return this;
       }
 
@@ -336,31 +314,14 @@ export default class FluentStream extends EventEmitter {
   }
 
   public output(
-    output:
-      | string
-      | ReadableStream<Uint8Array>
-      | number
-      | { pipe?: string }
-      | undefined
-      | null,
+    output: string | ReadableStream<Uint8Array> | number | { pipe?: string } | undefined | null,
   ): this {
     this.requireClean("output");
-    if (
-      output &&
-      typeof output === "object" &&
-      "pipe" in output &&
-      output.pipe
-    ) {
+    if (output && typeof output === "object" && "pipe" in output && output.pipe) {
       const pipeName = output.pipe;
 
-      if (
-        pipeName === "stdout" ||
-        pipeName === "stderr" ||
-        pipeName === "1" ||
-        pipeName === "2"
-      ) {
-        const pipeTarget =
-          pipeName === "stdout" || pipeName === "1" ? "pipe:1" : "pipe:2";
+      if (pipeName === "stdout" || pipeName === "stderr" || pipeName === "1" || pipeName === "2") {
+        const pipeTarget = pipeName === "stdout" || pipeName === "1" ? "pipe:1" : "pipe:2";
         this.args.push(pipeTarget);
         return this;
       }
@@ -370,18 +331,11 @@ export default class FluentStream extends EventEmitter {
         return this;
       }
 
-      throw new FluentStreamValidationError(
-        `output(): Invalid pipe target: ${String(pipeName)}`,
-      );
+      throw new FluentStreamValidationError(`output(): Invalid pipe target: ${String(pipeName)}`);
     }
 
-    if (
-      output == null ||
-      (typeof output === "string" && output.trim().length === 0)
-    ) {
-      throw new FluentStreamValidationError(
-        "output(): requires non-empty string or pipe object",
-      );
+    if (output == null || (typeof output === "string" && output.trim().length === 0)) {
+      throw new FluentStreamValidationError("output(): requires non-empty string or pipe object");
     }
 
     this.args.push(String(output));
@@ -392,10 +346,7 @@ export default class FluentStream extends EventEmitter {
     return this.getMergedHeaders();
   }
 
-  public setHeaders(
-    headers?: Record<string, string> | null,
-    opts?: { merge?: boolean },
-  ): this {
+  public setHeaders(headers?: Record<string, string> | null, opts?: { merge?: boolean }): this {
     this.requireClean("setHeaders");
     if (headers == null) {
       this.headers = undefined;
@@ -411,10 +362,7 @@ export default class FluentStream extends EventEmitter {
   public userAgent(userAgent?: string | null): this {
     this.requireClean("userAgent");
     for (let i = 0; i < this.args.length;) {
-      if (
-        this.args[i] === "-user_agent" &&
-        typeof this.args[i + 1] === "string"
-      ) {
+      if (this.args[i] === "-user_agent" && typeof this.args[i + 1] === "string") {
         this.args.splice(i, 2);
       } else {
         i++;
@@ -431,9 +379,7 @@ export default class FluentStream extends EventEmitter {
 
       const hasHTTPInput = this.args.some(
         (v, idx, arr) =>
-          v === "-i" &&
-          typeof arr[idx + 1] === "string" &&
-          /^https?:\/\//.test(arr[idx + 1]!),
+          v === "-i" && typeof arr[idx + 1] === "string" && /^https?:\/\//.test(arr[idx + 1]!),
       );
 
       if (!hasHTTPInput) {
@@ -543,10 +489,7 @@ export default class FluentStream extends EventEmitter {
 
   public seekInput(position: number | string): this {
     this.requireClean("seekInput");
-    if (
-      position == null ||
-      (typeof position === "string" && !position.trim())
-    ) {
+    if (position == null || (typeof position === "string" && !position.trim())) {
       throw new FluentStreamValidationError(
         "seekInput: position must be non-empty string or number",
       );
@@ -584,19 +527,14 @@ export default class FluentStream extends EventEmitter {
   }
 
   public copyCodecs(): this {
-    if (
-      this.args.some((_v, i, arr) => arr[i] === "-c" && arr[i + 1] === "copy")
-    ) {
+    if (this.args.some((_v, i, arr) => arr[i] === "-c" && arr[i + 1] === "copy")) {
       return this;
     }
     this.args.push("-c", "copy");
     return this;
   }
 
-  public crossfadeAudio(
-    durationSec: number,
-    options: CrossfadeAudioOptions = {},
-  ): this {
+  public crossfadeAudio(durationSec: number, options: CrossfadeAudioOptions = {}): this {
     this.requireClean("crossfadeAudio");
     if (
       durationSec == null ||
@@ -613,9 +551,7 @@ export default class FluentStream extends EventEmitter {
       const second = options.secondInput;
 
       if (typeof second === "string") {
-        const already = this.args.some(
-          (v, i) => v === "-i" && this.args[i + 1] === second,
-        );
+        const already = this.args.some((v, i) => v === "-i" && this.args[i + 1] === second);
         if (!already) {
           this.input(second);
         }
@@ -657,9 +593,7 @@ export default class FluentStream extends EventEmitter {
   public inputBlob(blobUrl: string, index?: number): this {
     this.requireClean("inputBlob");
     if (!blobUrl || typeof blobUrl !== "string") {
-      throw new FluentStreamValidationError(
-        "inputBlob(): blobUrl must be a non-empty string",
-      );
+      throw new FluentStreamValidationError("inputBlob(): blobUrl must be a non-empty string");
     }
 
     const inputIndex = index ?? this.inputSources.length;
@@ -729,10 +663,7 @@ export default class FluentStream extends EventEmitter {
       }
     }
 
-    if (
-      typeof this.options.wallTimeLimit === "number" &&
-      this.options.wallTimeLimit > 0
-    ) {
+    if (typeof this.options.wallTimeLimit === "number" && this.options.wallTimeLimit > 0) {
       finalArgs.push("-timelimit", String(this.options.wallTimeLimit));
     }
 
@@ -745,12 +676,7 @@ export default class FluentStream extends EventEmitter {
     pipeStreams: string[];
     complexFilters: string[];
   } {
-    return summarizeInputs(
-      this.args,
-      this.inputStreams,
-      this.complexFilters,
-      this.inputSources,
-    );
+    return summarizeInputs(this.args, this.inputStreams, this.complexFilters, this.inputSources);
   }
 
   public countInputs(): {
@@ -777,9 +703,7 @@ export default class FluentStream extends EventEmitter {
    * ```
    * * @throws {FluentStreamValidationError} If the stream is dirty (already executed without `.clear()`)
    */
-  public async run(
-    extraOpts: Partial<ProcessorOptions> = {},
-  ): Promise<FFmpegRunResultExtended> {
+  public async run(extraOpts: Partial<ProcessorOptions> = {}): Promise<FFmpegRunResultExtended> {
     if (this.isDirty) {
       throw new FluentStreamValidationError(
         "FluentStream is dirty — you cannot call `.run()` multiple times on the same configuration. " +

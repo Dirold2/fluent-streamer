@@ -23,8 +23,7 @@ export class NormalizerEffect {
     }
 
     const rawScale = peak > 0 ? 32767 / peak : 1;
-    this.prevScale =
-      this.prevScale * this.SMOOTHING + rawScale * (1 - this.SMOOTHING);
+    this.prevScale = this.prevScale * this.SMOOTHING + rawScale * (1 - this.SMOOTHING);
     return this.prevScale;
   }
 }

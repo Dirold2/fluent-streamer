@@ -79,11 +79,7 @@ export function calcHighShelfCoeffs(
   return { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 };
 }
 
-export function processBiquad(
-  input: number,
-  coeffs: BiquadCoeffs,
-  state: BiquadState,
-): number {
+export function processBiquad(input: number, coeffs: BiquadCoeffs, state: BiquadState): number {
   const output =
     coeffs.b0 * input +
     coeffs.b1 * state.x1 +

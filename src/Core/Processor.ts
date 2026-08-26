@@ -1,4 +1,4 @@
-import { EventEmitter } from "eventemitter3";
+import { MiniEmitter } from "hemmiter";
 import { ffmpegManager } from "../Runner/FFmpegRunner.js";
 import type { FFmpegProcess } from "../Types/core.js";
 import type {
@@ -6,15 +6,13 @@ import type {
   InputSource,
   ProcessorOptions,
   FFmpegRunResultExtended,
+  FFmpegProgress,
 } from "../Types/index.js";
 import { AudioEffectController } from "../Audio/AudioEffectController.js";
 import { getTimeString } from "./utils.js";
 import { buildFullArgs } from "./processor/args.js";
 import { resolveBlobToStream } from "./processor/blob.js";
-import {
-  buildProcessorConfig,
-  type ProcessorConfig,
-} from "./processor/config.js";
+import { buildProcessorConfig, type ProcessorConfig } from "./processor/config.js";
 import { buildAcrossfadeFilter } from "./processor/acrossfade.js";
 import {
   ensureOutputDrained,
@@ -24,18 +22,20 @@ import {
   updateThrottleBitrate,
 } from "./processor/pipeline.js";
 import { createSilenceBuffer, createSilenceMs } from "./processor/silence.js";
-import {
-  StderrTracker,
-  buildProcessExitError,
-  readStderrStream,
-} from "./processor/stderr.js";
+import { StderrTracker, buildProcessExitError, readStderrStream } from "./processor/stderr.js";
 import { resolveFfmpegPath } from "./processor/ffmpegPath.js";
 
-type ProcessorState =
-  "idle" | "running" | "terminating" | "finished" | "failed" | "closed";
+type ProcessorState = "idle" | "running" | "terminating" | "finished" | "failed" | "closed";
 type TerminationReason = "user" | "close" | "timeout" | "destroy" | null;
 
-export class Processor extends EventEmitter {
+type ProcessorEvents = {
+  progress: [progress: Partial<FFmpegProgress>];
+  error: [error: Error];
+  end: [];
+  terminated: [signal: string];
+};
+
+export class Processor extends MiniEmitter<ProcessorEvents> {
   private process: FFmpegProcess | null = null;
   private outputStream: ReadableStream<Uint8Array> | null = null;
   private inputStreams: Array<{
@@ -63,8 +63,7 @@ export class Processor extends EventEmitter {
   private _pendingProcessExitLog: (() => void) | null = null;
   private useAudioProcessor = false;
   private endSequenceFn: (() => void) | null = null;
-  private throttledOutput: TransformStream<Uint8Array, Uint8Array> | null =
-    null;
+  private throttledOutput: TransformStream<Uint8Array, Uint8Array> | null = null;
   private _pipelinePromise: Promise<void> | null = null;
   private currentVolume = 1;
   private currentBass = 0;
@@ -92,8 +91,7 @@ export class Processor extends EventEmitter {
     this.currentVolume = this.config.audioProcessorOptions?.volume ?? 1;
     this.currentBass = this.config.audioProcessorOptions?.bass ?? 0;
     this.currentTreble = this.config.audioProcessorOptions?.treble ?? 0;
-    this.currentCompressor =
-      this.config.audioProcessorOptions?.compressor ?? false;
+    this.currentCompressor = this.config.audioProcessorOptions?.compressor ?? false;
 
     this.stderrTracker = new StderrTracker(this.config, {
       onProgress: (progress) => this.emit("progress", progress),
@@ -406,19 +404,10 @@ export class Processor extends EventEmitter {
   }
 
   public createSilenceMs(durationMs = 100, sampleRate = 48000, channels = 2) {
-    return createSilenceMs(
-      durationMs,
-      sampleRate,
-      channels,
-      this.stderrTracker.getBitrate(),
-    );
+    return createSilenceMs(durationMs, sampleRate, channels, this.stderrTracker.getBitrate());
   }
 
-  public createSilenceBuffer(
-    durationMs = 100,
-    sampleRate = 48000,
-    channels = 2,
-  ) {
+  public createSilenceBuffer(durationMs = 100, sampleRate = 48000, channels = 2) {
     return createSilenceBuffer(durationMs, sampleRate, channels);
   }
 
@@ -534,9 +523,7 @@ export class Processor extends EventEmitter {
       };
 
       if (this._pipelinePromise) {
-        this._pipelinePromise
-          .then(finalizeAfterDelay)
-          .catch(() => finalizeAfterDelay());
+        this._pipelinePromise.then(finalizeAfterDelay).catch(() => finalizeAfterDelay());
       } else {
         finalizeAfterDelay();
       }
@@ -650,10 +637,7 @@ export class Processor extends EventEmitter {
           }
         }, 0);
       } else {
-        this._finalize(
-          undefined,
-          this.terminationReason === "close" ? "closed" : "finished",
-        );
+        this._finalize(undefined, this.terminationReason === "close" ? "closed" : "finished");
       }
     } else {
       const error = isTimeout

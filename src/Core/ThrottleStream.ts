@@ -30,9 +30,12 @@ export class ThrottleStream extends TransformStream<Uint8Array, Uint8Array> {
           this.pendingChunk = chunk;
           this.pendingController = controller;
           this.pendingResolve = resolve;
-          this.pendingTimer = setTimeout(() => {
-            this._flushPending();
-          }, Math.max(0, delay));
+          this.pendingTimer = setTimeout(
+            () => {
+              this._flushPending();
+            },
+            Math.max(0, delay),
+          );
         });
       },
     });
@@ -50,10 +53,7 @@ export class ThrottleStream extends TransformStream<Uint8Array, Uint8Array> {
 
       const now = performance.now();
       const elapsed = now - this.lastTime;
-      const delay = Math.max(
-        0,
-        (this.pendingChunk!.length / this.bytesPerSecond) * 1000 - elapsed,
-      );
+      const delay = Math.max(0, (this.pendingChunk!.length / this.bytesPerSecond) * 1000 - elapsed);
 
       this.pendingTimer = setTimeout(() => {
         this._flushPending();

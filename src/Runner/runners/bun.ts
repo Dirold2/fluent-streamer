@@ -1,15 +1,17 @@
 import type { FFmpegRunner, FFmpegProcess } from "../../Types/core.js";
 
+type BunPipedProcess = Bun.Subprocess<"pipe", "pipe", "pipe">;
+
 class BunFFmpegProcess implements FFmpegProcess {
   readonly pid: number | null;
   readonly stdin: WritableStream<Uint8Array>;
   readonly stdout: ReadableStream<Uint8Array>;
   readonly stderr: ReadableStream<Uint8Array>;
 
-  private proc: ReturnType<typeof Bun.spawn>;
+  private proc: BunPipedProcess;
   private exitCallbacks: Array<(code: number | null, signal: string | null) => void> = [];
 
-  constructor(proc: ReturnType<typeof Bun.spawn>) {
+  constructor(proc: BunPipedProcess) {
     this.proc = proc;
     this.pid = proc.pid;
 
@@ -57,7 +59,7 @@ class BunFFmpegProcess implements FFmpegProcess {
 
 export class BunFFmpegRunner implements FFmpegRunner {
   spawn(ffmpegPath: string, args: string[]): FFmpegProcess {
-    const proc = Bun.spawn([ffmpegPath, ...args], {
+    const proc = Bun.spawn<"pipe", "pipe", "pipe">([ffmpegPath, ...args], {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
