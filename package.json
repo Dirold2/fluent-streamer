@@ -1,6 +1,6 @@
 {
   "name": "fluent-streamer",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "Fluent FFmpeg wrapper with real-time audio effects, timeout and progress tracking.",
   "type": "module",
   "main": "dist/index.js",
@@ -19,7 +19,7 @@
     "build": "tsc && esbuild 'dist/**/*.js' --outdir=dist --allow-overwrite --minify --sourcemap && d-build",
     "dist": "d-dist",
     "deploy": "npm run build && npm run dist",
-    "publish": "d-publish",
+    "pub": "d-publish",
     "lint": "oxlint src",
     "lint:fix": "oxlint src --fix",
     "format": "oxfmt src",

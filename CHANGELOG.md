@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.5] – 2026-08-26
+
+### Changed
+- Replaced `eventemitter3` with `hemmiter` (`MiniEmitter`) in `Processor`
+- Added typed `ProcessorEvents` map (`progress`, `error`, `end`, `terminated`)
+- Exported `MiniEmitter`, `ProcessorEvents` from public API
+- `autoDrainOutput` default changed back to `true`
+
+### Fixed
+- **Bun:** replaced bare `Bun` global with `globalThis.Bun` to fix TypeScript type errors (`src/Bun/*`)
+- **Node:** late subscriber for `exit`/`error` events now receives events via state replay (`src/Runner/runners/node.ts`)
+- **Vitest:** deduplicated env variable injection in `vitest.config.ts`
+
 ## [0.5.4] – 2026-07-01
 
 ### Added
