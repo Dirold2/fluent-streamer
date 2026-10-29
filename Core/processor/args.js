@@ -1,0 +1,3 @@
+"use strict";export function buildFullArgs(t,l,n){const s=[];t.ffmpegLogLevel&&s.push("-loglevel",t.ffmpegLogLevel);const o=t.inputSources.some(e=>e.type==="url"&&e.url.startsWith("http"));t.userAgent&&o&&s.push("-user_agent",t.userAgent),s.push(...l);const p=[...t.inputSources].filter(e=>e.type==="url").sort((e,r)=>e.index-r.index);for(const e of p){const u={...typeof t.headers=="object"?t.headers:{},...e.headers};if(Object.keys(u).length>0){const a=Object.entries(u).map(([h,d])=>`${h}: ${d}`).join(`\r
+`);s.push("-headers",a)}s.push("-reconnect","1","-reconnect_streamed","1","-reconnect_delay_max","5","-timeout","10000000"),s.push("-i",e.url)}return s.push(...n),s}
+//# sourceMappingURL=args.js.map

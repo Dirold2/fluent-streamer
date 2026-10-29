@@ -1,0 +1,107 @@
+import { MiniEmitter } from "hemmiter";
+import type { ProcessorDebugInfo, InputSource, ProcessorOptions, FFmpegRunResultExtended, FFmpegProgress } from "../Types/index.js";
+import { buildAcrossfadeFilter } from "./processor/acrossfade.js";
+type ProcessorEvents = {
+    progress: [progress: Partial<FFmpegProgress>];
+    error: [error: Error];
+    end: [];
+    terminated: [signal: string];
+};
+export declare class Processor extends MiniEmitter<ProcessorEvents> {
+    private process;
+    private outputController;
+    private outputStream;
+    private inputStreams;
+    private extraOutputs;
+    private processState;
+    private terminationReason;
+    private isTerminating;
+    private outputCancellation?;
+    private hasFinished;
+    private isClosed;
+    private doneSettled;
+    private timeoutHandle?;
+    private doneResolve;
+    private doneReject;
+    private donePromise;
+    private args;
+    private extraGlobalArgs;
+    private _runEnded;
+    private _runEmittedEnd;
+    private _pendingProcessExitLog;
+    private useAudioProcessor;
+    private endSequenceFn;
+    private throttledOutput;
+    private abortHandler?;
+    private pipelineAbort;
+    private _pipelinePromise;
+    private currentVolume;
+    private currentBass;
+    private currentTreble;
+    private currentMids;
+    private currentCompressor;
+    private currentNormalize;
+    private currentKaraoke;
+    private _startTime;
+    private _totalChunks;
+    private _skipInProgress;
+    private _lastSkipTime;
+    private readonly SKIP_DEBOUNCE_MS;
+    private readonly config;
+    private readonly stderrTracker;
+    get pid(): number | null;
+    constructor(options?: ProcessorOptions);
+    setArgs(args: string[]): this;
+    getArgs(): string[];
+    setInputStreams(streams: Array<{
+        stream: ReadableStream<Uint8Array>;
+        index: number;
+    }>): this;
+    getInputStream(): WritableStream<Uint8Array> | undefined;
+    setExtraOutputStreams(streams: Array<{
+        stream: WritableStream<Uint8Array>;
+        index: number;
+    }>): this;
+    setExtraGlobalArgs(args: string[]): this;
+    setInputSources(sources: InputSource[]): this;
+    getFullArgs(): string[];
+    enableAudioProcessor(enable: boolean): this;
+    isRunning(): boolean;
+    getProgress(): Partial<FFmpegProgress>;
+    reset(): void;
+    run(): Promise<FFmpegRunResultExtended>;
+    close(): Promise<void>;
+    /** Register the exact downstream cancellation before detaching a mixer reader. */
+    prepareOutputCancellation(reason: unknown): void;
+    kill(signal?: string): Promise<void>;
+    skip(): Promise<void>;
+    destroy(): void;
+    createSilenceMs(durationMs?: number, sampleRate?: number, channels?: number): ReadableStream<Uint8Array<ArrayBufferLike>>;
+    createSilenceBuffer(durationMs?: number, sampleRate?: number, channels?: number): Uint8Array<ArrayBufferLike>;
+    static buildAcrossfadeFilter: typeof buildAcrossfadeFilter;
+    toString(): string;
+    debugDump(): ProcessorDebugInfo;
+    static create(params?: {
+        args?: string[];
+        inputStreams?: Array<{
+            stream: ReadableStream<Uint8Array>;
+            index: number;
+        }>;
+        options?: ProcessorOptions;
+    } & Partial<ProcessorOptions>): Processor;
+    private _resolveBlobSources;
+    private _executeBeforeSpawnHook;
+    private _logSpawnDetails;
+    private _setupEndSequence;
+    private _initPromise;
+    private _resetRunState;
+    private _handleAbortSignal;
+    private _handleTimeout;
+    private _startStderrReader;
+    private _onProcessExit;
+    private _finalize;
+    private _settleDone;
+    private _cleanup;
+}
+export default Processor;
+//# sourceMappingURL=Processor.d.ts.map

@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../src/Audio/analysis/TempoCandidates.ts"],
+  "sourcesContent": ["// The synchronous core stays self-contained for native TypeScript workers.\nexport { selectTempoCandidate, type TempoCandidate, type TempoWindow } from \"./DjAnalysisCore.js\";\n"],
+  "mappings": "aACA,OAAS,yBAAmE",
+  "names": []
+}

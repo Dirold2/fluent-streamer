@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/Audio/index.ts"],
+  "sourcesContent": ["export { AudioProcessor } from \"./AudioProcessor.js\";\nexport { analyzePcm, analyzePcmAsync, analyzeTrack } from \"./analysis/DjAnalysis.js\";\nexport type { DjAnalysis, DjAnalysisOptions, PcmAnalysisOptions } from \"./analysis/DjAnalysis.js\";\nexport type { PlaybackMixerStats } from \"./PlaybackMixer.js\";\nexport { planAutomix } from \"./analysis/AutomixPlan.js\";\nexport type {\n  AutomixPlan,\n  AutomixPlanOptions,\n  AutomixDiagnostic,\n  AutomixFallbackReason,\n} from \"./analysis/AutomixPlan.js\";\nexport type { PrepareAutomixOptions, PreparedAutomix } from \"../Fluent/FluentStream.js\";\n\nexport { planSectionTransition } from \"./analysis/SectionTransitionPlan.js\";\nexport type {\n  SectionTransitionPlan,\n  SectionTransitionOptions,\n} from \"./analysis/SectionTransitionPlan.js\";\n"],
+  "mappings": "aAAA,OAAS,mBAAsB,sBAC/B,OAAS,WAAY,gBAAiB,iBAAoB,2BAG1D,OAAS,gBAAmB,4BAS5B,OAAS,0BAA6B",
+  "names": []
+}

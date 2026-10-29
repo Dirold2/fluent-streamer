@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../src/Audio/analysis/BeatTracking.ts"],
+  "sourcesContent": ["// Keep the synchronous core self-contained for native TypeScript workers.\nexport { trackBeatSequence, type BeatTrackingResult } from \"./DjAnalysisCore.js\";\n"],
+  "mappings": "aACA,OAAS,sBAAkD",
+  "names": []
+}

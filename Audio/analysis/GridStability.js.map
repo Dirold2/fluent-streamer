@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../src/Audio/analysis/GridStability.ts"],
+  "sourcesContent": ["// Keep the synchronous core self-contained for native TypeScript workers.\nexport {\n  evaluateGridStability,\n  type GridStability,\n  type GridStabilityWindow,\n} from \"./DjAnalysisCore.js\";\n"],
+  "mappings": "aACA,OACE,0BAGK",
+  "names": []
+}

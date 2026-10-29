@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../src/Audio/analysis/StableSections.ts"],
+  "sourcesContent": ["// Keep the synchronous core self-contained for native TypeScript workers.\nexport { findStableSections, type StableSection } from \"./DjAnalysisCore.js\";\n"],
+  "mappings": "aACA,OAAS,uBAA8C",
+  "names": []
+}

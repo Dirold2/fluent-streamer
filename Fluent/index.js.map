@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/Fluent/index.ts"],
+  "sourcesContent": ["export { default as FluentStream } from \"./FluentStream.js\";\n"],
+  "mappings": "aAAA,OAAS,WAAW,iBAAoB",
+  "names": []
+}
