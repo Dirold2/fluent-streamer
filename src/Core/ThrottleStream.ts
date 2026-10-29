@@ -1,6 +1,6 @@
 export class ThrottleStream extends TransformStream<Uint8Array, Uint8Array> {
   private bytesPerSecond: number;
-  private lastTime: number;
+  private lastTime: number | null = null;
   private pendingTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingChunk: Uint8Array | null = null;
   private pendingController: TransformStreamDefaultController<Uint8Array> | null = null;
@@ -11,9 +11,9 @@ export class ThrottleStream extends TransformStream<Uint8Array, Uint8Array> {
       transform: (chunk, controller) => {
         const now = performance.now();
 
-        if (now - this.lastTime > 500) {
-          this.lastTime = now;
-        }
+        // Startup and consumer pauses are not playback credit. Retain only a
+        // small timer-jitter allowance so rounding does not accumulate drift.
+        this.lastTime = this.lastTime === null ? now : Math.max(this.lastTime, now - 5);
 
         const elapsed = now - this.lastTime;
         const allowedBytes = (elapsed / 1000) * this.bytesPerSecond;
@@ -41,7 +41,6 @@ export class ThrottleStream extends TransformStream<Uint8Array, Uint8Array> {
     });
 
     this.bytesPerSecond = bytesPerSecond;
-    this.lastTime = performance.now();
   }
 
   public updateBitrate(bytesPerSecond: number): void {
@@ -52,7 +51,7 @@ export class ThrottleStream extends TransformStream<Uint8Array, Uint8Array> {
       this.pendingTimer = null;
 
       const now = performance.now();
-      const elapsed = now - this.lastTime;
+      const elapsed = now - this.lastTime!;
       const delay = Math.max(0, (this.pendingChunk!.length / this.bytesPerSecond) * 1000 - elapsed);
 
       this.pendingTimer = setTimeout(() => {
@@ -80,7 +79,10 @@ export class ThrottleStream extends TransformStream<Uint8Array, Uint8Array> {
       //
     }
 
-    this.lastTime += (chunk.length / this.bytesPerSecond) * 1000;
+    this.lastTime = Math.max(
+      this.lastTime! + (chunk.length / this.bytesPerSecond) * 1000,
+      performance.now() - 5,
+    );
 
     this.pendingChunk = null;
     this.pendingController = null;

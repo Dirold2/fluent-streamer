@@ -21,8 +21,11 @@ export interface AudioProcessingOptions {
   volume: number;
   bass: number;
   treble: number;
+  mids?: number;
   compressor: boolean;
   normalize: boolean;
+  /** Stereo-preserving mid/side center attenuation: side retained, mid shelving at ~180 Hz–6 kHz with nominal -24 dB depth; overall mid/side energy coherence (not per-frequency) reduces suppression on hard-panned signals. Runtime wet ramp: 50 ms; initially enabled: immediate; mono: bypass. Not ML vocal isolation: center instruments may be affected, panned/reverberant vocals may remain; no complete-removal or listening-quality guarantee. Reconstruction may clip even unclipped input; processor saturates. More CPU than simple subtraction. */
+  karaoke?: boolean;
   cloneInput?: boolean;
 
   sampleRate?: number;
@@ -96,6 +99,8 @@ export interface ProcessorOptions {
   useAudioProcessor?: boolean;
   audioProcessorOptions?: AudioProcessingOptions;
   autoDrainOutput?: boolean;
+  /** Stable PCM output for live crossfade; disables auto-drain. Consume output for done to settle. */
+  enableCrossfade?: boolean;
 }
 
 export interface FFmpegProgress {
@@ -136,10 +141,42 @@ export interface FFmpegStats {
 export interface FFmpegRunResult {
   output: ReadableStream<Uint8Array>;
   done: Promise<void>;
-  stop: () => void;
+  stop: (signal?: string) => void | Promise<void>;
+}
+
+/** Opt-in live PCM transition shaping. Defaults preserve the linear crossfade. */
+export interface LiveCrossfadeOptions {
+  /** Independent band envelopes; beat-handoff maps the overlap to eight beat slots. */
+  mode?: "crossfade" | "beat-handoff";
+  /** Incoming file position in seconds; no automatic beat/drop detection. */
+  startTime?: number;
+  curve?: "linear" | "equalPower";
+  /** Progressive outgoing low-band attenuation, -60..0 dB (default 0). */
+  outgoingBassDb?: number;
+  /** Complementary low-band handoff over 35..65% of the fade (default false). */
+  bassHandoff?: boolean;
+  /** Low-band split frequency, 20..1000 Hz (default 180, below Nyquist). */
+  bassCutoffHz?: number;
+  /** Headroom at the overlap midpoint, 0..12 dB (default 0); unity at endpoints. */
+  headroomDb?: number;
 }
 
 export interface FFmpegRunResultExtended extends FFmpegRunResult {
+  /**
+   * Seek a replayable file/URL to absolute seconds (finite >= 0) or a time string.
+   * Ordinary runs restart FFmpeg and return a new result/output/done; replace the
+   * consumer and retain the new result. Stale ordinary results reject (unchanged).
+   * With enableCrossfade: true, returns the same public result, output, and session
+   * done. After a completed crossfade, the position is within the current track,
+   * not the original track or mixed-session timeline. Keep output continuously
+   * consumed before and throughout await seek(); backpressure can stall completion.
+   * External queued player PCM is not flushed. Old frames may continue during
+   * decoder warmup, and network startup may cause a gap; gapless is not guaranteed.
+   * Rejects during an active fade; while seeking, crossfade and a second seek
+   * reject. Operations do not cancel or supersede an in-progress transition.
+   */
+  seek?: (position: number | string) => Promise<FFmpegRunResultExtended>;
+  crossfade?: (url: string, time?: number, options?: LiveCrossfadeOptions) => Promise<void>;
   passthrough: ReadableStream<Uint8Array>;
   close: () => Promise<void> | void;
   audioProcessor?: AudioProcessor;
@@ -148,8 +185,10 @@ export interface FFmpegRunResultExtended extends FFmpegRunResult {
   setVolume?: (volume: number) => void;
   setBass?: (bass: number) => void;
   setTreble?: (treble: number) => void;
+  setMids?: (mids: number) => void;
   setCompressor?: (enabled: boolean) => void;
   setNormalize?: (enabled: boolean) => void;
+  setKaraoke?: (enabled: boolean) => void;
   startFade?: (targetVolume: number, durationMs: number) => void;
 }
 

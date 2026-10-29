@@ -11,8 +11,10 @@ export class AudioEffectController {
   private _volume: number;
   private _bass: number;
   private _treble: number;
+  private _mids: number;
   private _compressor: boolean;
   private _normalize: boolean;
+  private _karaoke: boolean;
 
   constructor(
     audioProcessor: AudioProcessor,
@@ -21,8 +23,10 @@ export class AudioEffectController {
       volume: number;
       bass: number;
       treble: number;
+      mids?: number;
       compressor: boolean;
       normalize: boolean;
+      karaoke?: boolean;
     },
   ) {
     this.audioProcessor = audioProcessor;
@@ -33,8 +37,10 @@ export class AudioEffectController {
     this._volume = initialState.volume;
     this._bass = initialState.bass;
     this._treble = initialState.treble;
+    this._mids = initialState.mids ?? 0;
     this._compressor = initialState.compressor;
     this._normalize = initialState.normalize ?? false;
+    this._karaoke = initialState.karaoke ?? false;
   }
 
   setVolume(v: number): void {
@@ -64,6 +70,15 @@ export class AudioEffectController {
     this.logChange("Treble", oldValue, t);
   }
 
+  setMids(m: number): void {
+    const oldValue = this._mids;
+    this._mids = m;
+    if (this.canUpdate()) {
+      this.audioProcessor.mids = m;
+    }
+    this.logChange("Mids", oldValue, m);
+  }
+
   setCompressor(c: boolean): void {
     const oldValue = this._compressor;
     this._compressor = c;
@@ -86,6 +101,19 @@ export class AudioEffectController {
     if (this.verbose) {
       this.logger.info?.(
         `[${getTimeString()}] [${this.loggerTag}] Normalize changed: ${String(oldValue)} → ${String(n)}`,
+      );
+    }
+  }
+
+  setKaraoke(enabled: boolean): void {
+    const oldValue = this._karaoke;
+    this._karaoke = enabled;
+    if (this.canUpdate()) {
+      this.audioProcessor.setKaraoke(enabled);
+    }
+    if (this.verbose) {
+      this.logger.info?.(
+        `[${getTimeString()}] [${this.loggerTag}] Karaoke changed: ${String(oldValue)} → ${String(enabled)}`,
       );
     }
   }

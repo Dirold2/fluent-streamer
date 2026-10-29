@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { Readable } from "node:stream";
 import type { FFmpegRunner, FFmpegProcess } from "../../Types/core.js";
 
 class NodeFFmpegProcess implements FFmpegProcess {
@@ -44,31 +45,17 @@ class NodeFFmpegProcess implements FFmpegProcess {
       },
     });
 
-    this.stdout = new ReadableStream({
-      start(controller) {
-        process.stdout!.on("data", (chunk: Buffer) => {
-          controller.enqueue(new Uint8Array(chunk));
-        });
-        process.stdout!.on("end", () => controller.close());
-        process.stdout!.on("error", (err) => controller.error(err));
-      },
-      cancel() {
-        process.stdout!.destroy();
-      },
-    });
-
-    this.stderr = new ReadableStream({
-      start(controller) {
-        process.stderr!.on("data", (chunk: Buffer) => {
-          controller.enqueue(new Uint8Array(chunk));
-        });
-        process.stderr!.on("end", () => controller.close());
-        process.stderr!.on("error", (err) => controller.error(err));
-      },
-      cancel() {
-        process.stderr!.destroy();
-      },
-    });
+    const strategy = {
+      highWaterMark: 64 * 1024,
+      size: (chunk: Uint8Array) => chunk.byteLength,
+    };
+    // Node and DOM declare separate Web Stream types; the adapter returns Uint8Array chunks.
+    this.stdout = Readable.toWeb(process.stdout!, {
+      strategy,
+    }) as unknown as ReadableStream<Uint8Array>;
+    this.stderr = Readable.toWeb(process.stderr!, {
+      strategy,
+    }) as unknown as ReadableStream<Uint8Array>;
 
     process.on("exit", (code, signal) => {
       const sigName = signal ? signal.toString() : null;

@@ -5,7 +5,9 @@ export class FluentAudioState {
   public volume = 1;
   public bass = 0;
   public treble = 0;
+  public mids = 0;
   public compressor = false;
+  public karaoke = false;
 
   private result: FFmpegRunResultExtended | null = null;
   private sampleRate?: number;
@@ -17,7 +19,9 @@ export class FluentAudioState {
     volume?: number;
     bass?: number;
     treble?: number;
+    mids?: number;
     compressor?: boolean;
+    karaoke?: boolean;
     enabled?: boolean;
     sampleRate?: number;
     channels?: number;
@@ -26,7 +30,9 @@ export class FluentAudioState {
     this.volume = config.volume ?? 1;
     this.bass = config.bass ?? 0;
     this.treble = config.treble ?? 0;
+    this.mids = config.mids ?? 0;
     this.compressor = config.compressor ?? false;
+    this.karaoke = config.karaoke ?? false;
     this.enabled = config.enabled ?? false;
     this.sampleRate = config.sampleRate;
     this.channels = config.channels;
@@ -55,9 +61,21 @@ export class FluentAudioState {
     return this;
   }
 
+  setMids(v: number): this {
+    this.mids = v;
+    this.result?.setMids?.(v);
+    return this;
+  }
+
   setCompressor(v: boolean): this {
     this.compressor = v;
     this.result?.setCompressor?.(v);
+    return this;
+  }
+
+  setKaraoke(enabled: boolean): this {
+    this.karaoke = enabled;
+    this.result?.setKaraoke?.(enabled);
     return this;
   }
 
@@ -107,10 +125,28 @@ export class FluentAudioState {
     return false;
   }
 
+  changeMids(v: number): boolean {
+    if (this.result?.setMids) {
+      this.result.setMids(v);
+      this.mids = v;
+      return true;
+    }
+    return false;
+  }
+
   changeCompressor(v: boolean): boolean {
     if (this.result?.setCompressor) {
       this.result.setCompressor(v);
       this.compressor = v;
+      return true;
+    }
+    return false;
+  }
+
+  changeKaraoke(enabled: boolean): boolean {
+    if (this.result?.setKaraoke) {
+      this.result.setKaraoke(enabled);
+      this.karaoke = enabled;
       return true;
     }
     return false;
@@ -128,13 +164,15 @@ export class FluentAudioState {
   buildOptions(sampleRate?: number, channels?: number): AudioProcessingOptions {
     this.sampleRate ??= sampleRate;
     this.channels ??= channels;
-    const hash = `${this.volume}-${this.bass}-${this.treble}-${this.compressor}`;
+    const hash = `${this.volume}-${this.bass}-${this.treble}-${this.mids}-${this.compressor}-${this.karaoke}`;
     if (this.cachedOptions && this.cachedHash === hash) return this.cachedOptions;
     this.cachedOptions = {
       volume: this.volume,
       bass: this.bass,
       treble: this.treble,
+      mids: this.mids,
       compressor: this.compressor,
+      karaoke: this.karaoke,
       normalize: false,
       sampleRate: this.sampleRate,
       channels: this.channels,
@@ -147,14 +185,18 @@ export class FluentAudioState {
     volume: number;
     bass: number;
     treble: number;
+    mids: number;
     compressor: boolean;
+    karaoke: boolean;
     enabled: boolean;
   } {
     return {
       volume: this.volume,
       bass: this.bass,
       treble: this.treble,
+      mids: this.mids,
       compressor: this.compressor,
+      karaoke: this.karaoke,
       enabled: this.enabled,
     };
   }

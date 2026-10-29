@@ -56,6 +56,7 @@ export function buildProcessorConfig(options: ProcessorOptions = {}): ProcessorC
       volume: 1,
       bass: 0,
       treble: 0,
+      mids: 0,
       compressor: false,
       normalize: false,
     },

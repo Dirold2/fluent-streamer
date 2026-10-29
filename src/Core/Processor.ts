@@ -19,7 +19,6 @@ import {
   pipeInputStreams,
   createAudioProcessor,
   setupOutputPipeline,
-  updateThrottleBitrate,
 } from "./processor/pipeline.js";
 import { createSilenceBuffer, createSilenceMs } from "./processor/silence.js";
 import { StderrTracker, buildProcessExitError, readStderrStream } from "./processor/stderr.js";
@@ -37,6 +36,7 @@ type ProcessorEvents = {
 
 export class Processor extends MiniEmitter<ProcessorEvents> {
   private process: FFmpegProcess | null = null;
+  private outputController: TransformStreamDefaultController<Uint8Array> | null = null;
   private outputStream: ReadableStream<Uint8Array> | null = null;
   private inputStreams: Array<{
     stream: ReadableStream<Uint8Array>;
@@ -49,6 +49,7 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
   private processState: ProcessorState = "idle";
   private terminationReason: TerminationReason = null;
   private isTerminating = false;
+  private outputCancellation?: { reason: unknown };
   private hasFinished = false;
   private isClosed = false;
   private doneSettled = false;
@@ -64,16 +65,20 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
   private useAudioProcessor = false;
   private endSequenceFn: (() => void) | null = null;
   private throttledOutput: TransformStream<Uint8Array, Uint8Array> | null = null;
+  private abortHandler?: () => void;
+  private pipelineAbort: AbortController | null = null;
   private _pipelinePromise: Promise<void> | null = null;
   private currentVolume = 1;
   private currentBass = 0;
   private currentTreble = 0;
+  private currentMids = 0;
   private currentCompressor = false;
   private currentNormalize = false;
+  private currentKaraoke = false;
   private _startTime = 0;
   private _totalChunks = 0;
   private _skipInProgress = false;
-  private _lastSkipTime = 0;
+  private _lastSkipTime = -Infinity;
   private readonly SKIP_DEBOUNCE_MS = 500;
 
   private readonly config: ProcessorConfig;
@@ -91,15 +96,12 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
     this.currentVolume = this.config.audioProcessorOptions?.volume ?? 1;
     this.currentBass = this.config.audioProcessorOptions?.bass ?? 0;
     this.currentTreble = this.config.audioProcessorOptions?.treble ?? 0;
+    this.currentMids = this.config.audioProcessorOptions?.mids ?? 0;
     this.currentCompressor = this.config.audioProcessorOptions?.compressor ?? false;
+    this.currentKaraoke = this.config.audioProcessorOptions?.karaoke ?? false;
 
     this.stderrTracker = new StderrTracker(this.config, {
       onProgress: (progress) => this.emit("progress", progress),
-      onBitrateDetected: (kbps) => {
-        if (this.throttledOutput) {
-          updateThrottleBitrate(this.throttledOutput, kbps);
-        }
-      },
     });
 
     this._handleAbortSignal();
@@ -173,24 +175,32 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
   }
 
   public async run(): Promise<FFmpegRunResultExtended> {
+    this.config.abortSignal?.throwIfAborted();
     if (this.process) throw new Error("FFmpeg process is already running");
     if (this._skipInProgress) throw new Error("Skip operation in progress");
 
     this._resetRunState();
     this._initPromise();
     this.processState = "running";
-    this._startTime = Date.now();
+    this._startTime = performance.now();
     this._totalChunks = 0;
 
     await this._resolveBlobSources();
     this.config.ffmpegPath = await resolveFfmpegPath(this.config.ffmpegPath);
 
+    if (this.config.abortSignal?.aborted) {
+      const error = new Error("FFmpeg run aborted before spawn");
+      this._finalize(error, "failed");
+      this.donePromise!.catch(() => {});
+      throw error;
+    }
     const fullArgs = this.getFullArgs();
     this._executeBeforeSpawnHook(fullArgs);
     this._logSpawnDetails(fullArgs);
 
     try {
       const runner = await ffmpegManager.ensure();
+      this.config.abortSignal?.throwIfAborted();
       this.process = runner.spawn(this.config.ffmpegPath, fullArgs);
     } catch (ex) {
       this.config.logger.error?.(
@@ -218,6 +228,9 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
     });
 
     const outputTransformStream = new TransformStream<Uint8Array, Uint8Array>({
+      start: (controller) => {
+        this.outputController = controller;
+      },
       transform(chunk, controller) {
         controller.enqueue(chunk);
       },
@@ -230,8 +243,11 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
       this.currentBass,
       this.currentTreble,
       this.currentCompressor,
+      this.currentMids,
+      this.currentKaraoke,
     );
 
+    this.pipelineAbort = new AbortController();
     const { throttledOutput, pipelinePromise } = setupOutputPipeline(
       this.process,
       audioProcessor,
@@ -246,9 +262,13 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
       },
       {
         onError: (err) => {
+          // Only the registered downstream cancellation is intentional. Source failures
+          // (even during retirement) must still reject done.
+          if (this.outputCancellation && Object.is(err, this.outputCancellation.reason)) return;
           this.emit("error", err);
           this._finalize(err, "failed");
         },
+        signal: this.pipelineAbort.signal,
         onPipelineComplete: () => {
           this._runEnded = true;
         },
@@ -258,6 +278,7 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
 
     this.throttledOutput = throttledOutput;
     this._pipelinePromise = pipelinePromise;
+
     this.outputStream = outputTransformStream.readable;
     if (this.config.autoDrainOutput) {
       ensureOutputDrained(outputTransformStream.readable);
@@ -285,22 +306,32 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
       volume: this.currentVolume,
       bass: this.currentBass,
       treble: this.currentTreble,
+      mids: this.currentMids,
       compressor: this.currentCompressor,
       normalize: this.currentNormalize ?? false,
+      karaoke: audioProcessor.karaoke,
     });
 
     return {
       output: outputTransformStream.readable,
       passthrough: outputTransformStream.readable,
       done: this.donePromise!,
-      stop: () => this.kill(),
+      stop: (signal) => this.kill(signal),
       close: () => this.close(),
       audioProcessor,
       setVolume: (v) => controller.setVolume(v),
       setBass: (b) => controller.setBass(b),
       setTreble: (t) => controller.setTreble(t),
+      setMids: (m) => {
+        this.currentMids = m;
+        controller.setMids(m);
+      },
       setCompressor: (c) => controller.setCompressor(c),
       setNormalize: (n) => controller.setNormalize(n),
+      setKaraoke: (enabled) => {
+        this.currentKaraoke = enabled;
+        controller.setKaraoke(enabled);
+      },
       startFade: (tv, dur) => controller.startFade(tv, dur),
     };
   }
@@ -323,6 +354,11 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
     await this.donePromise;
   }
 
+  /** Register the exact downstream cancellation before detaching a mixer reader. */
+  public prepareOutputCancellation(reason: unknown): void {
+    this.outputCancellation = { reason };
+  }
+
   public async kill(signal: string = "SIGTERM"): Promise<void> {
     if (this.process && !this.isTerminating) {
       this.isTerminating = true;
@@ -337,6 +373,8 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
       }
 
       try {
+        this.pipelineAbort?.abort();
+        this.outputController?.error(new Error("Playback stopped"));
         if (this.throttledOutput && !this.throttledOutput.readable.locked) {
           try {
             await this.throttledOutput.readable.cancel();
@@ -370,13 +408,13 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
         }
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      if (signal !== "SIGKILL") await new Promise((resolve) => setTimeout(resolve, 200));
       this._skipInProgress = false;
     }
   }
 
   public async skip(): Promise<void> {
-    const now = Date.now();
+    const now = performance.now();
     if (now - this._lastSkipTime < this.SKIP_DEBOUNCE_MS) {
       if (this.config.verbose) {
         this.config.logger.warn?.(
@@ -502,7 +540,7 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
       `[${getTimeString()}] [${this.config.loggerTag}] FFmpeg command: ${this.config.ffmpegPath} ${fullArgs.join(" ")}`,
     );
     this.config.logger.info?.(
-      `[${getTimeString()}] [${this.config.loggerTag}] Audio config: volume=${this.currentVolume}, bass=${this.currentBass}dB, treble=${this.currentTreble}dB, compressor=${this.currentCompressor}`,
+      `[${getTimeString()}] [${this.config.loggerTag}] Audio config: volume=${this.currentVolume}, bass=${this.currentBass}dB, treble=${this.currentTreble}dB, mids=${this.currentMids}dB, compressor=${this.currentCompressor}`,
     );
   }
 
@@ -547,6 +585,7 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
     this.hasFinished = false;
     this.doneSettled = false;
     this.isTerminating = false;
+    this.outputCancellation = undefined;
     this.stderrTracker.reset();
     this.process = null;
     this.outputStream = null;
@@ -569,6 +608,7 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
 
     const onAbort = () => this.kill("SIGTERM");
 
+    this.abortHandler = onAbort;
     if (abortSignal.aborted) {
       onAbort();
     } else {
@@ -673,7 +713,7 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
       if (this.timeoutHandle) clearTimeout(this.timeoutHandle);
 
       if (this.config.verbose) {
-        const duration = (Date.now() - this._startTime) / 1000;
+        const duration = (performance.now() - this._startTime) / 1000;
         const expectedDuration = this.stderrTracker.getDuration() || 0;
         const ratio = expectedDuration > 0 ? duration / expectedDuration : 0;
 
@@ -710,6 +750,8 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
   }
 
   private _cleanup(): void {
+    if (this.abortHandler) this.config.abortSignal?.removeEventListener("abort", this.abortHandler);
+    this.abortHandler = undefined;
     try {
       if (this.process) {
         try {

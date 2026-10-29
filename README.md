@@ -43,6 +43,7 @@ npm install @ffmpeg/ffmpeg @ffmpeg/core
 ```
 
 The browser runner is selected automatically when `window` is defined.
+It buffers the complete input and runs FFmpeg WASM before exposing output; it does not support live/infinite input streams or real-time output.
 
 ### Migrating from 0.4.x
 
@@ -110,7 +111,7 @@ await done;
 
 ---
 
-### Crossfade Example
+### Offline Crossfade Example
 
 ```ts
 import { FluentStream } from "fluent-streamer";
@@ -122,6 +123,171 @@ await new FluentStream()
   .output("x.mp3")
   .run();
 ```
+
+### Live Crossfade
+
+Crossfade prebuffers approximately 20 ms (at most 1024 frames) of the next source while continuing to output the old source at full gain. The fade frame counter starts only after this buffer is ready (or the next source reaches EOF). Old-decoder retirement runs in the background: transition completion means PCM generation has completed, not decoder cleanup. Session `done` and `stop()` still await every pending retirement and report cleanup failures. This removes cleanup waits from the audio path, but cannot eliminate later network underruns or gaps after the old source runs out.
+
+`await streamer.crossfade(url, time = 3)` requests an immediate transition to another file/URL in an active mixed playback session; it does not wait for the current track's end. The duration is in **seconds** (finite `0…3600`); `0` switches without a fade. The promise resolves after PCM transition generation, not after decoder retirement or the incoming track finishes. You can request another transition after awaiting the previous one; concurrent transitions reject. `result.crossfade?.(url, time)` exposes the same control in an opted-in session.
+
+The optional third argument is `LiveCrossfadeOptions`: `bassHandoff?: boolean` defaults to `false`. Enable it manually with `await streamer.crossfade(url, seconds, { bassHandoff: true, curve: 'equalPower', headroomDb: 3 })`. It uses independent per-channel outgoing/incoming low-band histories to smoothly close the outgoing low band and open the incoming low band over **35–65%** of the fade. The single-pole split (default `bassCutoffHz: 180`) has leakage, not a brick-wall cutoff: the rest of the spectrum still overlaps, and drums/percussive material can still clash. This does not guarantee a clean drum handoff or adjust pitch/playback speed.
+
+Set `enableCrossfade: true` explicitly in the constructor or `run()` options **before playback starts**. This mode keeps the **same `result.output`** across tracks, and `result.done` tracks completion/cleanup of the **whole mixed session**, not each decoder. Live seek preserves the same public result, output, and session `done` in this mode (see [Live seek](#live-seek-seekposition--resultseekposition)). Unlike the offline `.crossfadeAudio()` filter above, this API accepts a new source during playback.
+
+```ts
+import { spawn } from "node:child_process";
+import { Writable } from "node:stream";
+import { FluentStream } from "fluent-streamer";
+
+const streamer = new FluentStream({
+  enableCrossfade: true,
+  autoDrainOutput: false, // mixed playback always disables auto-drain
+  disableThrottling: true, // a clocked player supplies pacing/backpressure
+});
+const result = await streamer
+  .input("first.mp3") // exactly one file/URL input, passed as an FFmpeg argument
+  .audioCodec("pcm_s16le")
+  .outputOptions("-vn", "-f", "s16le", "-ar", "48000", "-ac", "2")
+  .output("pipe:1")
+  .run();
+
+const player = spawn("ffplay", [
+  "-nodisp", "-autoexit", "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "pipe:0",
+], { stdio: ["pipe", "ignore", "inherit"] });
+player.on("error", (error) => console.error("Player failed:", error));
+
+// Start the consumer BEFORE awaiting any transition; do not await playback here.
+const playback = result.output.pipeTo(Writable.toWeb(player.stdin));
+try {
+  // In an application, request this from a user action/timer BEFORE current EOF.
+  await streamer.crossfade("second.mp3", 3);
+  await streamer.crossfade("third.mp3", 0); // repeat after await; same output
+  // Only await session completion once no more transitions are wanted.
+  await Promise.all([playback, result.done]);
+} finally {
+  await result.stop();
+  player.kill();
+}
+```
+
+**Requirements and limits:**
+- Use exactly one `.input(fileOrURL)` represented by `-i` in the FFmpeg arguments, one stdout output `pipe:1`, and no complex filters or extra inputs. Raw stream, pipe, and blob inputs are unsupported.
+- Explicitly configure `pcm_s16le`, `-f s16le`, `-ar 48000`, and `-ac 2` as above. If overriding `audioProcessorOptions.sampleRate`/`channels`, explicitly match `-ar`/`-ac` and the consumer format. Built-in DSP is optional; enable `useAudioProcessor: true` for karaoke/EQ and other effects.
+- Keep the consumer pipeline flowing **before and throughout `await crossfade()` and `await seek()`**. Without consumption, backpressure stalls the fade and its promise (even a zero-duration switch needs output demand). Auto-drain is disabled in this mode. Do **not** wait for `result.done` before requesting the next track: by then the session has ended.
+- Trigger transitions before EOF yourself. This is not an automatic track queue, DJ beat matching, or end-of-track scheduler. An input reaching EOF during a fade contributes silence for the remaining fade frames.
+- Two FFmpeg decoders overlap during transitions, increasing CPU use and potentially simultaneous network traffic. Decoder startup and URL warmup can delay audio; network gapless playback is **not guaranteed**.
+- The browser/WASM runner buffers input/output rather than streaming live audio; it is not a live-crossfade playback backend.
+
+### Prepared automix
+
+Prepare the next queue entry **early**, while the live-crossfade consumer above keeps reading the same `result.output`. `prepareAutomix()` is an instance method on `FluentStream`, not a run-result method; it requires the same opted-in PCM session and replayable file/URL inputs.
+
+```ts
+import {
+  analyzePcm, analyzePcmAsync, analyzeTrack, planAutomix,
+  type DjAnalysis, type DjAnalysisOptions, type PcmAnalysisOptions, type AutomixPlan,
+  type PrepareAutomixOptions, type PreparedAutomix,
+  type AutomixDiagnostic, type AutomixFallbackReason,
+} from "fluent-streamer";
+
+// Application queue handler: nextUrl and optional incomingDurationMs come from
+// queue metadata; currentPositionMs() returns the current source position in ms.
+const preparationAbort = new AbortController();
+const prepared = await streamer.prepareAutomix(nextUrl, {
+  outgoingRemainingMs: currentDurationMs - currentPositionMs(), // sample NOW
+  incomingDurationMs, // optional; omit if unknown
+  fallbackSeconds: 8,
+  onDiagnostic: (diagnostic: AutomixDiagnostic) => {
+    console.log("Automix decision:", diagnostic);
+  },
+  signal: preparationAbort.signal,
+});
+// Old audio continues during analysis/prebuffering and while prepared is ready.
+// If the queue entry is replaced before start:
+if (nextUrl !== queue.nextUrl) {
+  await prepared.cancel();
+} else {
+  try {
+    await prepared.start(); // arms the PCM schedule; resolves after the overlap
+  } catch (error) {
+    await prepared.cancel().catch(() => {});
+    console.error("Automix did not complete:", error); // reassess live queue/timing
+  }
+}
+// A replacement while prepareAutomix is still pending must call
+// preparationAbort.abort(), handle its rejection, then prepare the new entry.
+```
+
+- `outgoingRemainingMs` is the **actual remaining duration sampled at the call**, not the full track duration or a future timer delay. Preparation subtracts PCM progress during analysis. Keep consuming output throughout preparation and `start()`; do not await session `done` first.
+- Preparation analyzes both sources (unless supplied as `outgoingAnalysis` / `incomingAnalysis`), plans a cue, and prebuffers the incoming decoder without fading. It reserves the transition: seek, crossfade, and another preparation reject while preparing/ready and through the started transition. Start or cancel promptly. `cancel()` is idempotent before start; after start it rejects and cannot undo the transition.
+- There is **no automatic start at EOF**, and preparation does not hold EOF open. Call `start()` while playback is still active; no `setTimeout` is needed. It schedules against consumed/generated PCM frames, not audible device time. Late arming can move a quantized start to a later beat; if the overlap no longer fits with the reserved one-second tail, `start()` cancels and rejects as stale rather than silently changing the decoded cue. Handle preparation/start rejection and reassess remaining time before retrying.
+- Decoder configuration and effects are snapshotted during preparation. Later setters affect only the active decoder until the prepared track becomes active. Cached analyses must describe the source from its **original beginning**, not the post-seek excerpt. `plan.startMs`, `cueMs`, and `dropMs` are source-relative absolute milliseconds; the session translates its seek origin to mixer frames. `plan.seconds` is seconds, not milliseconds. Subsequent seeks remain absolute in the incoming track.
+
+**Analysis and planning.** Use `await analyzePcmAsync(pcm: Int16Array, sampleRate, options?: PcmAnalysisOptions)` for CPU analysis during playback. It runs the shared analyzer in a dedicated worker and copies the analyzed input rather than transferring/detaching the caller's buffer. `PcmAnalysisOptions` has `signal?: AbortSignal` and `timeout?: number`: the default 25,000 ms deadline includes worker startup and the whole worker job. Timeout must be finite and positive. Abort/timeout rejects and terminates the worker; each job also terminates its worker before settling normally. `analyzePcm(pcm, sampleRate)` remains explicitly synchronous for deliberate offline use: it blocks the calling/main thread and is not a playback-safe substitute. Both APIs require a finite positive sample rate.
+
+`await analyzeTrack(fileOrURL, { ffmpegPath?, headers?, timeout?, signal? })` decodes through the runtime-selected `Processor`/runner, then automatically runs CPU analysis in a worker. `prepareAutomix()` automatically uses this path for each uncached source; callers do not need to opt in. Worker startup/execution errors reject: there is **no synchronous fallback**. Track analysis requires available FFmpeg (or the runner's FFmpeg backend), uses analysis runner defaults rather than all playback/run options, and does not apply playback effects. Its default 25-second **total deadline covers decoder startup, decoding, worker startup, and analysis**, not separate 25-second budgets per phase. Abort/timeout stops decoding and terminates an active analysis worker. Decoded output is capped at 720,000 bytes: 90 seconds of 4 kHz mono s16le. This is not a network download-size guarantee.
+
+**Worker deployment.** Node uses `node:worker_threads`; compiled packages resolve the separate `dist/Audio/analysis/DjAnalysisWorker.js` entry and its `DjAnalysisCore.js` dependency. Bundlers/deployments must preserve these worker/core assets and their relative URLs beside the compiled client, or explicitly arrange equivalent worker asset resolution; bundling only the main entry is insufficient. Running the TypeScript source directly requires **Node ≥22.18**; older Node versions must use a compiled build (subject to the package's normal runtime requirements). The non-Node branch uses a module Web Worker, but Bun, Deno, and browser/Web Worker execution remain **unverified**, not a compatibility promise. Missing Worker support or unavailable worker assets cause rejection, never main-thread analysis.
+
+All analysis entry points inspect at most the **first 90 seconds** and abstain on less than **8 seconds** or unreliable material. `DjAnalysis` contains `bpm`, `beatPhaseMs`, `dropMs` (nullable), their respective `bpmConfidence`, `beatPhaseConfidence`, `dropConfidence` (0–1 heuristics, not calibrated probabilities), and `analyzedDurationMs`. Spectral onsets estimate tempo/phase; sustained energy rises suggest a drop. Half/double-tempo ambiguity, weak onsets, or changing tempo intentionally lower confidence or produce nulls: fallback is expected, not a detection failure to bypass.
+
+`planAutomix({ outgoingAnalysis, incomingAnalysis, outgoingPositionMs, outgoingRemainingMs, incomingDurationMs?, fallbackSeconds, explicitDropMs?, onDiagnostic? })` is pure timing advice and returns `AutomixPlan | null`. Its fields are `seconds`, `cueMs`, `dropMs`, `reason` (`energy-entry`, `tempo-phrase`, or `crossfade`), `startMs`, and `beatPeriodMs` (null for fallback).
+
+- Both tracks must have valid 70–180 BPM grids with **BPM and phase confidences ≥ 0.65**, and faster/slower tempo ratio ≤ 1.03 (at most 3% apart). Automatic incoming drops additionally need confidence ≥ 0.7 and must lie inside the analyzed window. `explicitDropMs` overrides drop detection only after both grid/tempo gates pass.
+- Low confidence or incompatible tempos choose a plain crossfade from incoming **cue 0**, with **no drop seek, even if an explicit drop was supplied**, using the configured fallback length subject to duration caps. Fallback defaults to 8 seconds in `prepareAutomix`; invalid planner fallback lengths also use 8. This fallback can still overlap percussive material; it is not automatically a perfect mix. Invalid outgoing timing/known incoming duration returns null. All overlaps are capped at 16 seconds, reserve one outgoing second, and use at most a quarter of a known incoming duration.
+- Quantized plans use up to 16 beats, preferring four-beat bars. For unequal reliable BPMs within the tempo gate, the planner limits estimated drift to **1/16 of the shorter beat**, shortening the overlap and using whole beats when a bar cannot fit. If no grid-aligned overlap fits, these unequal-tempo plans use a short ordinary **cue-0 crossfade of at most 1 second**, not the longer configured fallback. Equal-tempo plans retain four-beat groups and use the configured fallback if they cannot fit. Four beats are only treated as a bar: this is **not bar/downbeat detection, pitch/speed adjustment, time stretching, or guaranteed persistent beat sync**. The drift budget assumes stable tempo, not measured phase error; tempo can drift, especially beyond the analyzed excerpt. Drop lead-in is approximate, not a guarantee that the drop lands on the fade endpoint.
+- `prepareAutomix()` automatically enables `bassHandoff: true` with smooth outgoing bass attenuation to **−12 dB**, `equalPower` overlap, and **3 dB** midpoint headroom. Independent outgoing/incoming low-band histories support the smooth **35–65%** handoff: outgoing lows close as incoming lows open. This is a leaky single-pole split, not brick-wall isolation or a full frequency exchange. Full-range envelopes still overlap, so drums/percussive material may overlap; neither clean drum separation nor an automatically perfect mix is guaranteed. No pitch/playback-speed adjustment or time stretching is applied.
+
+**Automix decision diagnostics.** `PrepareAutomixOptions.onDiagnostic?: (diagnostic: AutomixDiagnostic) => void` observes the planning decision independently of `verbose`. It is called exactly once when planning runs, even if the planner returns `null` (in which case `prepareAutomix()` rejects); failures or cancellation before planning do not emit a decision. Callback exceptions are swallowed and cannot change the plan or interrupt preparation. Direct `planAutomix()` calls also accept `onDiagnostic` with the same once-per-decision behavior, including null results. `AutomixDiagnostic` and `AutomixFallbackReason` are exported public types.
+
+- `outgoing` and `incoming` contain scalar analysis snapshots of **both tracks**: `bpm`, `bpmConfidence`, `beatPhaseMs`, `beatPhaseConfidence`, `dropMs`, `dropConfidence`, and `analyzedDurationMs`. Missing/non-finite numbers become `null`; no source URLs are included. `outgoingGridIssues` / `incomingGridIssues` explain grid validation failures. `timing` records `outgoingPositionMs`, `outgoingRemainingMs`, `incomingDurationMs`, `fallbackSeconds`, and `explicitDropMs`, also sanitized to finite numbers or `null`.
+- `fallbackReason: AutomixFallbackReason | null` is one of `unreliable-both-grids`, `unreliable-outgoing-grid`, `unreliable-incoming-grid`, `tempo-mismatch`, `insufficient-overlap`, `insufficient-grid-window`, `incoming-duration-limit`, or `invalid-timing`; it is `null` when no fallback/rejection reason applies. `outcome` is the resulting plan reason (`energy-entry`, `tempo-phrase`, or `crossfade`), or `null` when no plan is possible.
+- `tempoRatio` is faster/slower positive finite BPM (or `null`), even for unreliable grids. `octaveRelated` flags ratios from 1.85 to 2.15: it is **diagnostic only**, not tempo correction, permission to bypass confidence gates, or an automatic drop seek.
+- With `verbose: true`, the configured logger also receives `logger.debug("[tag] Automix decision", { code: "FluentStream-automix-decision", detail: diagnostic })`, where `tag` is the effective `loggerTag` (default `FluentStream`). Logger exceptions are swallowed too. These decision diagnostics are separate from `getPlaybackStats()` mixer/buffering statistics below.
+
+Diagnostics do **not** relax the conservative safety thresholds above or change fallback behavior: unreliable grids or incompatible tempos still use incoming **cue 0 with no drop seek**, even with `explicitDropMs`.
+
+**Cost and migration.** Uncached preparation separately opens/decodes outgoing and incoming sources, then opens the incoming source again for playback. Remote requests expose URLs/headers to the configured media endpoint and use additional network traffic and CPU; there is no external analysis service or built-in analysis cache. Cache/reuse trusted `DjAnalysis` in the caller (for example, using `analyzeTrack` ahead of time); `analyzePcmAsync` avoids a separate library download/decode if mono PCM is already available without running the CPU analyzer on the main thread. For bots, replace local analyzer/planner imports with the public exports above and remove duplicate implementations in the bot project—keep one library implementation. Bot files outside this repository must be migrated in that project. Their playback/buffering settings and downstream player are not available here: worker isolation alone does not verify that a bot's audible stutters have disappeared.
+
+### Playback diagnostics and responsiveness benchmark
+
+`streamer.getPlaybackStats()` returns `PlaybackMixerStats | null`: a frozen point-in-time snapshot for the current mixed playback session, or `null` outside one. Counters span that mixer session and do not reset when read; take another snapshot to observe changes. The exported interface matches `src/Audio/PlaybackMixer.ts`:
+
+```ts
+interface PlaybackMixerStats {
+  readonly emittedFrames: number;
+  readonly pullCount: number;
+  readonly maxPullMs: number;
+  readonly latePullCount: number;
+  readonly deadlineMissCount: number;
+  readonly pcmWaitMs: number;
+  readonly maxPcmWaitMs: number;
+  readonly frameShortageCount: number;
+  readonly preparationWaitCount: number;
+  readonly preparationWaitMs: number;
+  readonly pendingReadCount: number;
+  readonly prebufferedFrames: number;
+  readonly preparing: boolean;
+  readonly cleanupPending: boolean;
+}
+```
+
+- `emittedFrames` counts successfully enqueued PCM frames, including fades/silence, not discarded work. `pullCount` includes first demand and terminal pulls (EOF, errors, cancellation).
+- `maxPullMs` and `maxPcmWaitMs` measure the longest generation pull; `pcmWaitMs` sums pull duration including PCM/preparation waits, finalized when each pull ends. **Time between consumer reads is excluded.** `latePullCount` counts pulls longer than `max(20 ms, duration of PCM enqueued by that pull)`; `deadlineMissCount` counts pulls strictly longer than the fixed 20 ms deadline (960 frames at 48 kHz), including first/terminal pulls.
+- `frameShortageCount` counts current-source frame waits exceeding 20 ms before the pull has produced output. Immediate/small reads are not shortages; delayed EOF, errors, or cancellation can count. `preparationWaitCount` / `preparationWaitMs` describe EOF waits for a held replacement or incoming crossfade warmup.
+- `pendingReadCount` includes live upstream reads, including background prebuffering. `prebufferedFrames` counts complete frames in explicit warmup queues, not upstream chunks or output. `preparing` and `cleanupPending` report current preparation/cleanup state.
+
+Deadline misses and frame shortages are **not physical player underruns**. Event-loop starvation between pulls may not appear in generation-only timings. Measure consumer delivery against a separate fixed clock, alongside event-loop delay and downstream/device telemetry; consumer pauses and external buffering are separate from mixer generation.
+
+From the repository root, run the reproducible synthetic comparison:
+
+```sh
+./node_modules/.bin/tsc && node scripts/bench-dj-responsiveness.mjs
+```
+
+It compares no-analysis baseline, two consecutive synchronous analyses, and two concurrent worker analyses on deterministic seeded 90-second mono tracks through the actual `PlaybackMixer` with a paced synthetic PCM source. The JSON reports environment, a shared calibration-sized observation window, fixed 20 ms consumer opportunities/misses, event-loop delay/utilization, and mixer stats. Async elapsed time includes startup, copying, DSP, IPC, and termination; the empty-job startup/IPC/termination proxy is separate, not pure startup or subtracted compute time. Expired consumer slots are skipped, not replayed in a catch-up burst.
+
+This is a short local responsiveness observation, **not a worst-case input or performance guarantee**: 90 seconds is the analysis cap, not maximum computational complexity. There is no FFmpeg, network, device, or physical-underrun measurement; the direct mixer bypasses Processor throttling/settings. Repeat on the target deployment and compare loop delay and consumer misses, not just analysis throughput or mixer counters. No timing threshold is asserted and machine-specific results are not API guarantees.
 
 ### Advanced Streaming Example
 
@@ -161,82 +327,110 @@ app.get("/audio/:fileId", async (req, res) => {
 
 ### Real-time Audio Effects
 
+Built-in DSP processes **raw signed 16-bit little-endian PCM from FFmpeg stdout**, not encoded MP3/AAC, WAV headers, or files written directly by FFmpeg. Match FFmpeg output, `audioProcessorOptions`, and the player format explicitly. Only mono and stereo are supported.
+
+The following Node.js example uses `ffplay` as a clocked consumer; both binaries must be installed. The browser/WASM runner buffers input and does not support live playback.
+
 ```ts
+import { spawn } from "node:child_process";
+import { Writable } from "node:stream";
 import { FluentStream } from "fluent-streamer";
 
-// Create streamer for live audio processing
 const streamer = new FluentStream({
-  enableProgressTracking: true,
   useAudioProcessor: true,
+  disableThrottling: true, // the player controls playback speed via backpressure
+  autoDrainOutput: false,
+  audioProcessorOptions: {
+    volume: 1,
+    bass: 0,
+    mids: 0,
+    treble: 0,
+    compressor: false,
+    normalize: false,
+    sampleRate: 48000,
+    channels: 2,
+  },
 });
 
-const inputStream = getAudioSource(); // ReadableStream<Uint8Array> or Node.js Readable
+const player = spawn("ffplay", [
+  "-nodisp", "-autoexit", "-f", "s16le", "-ar", "48000", "-ac", "2", "-i", "pipe:0",
+], { stdio: ["pipe", "ignore", "inherit"] });
+player.on("error", (error) => console.error("Player failed:", error));
 
-const { output, done } = await streamer
-  .input(inputStream)
+const { output, done, stop } = await streamer
+  .input("https://example.com/music.mp3")
   .audioCodec("pcm_s16le")
-  .audioFrequency(44100)
-  .audioChannels(2)
+  .outputOptions("-vn", "-f", "s16le", "-ar", "48000", "-ac", "2")
   .output("pipe:1")
   .run();
 
-// Adjust audio effects in real-time (property accessors or change* methods)
-streamer.volume = 1.5;   // Boost volume by 50%
-streamer.bass = 5;       // Increase bass
-streamer.treble = -3;    // Reduce treble
-
-// Listen for progress events
-streamer.on("progress", (progress) => {
-  console.log(`Processing: ${progress.progress}%`);
-});
-
-await done;
+try {
+  const playback = output.pipeTo(Writable.toWeb(player.stdin));
+  streamer.setBass(5).setMids(4).setTreble(-3);
+  await Promise.all([playback, done]);
+} finally {
+  await stop();
+  player.kill();
+}
 ```
+
+If supplying `audioProcessorOptions`, TypeScript requires `volume`, `bass`, `treble`, `compressor`, and `normalize`; `mids`, `karaoke`, `sampleRate`, and `channels` are optional. Setting these format options does not configure FFmpeg output: specify matching `-ar`, `-ac`, codec, and raw format as above. Volume is clamped to `0…1`.
+
+Values in `audioProcessorOptions` are not all forwarded by the current Fluent pipeline: initial `normalize` is reset to `false`, and `cloneInput`, `headers`, low-pass options, and `fade` are not passed to the built-in DSP. Enable normalization after `run()` via `result.setNormalize?.(true)` or `streamer.changeNormalize(true)`. A directly constructed `AudioProcessor` does honor its initial `normalize` and `cloneInput` settings.
+
+### Karaoke (Center Cancellation)
+
+Enable `useAudioProcessor: true` with `audioProcessorOptions.karaoke: true` (default: `false`) in the raw PCM pipeline above, or configure it before `run()` with `streamer.setKaraoke(true)`. No restart is needed for live changes:
+
+```ts
+streamer.setKaraoke(true);       // chainable; initial or live setting
+streamer.karaoke = false;       // equivalent read/write accessor
+const enabled = streamer.karaoke;
+result.setKaraoke?.(true);      // run() result; when a processor is attached
+streamer.changeKaraoke(false);  // returns false without an attached runtime setter
+```
+
+`AudioProcessor` also exposes `setKaraoke(enabled)` and a read/write `karaoke` accessor. `FluentAudioState` supports the same state, chainable setter, and `changeKaraoke()` control. Fluent karaoke state is included in cached options/debug state for subsequent runs and preserved across live seek restarts.
+
+Karaoke uses mid/side processing: it preserves the side signal, applies frequency-selective attenuation to the mid signal, then reconstructs stereo before volume, EQ, and compression. Shelving filters shape attenuation over approximately **180 Hz–6 kHz**, with a nominal center depth of **-24 dB**. An adaptive coherence estimate based on overall mid-versus-side energy—not per-frequency analysis—reduces suppression on hard-panned signals. **Mono bypasses karaoke**; other enabled effects still apply.
+
+This is **center attenuation, not ML vocal isolation or source separation**. Centered instruments can also be attenuated, while panned vocals and vocal reverb can remain. Stereo is retained, but loudness and timbre can change; neither complete vocal removal nor listening quality is guaranteed. Reconstruction can produce peaks that clip even when the original PCM did not; the processor saturates samples to the 16-bit range rather than allowing integer wraparound. This processing uses more CPU than the old simple subtraction.
+
+Runtime toggles ramp the wet mix over **50 ms of processed audio**; an initially enabled setting takes effect immediately. Already queued audio is not reprocessed. Existing PCM buffering, 16-bit quantization, normalization, and saturation rules still apply. Start with neutral EQ and normalization/compression disabled to evaluate the attenuation; these effects remain available but alter the residual sound.
 
 ### Fade Effects and Transitions
 
+Use the PCM pipeline and consumer above. Start at volume zero, then invoke fades while output is being consumed:
+
 ```ts
-import { FluentStream } from "fluent-streamer";
+// Before run():
+streamer.setVolume(0);
 
-// Fade in/out example
-const streamer = new FluentStream()
-  .input("background-music.mp3")
-  .setVolume(0) // Start silent
-  .output("fade-demo.mp3");
-
-const { done } = await streamer.run();
-
-// Fade in over 2 seconds
-await new Promise((resolve) => setTimeout(resolve, 1000));
-streamer.fadeIn(1, 2000); // Target volume 1, fade time 2000ms
-
-await new Promise((resolve) => setTimeout(resolve, 8000));
-streamer.fadeOut(3000); // Fade out over 3 seconds
-
-await done;
+// After run(), while output.pipeTo(...) is active:
+streamer.fadeIn(1, 2000);
+// Later, when a fade-out is needed:
+streamer.fadeOut(3000);
 ```
 
----
+Fade durations use processed audio frames, not system time. Without an output consumer, backpressure stops processing and fades cannot advance. For file encoding, use FFmpeg filters instead of built-in live DSP.
 
 ### Audio Effects Control
 
 ```ts
-import { FluentStream } from "fluent-streamer";
+// Before run(): initial settings apply immediately.
+streamer
+  .setVolume(0.8)
+  .setBass(8)
+  .setMids(4)
+  .setTreble(-3)
+  .setCompressor(true);
 
-const streamer = new FluentStream({
-  enableProgressTracking: true,
-  useAudioProcessor: true,
-})
-  .input("music.mp3")
-  .setVolume(1.5)      // Increase volume by 50%
-  .setBass(8)          // Boost bass
-  .setTreble(-3)       // Cut treble slightly
-  .setCompressor(true) // Enable dynamic compression
-  .output("enhanced.wav");
-
-const { done } = await streamer.run();
-await done;
+// During PCM playback: EQ transitions take 50 ms of processed audio.
+streamer.setBass(0).setMids(-2).setTreble(5);
+streamer.changeNormalize(true); // live update; returns whether a run is attached
 ```
+
+Normalization is bounded peak control, not an EBU R128/LUFS loudness normalizer. Gain is limited to ×4 with a -1 dBFS input-peak target. Signals at or below -60 dBFS are not amplified. Gain reduction is immediate; recovery uses a 0.5-second audio-duration time constant. Silence and enable/disable transitions reset gain history. EQ and volume processing affect the final peak, so -1 dBFS is not a guaranteed output ceiling; final PCM saturation remains in place.
 
 ---
 
@@ -262,10 +456,13 @@ Main methods:
 - `.audioCodec(codec)` / `.videoCodec(codec)` — set codecs
 - `.audioBitrate(bps)` / `.videoBitrate(bps)`
 - `.format(fmt)` — set output format (e.g. 'mp3', 'wav')
-- `.seekInput(time)` — seek input position
+- `.seekInput(time)` — set the input start position before `.run()`
+- `await streamer.seek(time)` — live seek; returns a new run result and output stream
 - `.overwrite()` — overwrite output file(s)
 - `.map(spec)` — select specific streams
-- `.crossfadeAudio(seconds, options?)` — crossfade (audio)
+- `.crossfadeAudio(seconds, options?)` — offline FFmpeg crossfade filter
+- `await streamer.crossfade(url, seconds = 3)` — live transition with `enableCrossfade: true`
+- `.setKaraoke(enabled)` / `.karaoke` — initial/live center cancellation
 - `.run()` — start processing (async; returns `output`, `done`, `stop`)
 
 ---
@@ -279,12 +476,15 @@ new FluentStream(options?: ProcessorOptions)
 Creates a new FluentStream instance with optional processor options.
 
 **Options:**
-- `timeout?: number` - FFmpeg process timeout in seconds
+- `timeout?: number` - FFmpeg process timeout in milliseconds (`0` disables it)
 - `enableProgressTracking?: boolean` - Enable progress event emission
 - `failFast?: boolean` - Stop processing on first error
 - `wallTimeLimit?: number` - Maximum wall clock time limit
 - `useAudioProcessor?: boolean` - Enable built-in audio processing
-- `audioProcessorOptions?: AudioProcessingOptions` - Audio effect defaults (volume, bass, treble, compressor, normalize, sampleRate, channels, cloneInput)
+- `disableThrottling?: boolean` - Defaults to `true`. Set `false` to pace PCM output by its configured byte rate; this is not a jitter buffer.
+- `autoDrainOutput?: boolean` - Defaults to `true`. An unlocked output is automatically drained after 100 ms. Set `false` when attaching your own player or stream consumer.
+- `enableCrossfade?: boolean` - Explicit opt-in (default `false`) for stable mixed PCM output and live `.crossfade()`; disables auto-drain. See [Live Crossfade](#live-crossfade).
+- `audioProcessorOptions?: AudioProcessingOptions` - Audio effect defaults (volume, bass, treble, mids, compressor, normalize, karaoke, sampleRate, channels, cloneInput)
 - `logger?: Logger` - Custom logger instance (debug, info, warn, error)
 - `verbose?: boolean` - Enable debug log output
 
@@ -345,12 +545,12 @@ Set output container format: `'mp3'`, `'mp4'`, `'wav'`, `'flac'`, `'webm'`, etc.
 Set sample rate: `44100`, `48000`, `96000`, etc.
 
 #### `.audioChannels(channels: number)`
-Set channel count: `1` (mono), `2` (stereo), `6` (5.1), `8` (7.1), etc.
+The built-in PCM audio processor supports `1` (mono) or `2` (stereo) channels. Other channel counts are rejected rather than partially applying effects.
 
 ### Processing Controls
 
 #### `.seekInput(position: number | string)`
-Seek to position in input: `30`, `'00:00:30'`, `'1:30'`, etc.
+Set the input start position **before `.run()`**: `30`, `'00:00:30'`, `'1:30'`, etc. This is pre-run configuration, not a live playback seek; use `await streamer.seek(position)` for an active run.
 
 #### `.duration(time: number | string)`
 Limit output duration.
@@ -375,7 +575,7 @@ Copy streams without re-encoding (faster, preserves quality).
 ### Audio Effects (Real-time capable)
 
 #### `.setVolume(value: number)`
-Set volume multiplier (0-2): `0.5` (half), `1.0` (normal), `1.5` (50% boost).
+Set volume multiplier, clamped to `0…1`: `0` (mute), `0.5` (half), `1` (normal). Values above `1` are clamped rather than boosted.
 
 #### `.setBass(value: number)`
 Adjust bass level (-20 to 20): `0` (neutral), `5` (boost), `-3` (cut).
@@ -383,11 +583,21 @@ Adjust bass level (-20 to 20): `0` (neutral), `5` (boost), `-3` (cut).
 #### `.setTreble(value: number)`
 Adjust treble level (-20 to 20): `0` (neutral), `5` (boost), `-3` (cut).
 
+#### `.setMids(value: number)`
+Adjust midrange level (-20 to 20): `0` (neutral), positive values boost, negative values cut. Also available as the `mids` property and optional `audioProcessorOptions.mids` (default `0`). Like bass/treble, Fluent setters retain the value for subsequent runs. The run result exposes `setMids(value)` for live updates and retains its value for the next run of the same `Processor`.
+
+`AudioProcessor.setEqualizer(bass, treble, compressor)` keeps its existing signature and does not change mids; use `setMids(value)` separately.
+
+Live changes to bass, mids, and treble automatically transition over **50 ms of processed audio**, including transitions back to neutral. Repeated changes continue from the current transition. Initial constructor settings apply immediately; smoothing does not delay or buffer the audio stream and does not use wall-clock time.
+
 #### `.setCompressor(enabled: boolean)`
 Enable/disable audio compression for consistency.
 
-#### `.setNormalize(enabled: boolean)`
-Enable/disable automatic peak normalization for PCM audio.
+#### `result.setNormalize(enabled: boolean)` / `.changeNormalize(enabled: boolean)`
+Enable/disable automatic peak normalization during a run. Use `setNormalize(enabled)` on the run result or `streamer.changeNormalize(enabled)` (returns success). FluentStream does not expose a `normalize` property or chainable `setNormalize()` method.
+
+#### `.setKaraoke(enabled: boolean)` / `.karaoke` / `result.setKaraoke?.(enabled)`
+Configure or toggle center cancellation with `useAudioProcessor: true`. `.setKaraoke()` is chainable; `.karaoke` is a read/write accessor. `.changeKaraoke()` returns whether a runtime setter is attached. See [Karaoke](#karaoke-center-cancellation) for DSP behavior and limitations.
 
 #### `.fadeIn(targetVolume?: number, durationMs?: number)`
 Fade in from current volume to target volume.
@@ -399,6 +609,7 @@ Fade out to silence.
 - `.changeVolume(value: number)` — boolean success
 - `.changeBass(value: number)` — boolean success
 - `.changeTreble(value: number)` — boolean success
+- `.changeMids(value: number)` — boolean success
 - `.changeCompressor(enabled: boolean)` — boolean success
 - `.changeNormalize(enabled: boolean)` — boolean success
 
@@ -440,11 +651,76 @@ Start processing asynchronously. Returns:
   stop: () => void,                    // User stop/kill helper
   passthrough: ReadableStream<Uint8Array>,
   close: () => Promise<void> | void,
-  setVolume?, setBass?, setTreble?, setCompressor?, setNormalize?, startFade?
+  seek?: (position: number | string) => Promise<FFmpegRunResultExtended>,
+  crossfade?: (url: string, time?: number) => Promise<void>, // Opted-in mixed session
+  setVolume?, setBass?, setTreble?, setMids?, setCompressor?, setNormalize?, setKaraoke?, startFade?
 }
 ```
 
 `done` resolves for normal process completion and intentional user `stop()`/`close()` calls. It rejects for spawn/process errors, non-zero FFmpeg exits and timeouts. In Node.js, child process errors such as `spawn ffmpeg ENOENT` are surfaced as process errors instead of ambiguous `code === null` exits.
+
+#### Live seek: `.seek(position)` / `result.seek?.(position)`
+
+Both `await streamer.seek(90)` and `await result.seek?.('00:01:30')` seek to an **absolute** input position, not a relative offset. The optional result method must be present to use it; optional chaining returns `undefined` otherwise.
+
+**Ordinary seek (`enableCrossfade` off, unchanged):** FFmpeg restarts and returns a **new `FFmpegRunResultExtended`**, with its own `output`, `done`, `stop`, and other runtime controls. Runtime volume, EQ (bass/mids/treble), compressor, karaoke, and normalize settings are preserved across the restart. Replace the result and output as shown below:
+
+```ts
+const streamer = new FluentStream({ autoDrainOutput: false })
+  .input('song.mp3')
+  .audioCodec('pcm_s16le')
+  .format('s16le')
+  .output('pipe:1');
+
+let result = await streamer.run();
+let output = result.output;
+// Connect output to your player; keep ownership of that consumer.
+
+result = await streamer.seek(90);
+output = result.output;
+// Detach the old consumer, clear the player's queued audio, and connect NEW output.
+
+const next = await result.seek?.('00:01:30');
+if (next) {
+  result = next;
+  output = result.output;
+  // Again replace the consumer and clear the player's queue before playing NEW output.
+}
+// Use the current result.done / result.stop / other controls from now on.
+```
+
+For ordinary seek, the old output stream ends during a seek. Replace the consumed `output` and clear any external player queue yourself; the library does **not** automatically clear it and does **not** guarantee gapless playback. `autoDrainOutput: false` is recommended when your application consumes the output.
+
+**Lifecycle (ordinary, non-mixed runs):** `done` belongs to one FFmpeg run, not the entire playback session. Settlement of the old `done` during a restart does **not** mean that the playback session has ended. Do not attach unconditional session/player teardown to an old result's `done`; track the replacement result and handle seek transitions separately.
+
+**Mixed seek (`enableCrossfade: true`):** Both seek entry points return the **same public result**, with the **same `output` and `done`**. After a completed crossfade, the position is absolute within the **current track**, not the original track or the mixed-session timeline. Keep the existing output consumer running continuously **before and throughout `await seek()`**; do not detach it or wait for seek to finish before consuming. Backpressure can otherwise stall completion. `done` still covers the whole mixed session, not the replacement decoder.
+
+Mixed seek applies a 20 ms fade-out to the old audio, switches decoders at silence, then applies a 20 ms fade-in from the requested position. These sequential envelopes are counted in audio frames and do not modify the user volume or DSP fade state. `await seek()` resolves after fade-in PCM is generated (not after physical playback). The consumer must keep reading. Ordinary replacement-output seek does not apply these mixer envelopes.
+
+
+For example, in the [Live Crossfade](#live-crossfade) setup above, replace the `try` body with:
+
+```ts
+// playback is already consuming result.output and must keep running.
+await streamer.crossfade("second.mp3", 3);
+const sought = await streamer.seek(90); // absolute 90 seconds into second.mp3
+console.assert(sought === result);
+console.assert(sought.output === result.output && sought.done === result.done);
+await result.seek?.("00:00:30"); // same behavior; absolute 30 seconds into second.mp3
+// No result/output replacement or consumer reconnection for mixed seek.
+await Promise.all([playback, result.done]);
+```
+
+The library does **not flush PCM already queued by an external player**. Old frames may continue during decoder warmup, and network startup may cause an audible gap; preserving stream identity does **not** guarantee an immediate audible jump or gapless playback.
+
+A seek during an active fade rejects. While a seek is in progress, crossfade and a second seek reject. These operations do **not** cancel or supersede an in-progress transition; await completion before requesting another operation.
+
+**Limits and errors:**
+- Only an **active** run with a **single replayable file/URL input**, stdout output (`pipe:1`), and **no complex filters** supports live seek.
+- Raw stream and blob inputs are unsupported. A live/non-seekable URL server may fail even though the input is a URL.
+- The position must be a finite number of seconds `>= 0`, or a time string such as `'00:01:30'`; it is not a relative offset.
+- Concurrent seeks reject. For ordinary seek, seeking through a stale result (one superseded by a seek) rejects; always retain the new result. Mixed seek retains the existing public result instead.
+- `.seekInput()` remains pre-run configuration; it does not replace this live-seek API.
 
 #### `.clear()`
 Reset instance for reuse (required before `.run()` after previous use).
@@ -533,6 +809,18 @@ Permission denied (file locked)
 - On Windows, ensure files aren't open in other applications
 - Use unique temporary filenames
 
+### Playback Latency and Stuttering
+
+For URL/file playback through a clocked player, start without `-re`, `-fflags nobuffer`, or `-flags low_delay`. `-re` limits input reading to real time and reduces the opportunity to prepare audio ahead of playback; it is not needed merely because output is played in real time. These flags are not a general cure for latency. Live sources and publishing pipelines may require different settings.
+
+- With a player that controls timing and supports backpressure, keep `disableThrottling: true` and use `autoDrainOutput: false`.
+- If you need library-side PCM pacing, set `disableThrottling: false`. Do not blindly combine multiple pacing layers. Throttling cannot compensate for unavailable network data and is not a jitter buffer.
+- In your player, consider a bounded **100–200 ms startup buffer**, trading initial latency for underrun resistance. Respect backpressure rather than accumulating an unbounded queue.
+- At 48000 Hz, stereo, s16le: **192000 bytes/s**, **3840 bytes per 20 ms**, and **19200–38400 bytes per 100–200 ms**. FFmpeg chunks have variable sizes: do not treat each chunk as one fixed-duration packet. Preserve incomplete frames when repacketizing.
+- Match the FFmpeg output, DSP options, and consumer format. `.audioFrequency()` / `.audioChannels()` configure FFmpeg arguments; they do not synchronize the DSP options automatically.
+- Distinguish pitch/speed changes from delivery gaps. Log chunk byte counts, arrival times, player buffer depth, and underruns using monotonic clocks. Inspect FFmpeg stderr for reconnects and decoding errors.
+- Normalization measures the incoming signal before the built-in EQ. FFmpeg `volume=0.1` attenuates input by 20 dB and normalization may partly compensate for it; this changes loudness, not playback speed.
+
 ### Debugging Tips
 
 **Enable verbose logging:**
@@ -589,7 +877,7 @@ console.log('Debug info:', streamer.debugInfo());
 **OS support:** Linux, macOS, Windows, Docker containers
 
 **Known limitations:**
-- Real-time effects work best with PCM audio streams
+- Real-time effects require raw signed 16-bit little-endian PCM on stdout, with matching sample rate and mono/stereo channels; encoded output is not decoded by the built-in DSP.
 - Some advanced filters may not support all input combinations
 - HTTP streaming may have buffering delays depending on network
 - Large crossfades can be memory-intensive
@@ -667,3 +955,43 @@ When reporting bugs, please include:
 MIT © dirold2
 
 ---
+
+
+### Opt-in mixtape transitions
+
+Live mixed playback also accepts `crossfade(nextUrl, seconds, options)` on both
+`FluentStream` and its active run result. `LiveCrossfadeOptions` is exported as a type.
+Keep consuming the same `result.output` while awaiting the transition:
+
+```ts
+await result.crossfade!(nextUrl, 8, {
+  startTime: 42.5,             // incoming cue, absolute seconds into nextUrl
+  curve: "equalPower",        // cosine/sine overlap instead of default linear
+  outgoingBassDb: -24,        // progressively clear outgoing bass during overlap
+  bassCutoffHz: 180,          // low-band split frequency
+  headroomDb: 3,              // midpoint headroom, smoothly unity at both endpoints
+});
+```
+
+Defaults remain linear with no bass attenuation, bass handoff, or headroom reduction. Cue defaults
+to the beginning of the incoming file. `startTime` must be finite and nonnegative;
+`outgoingBassDb` is -60..0 dB, `bassCutoffHz` is 20..1000 Hz (internally capped below
+Nyquist), and `headroomDb` is 0..12 dB. `bassHandoff?: boolean` defaults to `false`.
+Bass uses a per-channel one-pole low-band split with a smooth progressive outgoing
+attenuation envelope. Without handoff, incoming EQ is unchanged; with
+`bassHandoff: true`, independent incoming low-band histories allow outgoing lows
+to close as incoming lows open smoothly over 35–65% of the fade. This leaky split
+is not brick-wall isolation: full-range envelopes and drums can still overlap.
+Shaped transitions use a channel-linked instantaneous peak guard to prevent PCM
+clipping/wraparound. This is not a lookahead mastering limiter; dense correlated
+material may still sound compressed. Headroom reduces how often that guard acts.
+Effects end with the overlap; normal track volume/EQ remains unchanged.
+
+The incoming decoder prebuffers up to 20 ms / 1024 PCM frames while outgoing audio
+continues. The fade clock starts once that warmup completes, not necessarily at the
+instant of the call. For advance analysis/prebuffering and PCM-frame scheduling,
+use [prepared automix](#prepared-automix); plain `crossfade()` does not analyze BPM
+or drops. Slow network startup can still cause gaps at outgoing EOF. Neither API
+performs time stretching or pitch-changing resampling. A cue identifies the start
+of incoming overlap, not a promise to land its drop at the fade endpoint.
+Seeking after completion remains absolute within the incoming track.

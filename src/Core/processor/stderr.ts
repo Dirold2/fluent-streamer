@@ -116,12 +116,8 @@ export class StderrTracker {
   }
 
   private appendBuffer(text: string): void {
-    if (this.buffer.length < this.config.maxStderrBuffer) {
-      this.buffer += text;
-      if (this.buffer.length > this.config.maxStderrBuffer) {
-        this.buffer = this.buffer.slice(this.buffer.length - this.config.maxStderrBuffer);
-      }
-    }
+    const limit = this.config.maxStderrBuffer;
+    this.buffer = limit > 0 ? (this.buffer + text).slice(-limit) : "";
   }
 
   private detectDuration(text: string): void {
@@ -156,7 +152,8 @@ export class StderrTracker {
       bitrateKbps = value * 1000;
     }
 
-    this.bitrate = Math.max(32, Math.min(320, bitrateKbps));
+    if (!Number.isFinite(bitrateKbps) || bitrateKbps <= 0) return;
+    this.bitrate = bitrateKbps;
     this.bitrateDetected = true;
     this.callbacks.onBitrateDetected?.(this.bitrate);
 

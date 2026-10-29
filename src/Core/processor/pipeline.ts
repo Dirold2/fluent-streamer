@@ -17,6 +17,7 @@ export type InputPipelineCallbacks = {
 
 export type OutputPipelineCallbacks = {
   onError: (err: Error) => void;
+  signal?: AbortSignal;
   onPipelineComplete: () => void;
   hasFinished: () => boolean;
 };
@@ -44,15 +45,11 @@ export function pipeInputStreams(
   }
 
   const primary = inputStreams[0]!;
-  const inputThrottle = new ThrottleStream(32_000);
-  primary.stream
-    .pipeThrough(inputThrottle)
-    .pipeTo(process.stdin)
-    .catch((err) => {
-      const code = (err as Error & { code?: string })?.code;
-      if (code === "EPIPE" && (callbacks.hasFinished() || callbacks.isTerminating())) return;
-      callbacks.onError(err as Error);
-    });
+  primary.stream.pipeTo(process.stdin).catch((err) => {
+    const code = (err as Error & { code?: string })?.code;
+    if (code === "EPIPE" && (callbacks.hasFinished() || callbacks.isTerminating())) return;
+    callbacks.onError(err as Error);
+  });
 }
 
 export function createAudioProcessor(
@@ -62,6 +59,8 @@ export function createAudioProcessor(
   bass: number,
   treble: number,
   compressor: boolean,
+  mids: number = 0,
+  karaoke: boolean = config.audioProcessorOptions?.karaoke ?? false,
 ): AudioProcessor {
   const sampleRate = config.audioProcessorOptions?.sampleRate ?? 48000;
   const channels = config.audioProcessorOptions?.channels ?? 2;
@@ -70,8 +69,10 @@ export function createAudioProcessor(
     volume,
     bass,
     treble,
+    mids,
+    karaoke: useAudioProcessor && karaoke,
     compressor,
-    normalize: false,
+    normalize: config.audioProcessorOptions?.normalize ?? false,
     sampleRate,
     channels,
   });
@@ -79,6 +80,7 @@ export function createAudioProcessor(
   if (!useAudioProcessor) {
     audioProcessor.setVolume(1);
     audioProcessor.setEqualizer(0, 0, false);
+    audioProcessor.setMids(0);
   }
 
   return audioProcessor;
@@ -117,7 +119,7 @@ export function setupOutputPipeline(
   const pipelinePromise = process.stdout
     .pipeThrough(audioProcessor)
     .pipeThrough(throttledOutput)
-    .pipeTo(outputStream.writable)
+    .pipeTo(outputStream.writable, { signal: callbacks.signal })
     .then(() => {
       callbacks.onPipelineComplete();
       if (config.verbose) {
@@ -127,20 +129,10 @@ export function setupOutputPipeline(
       }
     })
     .catch((err) => {
-      if (!callbacks.hasFinished()) {
+      if (!callbacks.hasFinished() && !callbacks.signal?.aborted) {
         callbacks.onError(err as Error);
       }
     });
 
   return { throttledOutput, pipelinePromise };
-}
-
-export function updateThrottleBitrate(
-  throttledOutput: TransformStream<Uint8Array, Uint8Array>,
-  kbps: number,
-): void {
-  if (throttledOutput instanceof ThrottleStream) {
-    const bytesPerSecond = (kbps * 1000) / 8;
-    throttledOutput.updateBitrate(bytesPerSecond);
-  }
 }

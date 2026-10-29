@@ -7,6 +7,8 @@ import {
   userToGainDb,
 } from "../AudioBiquad.js";
 
+import { EqualizerSmoothing, auxiliaryPeakGain } from "./EqualizerSmoothing.js";
+
 export function normalizeBass(bass: number): number {
   const range = BASS_MAX - BASS_MIN;
   if (range === 0) return 0;
@@ -23,9 +25,29 @@ export class BassEffect {
   public peakL: BiquadState = { x1: 0, x2: 0, y1: 0, y2: 0 };
   public peakR: BiquadState = { x1: 0, x2: 0, y1: 0, y2: 0 };
 
-  public set(bass: number): void {
+  private readonly smoothing = new EqualizerSmoothing((gainDb, sampleRate) => {
+    const scale = Math.min(1, (sampleRate * 0.45) / 120);
+    return [
+      calcLowShelfCoeffs(120 * scale, sampleRate, gainDb, 0.7),
+      calcPeakingCoeffs(60 * scale, sampleRate, auxiliaryPeakGain(gainDb, 6, 0.5), 1.0),
+    ];
+  });
+
+  public constructor(value = 0) {
+    this.set(value);
+  }
+
+  public get active(): boolean {
+    return this.smoothing.active;
+  }
+
+  public set(bass: number, durationMs = 0): void {
     this.value = normalizeBass(bass);
-    this.coeffs = null;
+    this.smoothing.set(
+      Math.abs(this.value) <= 0.001 ? 0 : userToGainDb(this.value, 18),
+      durationMs,
+    );
+    if (durationMs <= 0) this.coeffs = null;
   }
 
   public processStereo(
@@ -34,17 +56,23 @@ export class BassEffect {
     channels: number,
     sampleRate: number,
   ): [number, number] {
-    if (Math.abs(this.value) <= 0.001) return [l, r];
-
-    if (!this.coeffs) {
-      const gainDb = userToGainDb(this.value, 18);
-      const shelf = calcLowShelfCoeffs(120, sampleRate, gainDb, 0.7);
-      let peak: BiquadCoeffs | null = null;
-      if (Math.abs(gainDb) > 6) {
-        peak = calcPeakingCoeffs(60, sampleRate, gainDb * 0.5, 1.0);
+    if (!this.active) {
+      for (const state of [this.shelfL, this.peakL]) {
+        state.x2 = state.x1;
+        state.y2 = state.y1;
+        state.x1 = state.y1 = l;
       }
-      this.coeffs = { shelf, peak };
+      if (channels > 1)
+        for (const state of [this.shelfR, this.peakR]) {
+          state.x2 = state.x1;
+          state.y2 = state.y1;
+          state.x1 = state.y1 = r;
+        }
+      return [l, r];
     }
+
+    const [shelf, peak] = this.smoothing.next(sampleRate);
+    this.coeffs = { shelf: shelf!, peak: peak! };
 
     l = processBiquad(l, this.coeffs.shelf, this.shelfL);
     if (channels > 1) {

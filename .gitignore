@@ -16,6 +16,8 @@ pnpm-lock.yaml
 dist/
 build/
 tests/.tmp/
+.dj-diagnostics/
+scripts/
 
 # TypeScript
 *.tsbuildinfo

@@ -6,9 +6,11 @@ import type { FilterState } from "../Types/audio.js";
 import { VolumeEffect } from "./effects/volume.js";
 import { FadeEffect } from "./effects/fade.js";
 import { BassEffect } from "./effects/bass.js";
+import { MidsEffect } from "./effects/mids.js";
 import { TrebleEffect } from "./effects/treble.js";
 import { CompressorEffect, compressSample } from "./effects/compressor.js";
 import { NormalizerEffect } from "./effects/normalizer.js";
+import { KaraokeEffect } from "./effects/karaoke.js";
 
 export { compressSample };
 
@@ -36,9 +38,12 @@ export class AudioProcessor extends MiniEmitter<AudioProcessorEvents> {
   private volumeEffect: VolumeEffect;
   private fadeEffect = new FadeEffect();
   private bassEffect = new BassEffect();
+  private midsEffect = new MidsEffect();
   private trebleEffect = new TrebleEffect();
   private compressorEffect: CompressorEffect;
   private normalizerEffect: NormalizerEffect;
+
+  private karaokeEffect: KaraokeEffect;
 
   private isDestroyed = false;
   private isWritableEnded = false;
@@ -60,14 +65,21 @@ export class AudioProcessor extends MiniEmitter<AudioProcessorEvents> {
     return this.bassEffect.value;
   }
   set bass(v: number) {
-    this.bassEffect.set(v);
+    this.bassEffect.set(v, 50);
+  }
+
+  get mids(): number {
+    return this.midsEffect.value;
+  }
+  set mids(v: number) {
+    this.midsEffect.set(v, 50);
   }
 
   get treble(): number {
     return this.trebleEffect.value;
   }
   set treble(v: number) {
-    this.trebleEffect.set(v);
+    this.trebleEffect.set(v, 50);
   }
 
   get compressor(): boolean {
@@ -84,12 +96,21 @@ export class AudioProcessor extends MiniEmitter<AudioProcessorEvents> {
     this.normalizerEffect.set(v);
   }
 
+  get karaoke(): boolean {
+    return this.karaokeEffect.enabled;
+  }
+  set karaoke(enabled: boolean) {
+    this.setKaraoke(enabled);
+  }
+
   get filterState(): FilterState {
     return {
       bassShelfL: this.bassEffect.shelfL,
       bassShelfR: this.bassEffect.shelfR,
       bassPeakL: this.bassEffect.peakL,
       bassPeakR: this.bassEffect.peakR,
+      midsPeakL: this.midsEffect.peakL,
+      midsPeakR: this.midsEffect.peakR,
       trebleShelfL: this.trebleEffect.shelfL,
       trebleShelfR: this.trebleEffect.shelfR,
       treblePeakL: this.trebleEffect.peakL,
@@ -114,14 +135,19 @@ export class AudioProcessor extends MiniEmitter<AudioProcessorEvents> {
 
     this.sampleRate = options.sampleRate ?? 48000;
     this.channels = options.channels ?? 2;
+    if (this.channels !== 1 && this.channels !== 2) {
+      throw new RangeError("AudioProcessor channels must be 1 (mono) or 2 (stereo)");
+    }
     this.frameSizeBytes = this.channels * 2;
 
     this.volumeEffect = new VolumeEffect(options.volume ?? 1);
     this.bassEffect.set(options.bass ?? 0);
+    this.midsEffect.set(options.mids ?? 0);
     this.trebleEffect.set(options.treble ?? 0);
     this.compressorEffect = new CompressorEffect(!!options.compressor);
     this.normalizerEffect = new NormalizerEffect(!!options.normalize);
     this.cloneInput = options.cloneInput ?? false;
+    this.karaokeEffect = new KaraokeEffect(options.karaoke ?? false, this.sampleRate);
 
     const transform = new TransformStream<Uint8Array, Uint8Array>({
       transform: (chunk, controller) => {
@@ -179,9 +205,14 @@ export class AudioProcessor extends MiniEmitter<AudioProcessorEvents> {
 
   public setEqualizer(bass: number, treble: number, compressor: boolean): void {
     if (this.isTerminated()) return;
-    this.bassEffect.set(bass);
-    this.trebleEffect.set(treble);
+    this.bassEffect.set(bass, 50);
+    this.trebleEffect.set(treble, 50);
     this.compressorEffect.set(compressor);
+  }
+
+  public setMids(mids: number): void {
+    if (this.isTerminated()) return;
+    this.midsEffect.set(mids, 50);
   }
 
   public setCompressor(enabled: boolean): void {
@@ -194,13 +225,20 @@ export class AudioProcessor extends MiniEmitter<AudioProcessorEvents> {
     this.normalizerEffect.set(enabled);
   }
 
+  public setKaraoke(enabled: boolean): void {
+    if (this.isTerminated()) return;
+    this.karaokeEffect.set(enabled);
+  }
+
   private shouldBypass(): boolean {
     return (
+      !(this.karaokeEffect.active && this.channels === 2) &&
       !this.fadeEffect.active &&
       !this.normalizerEffect.enabled &&
       this.volumeEffect.value === 1 &&
-      Math.abs(this.bassEffect.value) < 1e-6 &&
-      Math.abs(this.trebleEffect.value) < 1e-6 &&
+      !this.bassEffect.active &&
+      !this.midsEffect.active &&
+      !this.trebleEffect.active &&
       !this.compressorEffect.enabled
     );
   }
@@ -210,10 +248,12 @@ export class AudioProcessor extends MiniEmitter<AudioProcessorEvents> {
   }
 
   private processStereoSample(left: number, right: number, volume: number): [number, number] {
+    [left, right] = this.karaokeEffect.processStereo(left, right, this.channels);
     let l = (left * volume) / 32768;
     let r = (right * volume) / 32768;
 
     [l, r] = this.bassEffect.processStereo(l, r, this.channels, this.sampleRate);
+    [l, r] = this.midsEffect.processStereo(l, r, this.channels, this.sampleRate);
     [l, r] = this.trebleEffect.processStereo(l, r, this.channels, this.sampleRate);
 
     if (this.compressorEffect.enabled) {
@@ -241,7 +281,11 @@ export class AudioProcessor extends MiniEmitter<AudioProcessorEvents> {
     const frameCount = out.byteLength / this.frameSizeBytes;
     let currentVolume = this.volumeEffect.value;
 
-    const normalizeScale = this.normalizerEffect.calculateScale(samples);
+    const normalizeScale = this.normalizerEffect.calculateScale(
+      samples,
+      this.sampleRate,
+      this.channels,
+    );
 
     let fadeFinishedEvent: { to: number } | null = null;
 
@@ -262,12 +306,13 @@ export class AudioProcessor extends MiniEmitter<AudioProcessorEvents> {
       let [pl, pr] = this.processStereoSample(left, right, currentVolume);
 
       if (this.normalizerEffect.enabled && normalizeScale !== 1) {
-        pl = (pl * normalizeScale) | 0;
-        if (this.channels > 1) pr = (pr * normalizeScale) | 0;
+        pl *= normalizeScale;
+        if (this.channels > 1) pr *= normalizeScale;
       }
 
-      samples[idx] = pl;
-      if (this.channels > 1) samples[idx + 1] = pr;
+      // Saturate after normalization, before Int16Array conversion can wrap.
+      samples[idx] = Math.max(-32768, Math.min(32767, pl));
+      if (this.channels > 1) samples[idx + 1] = Math.max(-32768, Math.min(32767, pr));
     }
 
     if (fadeFinishedEvent) {
