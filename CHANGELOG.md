@@ -2,7 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.6.3] – 2026-10-31
+
+### Fixed
+- **Transition async overhead:** Ready PCM frames, including prepared warmup and consumed EOF, are read synchronously during crossfade/beat-handoff. Promises are only awaited when an upstream chunk is actually needed; simultaneous decoder waits remain concurrent. Fragmented and contiguous input tests verify byte-identical transition output. This reduces async scheduling overhead without changing envelopes, adding a pacing clock, or guaranteeing downstream underrun-free playback.
+
+## [0.6.2] – 2026-10-31
 
 ### Fixed
 - **Automix source-time after tempo matching:** Track a piecewise source/output timeline using the same speed steps as the FFmpeg tempo-return commands. Subsequent preparation subtracts elapsed source time, converts absolute source cue schedules back to PCM frames, and maps the outgoing tail reserve through the tempo timeline. The accumulated offset remains accounted for after returning to native speed; seek and native-speed track replacement reset the mapping. This models the configured tempo schedule, not sample-exact FFmpeg filter latency or downstream device playback.

@@ -73,6 +73,20 @@ class Input {
     return block;
   }
 
+  /** undefined means upstream I/O is needed; null means a fully consumed EOF. */
+  takeReadyFrame(bytes: number): Uint8Array | null | undefined {
+    if (this.warming || this.disposal) return undefined;
+    const buffered = this.prebuffer.shift();
+    if (buffered) return buffered;
+    const available = this.chunk.byteLength - this.offset;
+    if (available >= bytes) {
+      const frame = this.chunk.subarray(this.offset, this.offset + bytes);
+      this.offset += bytes;
+      return frame;
+    }
+    return this.ended && available === 0 ? null : undefined;
+  }
+
   async frame(bytes: number): Promise<Uint8Array | null> {
     // Warmup is the only reader until it settles, including during cancellation.
     if (this.warmup) await this.warmup;
@@ -617,9 +631,18 @@ export class PlaybackMixer {
         )
           break;
         const started = transition;
-        const [old, prefetched] = mixing
-          ? await Promise.all([this.currentFrame(), started!.next.frame(this.frameBytes)])
-          : [await this.currentFrame(), undefined];
+        // Let asynchronous warmup progress while the outgoing source keeps flowing.
+        const warming = !!transition && !transition.next.prebufferReady;
+        let old = warming ? undefined : this.current.takeReadyFrame(this.frameBytes);
+        let prefetched = mixing ? started!.next.takeReadyFrame(this.frameBytes) : undefined;
+        if (old === undefined || (mixing && prefetched === undefined)) {
+          // Only allocate/await when a decoder really needs another chunk.
+          // Read both missing inputs concurrently; never serialize decoder waits.
+          [old, prefetched] = await Promise.all([
+            old === undefined ? this.currentFrame() : old,
+            mixing && prefetched === undefined ? started!.next.frame(this.frameBytes) : prefetched,
+          ]);
+        }
         if (this.closed) return;
         // A transition can be requested while the old reader is pending.
         transition = this.transition;

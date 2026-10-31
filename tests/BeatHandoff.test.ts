@@ -84,11 +84,12 @@ async function render(
   options: LiveCrossfadeOptions = beat,
   channels = 1,
   mutate?: () => void,
+  makeSource = source,
 ): Promise<Uint8Array> {
-  const mixer = new PlaybackMixer(source(pcm(outgoing)), sampleRate, channels, retire);
+  const mixer = new PlaybackMixer(makeSource(pcm(outgoing)), sampleRate, channels, retire);
   try {
     // Preparation removes warmup-dependent outgoing frames from envelope measurements.
-    const prepared = await mixer.prepare(source(pcm(incoming)), retire);
+    const prepared = await mixer.prepare(makeSource(pcm(incoming)), retire);
     const transition = mixer.crossfadePrepared(prepared, fadeFrames / sampleRate, options);
     mutate?.();
     const result = await drain(mixer.output);
@@ -102,6 +103,23 @@ async function render(
 }
 
 describe("PlaybackMixer beat-handoff", () => {
+  it.each([{}, { curve: "equalPower" }, beat] as LiveCrossfadeOptions[])(
+    "keeps ready-chunk and fragmented read paths byte-identical for %j",
+    async (options) => {
+      const whole = (bytes: Uint8Array) =>
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(bytes);
+            controller.close();
+          },
+        });
+      const outgoing = tone(60);
+      const incoming = tone(3000);
+      expect(await render(outgoing, incoming, options, 1, undefined, whole)).toEqual(
+        await render(outgoing, incoming, options),
+      );
+    },
+  );
   it("accepts the three supported mode values and keeps explicit crossfade byte-identical to default", async () => {
     for (const mode of [undefined, "crossfade", "beat-handoff"] as const)
       expect(() => validateLiveCrossfadeOptions({ mode })).not.toThrow();
