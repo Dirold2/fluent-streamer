@@ -59,6 +59,20 @@ class Input {
     );
   }
 
+  /** Borrow complete frames from the current chunk without allocating promises per sample. */
+  takeReadyFrames(frameBytes: number, maxFrames: number): Uint8Array | undefined {
+    if (this.warming || this.prebuffer.length || this.disposal) return undefined;
+    const frames = Math.min(
+      maxFrames,
+      Math.floor((this.chunk.byteLength - this.offset) / frameBytes),
+    );
+    if (!frames) return undefined;
+    const bytes = frames * frameBytes;
+    const block = this.chunk.subarray(this.offset, this.offset + bytes);
+    this.offset += bytes;
+    return block;
+  }
+
   async frame(bytes: number): Promise<Uint8Array | null> {
     // Warmup is the only reader until it settles, including during cancellation.
     if (this.warmup) await this.warmup;
@@ -577,6 +591,18 @@ export class PlaybackMixer {
       const view = new DataView(output.buffer);
       let count = 0;
       while (!this.closed && count < 1024) {
+        // Ordinary playback is a byte copy, not an asynchronous sample-by-sample DSP loop.
+        // Never span a transition: gain/schedule boundaries remain frame-accurate.
+        if (!this.transition) {
+          const block = this.current.takeReadyFrames(this.frameBytes, 1024 - count);
+          if (block) {
+            output.set(block, count * this.frameBytes);
+            const frames = block.byteLength / this.frameBytes;
+            count += frames;
+            this.sourcePosition += frames;
+            continue;
+          }
+        }
         let transition = this.transition;
         const mixing = transition?.phase === "crossfade" && this.canMix(transition);
         if (transition && transition.frames === 0 && (transition.phase !== "crossfade" || mixing)) {
