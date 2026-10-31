@@ -91,6 +91,136 @@ const cached = {
 
 // These exercise real decoder ownership and pull-driven PCM, not wall-clock timers.
 describe.skipIf(!hasFFmpeg)("automix preparation integration", () => {
+  it("forwards live EQ while ready and overlapping, retaining it after handover", async () => {
+    const fluent = track().enableAudioProcessing();
+    const { result, reader } = await run(fluent);
+    const outgoing = result.audioProcessor!;
+    const decoderRun = vi.spyOn(Processor.prototype, "run");
+    const prepared = await fluent.prepareAutomix(fixture, {
+      ...cached,
+      transitionOverride: { startMs: 0, cueMs: 0, seconds: 0.5 },
+    });
+    const incoming = (await decoderRun.mock.results[0]!.value) as FFmpegRunResultExtended;
+    const bass = vi.spyOn(incoming, "setBass");
+    const mids = vi.spyOn(incoming, "setMids");
+    const treble = vi.spyOn(incoming, "setTreble");
+
+    fluent.setBass(3).setMids(4).setTreble(5);
+    expect(bass).toHaveBeenLastCalledWith(3);
+    expect(mids).toHaveBeenLastCalledWith(4);
+    expect(treble).toHaveBeenLastCalledWith(5);
+    expect(fluent.changeBass(6)).toBe(true);
+    expect(fluent.changeMids(7)).toBe(true);
+    expect(fluent.changeTreble(8)).toBe(true);
+    expect(bass).toHaveBeenLastCalledWith(6);
+    expect(mids).toHaveBeenLastCalledWith(7);
+    expect(treble).toHaveBeenLastCalledWith(8);
+    fluent.bass = -1;
+    fluent.mids = -2;
+    fluent.treble = -3;
+    expect(bass).toHaveBeenLastCalledWith(-1);
+    expect(mids).toHaveBeenLastCalledWith(-2);
+    expect(treble).toHaveBeenLastCalledWith(-3);
+    expect(outgoing.bass * 20).toBeCloseTo(-1);
+
+    let complete = false;
+    const started = prepared.start().then(() => {
+      complete = true;
+    });
+    expect((await reader.read()).done).toBe(false);
+    expect(complete).toBe(false);
+    fluent.bass = 9;
+    result.setMids!(10);
+    result.setTreble!(11);
+    expect(bass).toHaveBeenLastCalledWith(9);
+    expect(mids).toHaveBeenLastCalledWith(10);
+    expect(treble).toHaveBeenLastCalledWith(11);
+    expect(outgoing.mids * 20).toBeCloseTo(10);
+    while (!complete) {
+      expect((await reader.read()).done).toBe(false);
+      await delay(1);
+    }
+    await started;
+    expect(result.audioProcessor).toBe(incoming.audioProcessor);
+    expect(result.audioProcessor!.bass * 20).toBeCloseTo(9);
+    expect(result.audioProcessor!.mids * 20).toBeCloseTo(10);
+    expect(result.audioProcessor!.treble * 20).toBeCloseTo(11);
+    bass.mockClear();
+    result.setBass!(12);
+    expect(bass).toHaveBeenCalledExactlyOnceWith(12);
+    expect(fluent.bass).toBe(12);
+    expect(decoderRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("syncs EQ changed during analysis and decoder startup before preparation", async () => {
+    const fluent = track().enableAudioProcessing();
+    const { result } = await run(fluent);
+    const analyses = [Promise.withResolvers<DjAnalysis>(), Promise.withResolvers<DjAnalysis>()];
+    vi.spyOn(analysis, "analyzeTrack")
+      .mockReturnValueOnce(analyses[0]!.promise)
+      .mockReturnValueOnce(analyses[1]!.promise);
+    const startup = Promise.withResolvers<void>();
+    const entered = Promise.withResolvers<FFmpegRunResultExtended>();
+    const originalRun = Processor.prototype.run;
+    vi.spyOn(Processor.prototype, "run").mockImplementationOnce(async function () {
+      const incoming = await originalRun.call(this);
+      entered.resolve(incoming);
+      await startup.promise;
+      return incoming;
+    });
+    const pending = fluent.prepareAutomix(fixture, {
+      outgoingRemainingMs: 10000,
+      fallbackSeconds: 0.04,
+    });
+    fluent.setBass(4);
+    result.setMids!(5);
+    analyses.forEach((deferred) => deferred.resolve(unknown));
+    const incoming = await entered.promise;
+    const bass = vi.spyOn(incoming, "setBass");
+    const mids = vi.spyOn(incoming, "setMids");
+    const treble = vi.spyOn(incoming, "setTreble");
+    fluent.treble = 6;
+    startup.resolve();
+    const prepared = await pending;
+    expect(bass).toHaveBeenCalledWith(4);
+    expect(mids).toHaveBeenCalledWith(5);
+    expect(treble).toHaveBeenCalledWith(6);
+    await prepared.cancel();
+  });
+
+  it.each(["cancel", "abort", "failure"] as const)(
+    "removes prepared EQ targets on %s",
+    async (cause) => {
+      const fluent = track().enableAudioProcessing();
+      const { result } = await run(fluent);
+      const decoderRun = vi.spyOn(Processor.prototype, "run");
+      const controller = new AbortController();
+      const prepared = await fluent.prepareAutomix(fixture, {
+        ...cached,
+        signal: controller.signal,
+      });
+      const incoming = (await decoderRun.mock.results[0]!.value) as FFmpegRunResultExtended;
+      const bass = vi.spyOn(incoming, "setBass");
+      fluent.setBass(2);
+      expect(bass).toHaveBeenLastCalledWith(2);
+      if (cause === "cancel") await prepared.cancel();
+      else if (cause === "abort") {
+        controller.abort();
+        await prepared.cancel();
+      } else {
+        vi.spyOn(PlaybackMixer.prototype, "crossfadePrepared").mockRejectedValueOnce(
+          new Error("transition failed"),
+        );
+        await expect(prepared.start()).rejects.toThrow("transition failed");
+      }
+      bass.mockClear();
+      fluent.setBass(3);
+      result.setBass!(4);
+      expect(bass).not.toHaveBeenCalled();
+      expect(result.audioProcessor!.bass * 20).toBeCloseTo(4);
+    },
+  );
+
   it("maps the next transition from source time back to PCM frames after tempo return", async () => {
     const fluent = track();
     expect(fluent.getPlaybackPositionMs()).toBeNull();

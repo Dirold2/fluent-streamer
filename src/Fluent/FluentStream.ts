@@ -1018,6 +1018,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         controller.abort(new Error("prepareAutomix: aborted or playback stopped"));
     };
     let next: FFmpegRunResultExtended | undefined;
+    let unmirrorEq: (() => void) | undefined;
     let owned = false;
     let prepareOutputCancellation: ((reason: unknown) => void) | undefined;
     let token: PreparedMixerInput | undefined;
@@ -1033,6 +1034,8 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       controller.signal.removeEventListener("abort", onAbort);
     };
     const unlock = () => {
+      unmirrorEq?.();
+      unmirrorEq = undefined;
       detach();
       if (this.automixCancellation === abort) {
         this.automixCancellation = undefined;
@@ -1043,6 +1046,8 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       if (cancellation) return cancellation;
       if (state === "started") return Promise.reject(new Error("prepareAutomix: already started"));
       state = "cancelled";
+      unmirrorEq?.();
+      unmirrorEq = undefined;
       cancellation = (async () => {
         try {
           if (token && this.playback === session) await session.mixer.discardPrepared(token);
@@ -1219,6 +1224,12 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       void incoming.done.catch(() => {});
       controller.signal.throwIfAborted();
       if (this.playback !== session) throw new Error("prepareAutomix: playback stopped");
+      // run() used options captured before analysis/startup; catch up before prefetch.
+      unmirrorEq = this.audio.mirrorEq(incoming);
+      incoming.done.then(
+        () => unmirrorEq?.(),
+        () => unmirrorEq?.(),
+      );
       // prepare takes ownership synchronously, including cleanup on prefetch failure.
       owned = true;
       token = await session.mixer.prepare(
@@ -1604,7 +1615,18 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         "setKaraoke",
         "startFade",
       ] as const) {
-        Object.defineProperty(publicResult, key, { get: () => session.active[key] });
+        Object.defineProperty(publicResult, key, {
+          get: () => {
+            if (key === "setBass" || key === "setMids" || key === "setTreble") {
+              if (!session.active[key]) return undefined;
+              return (value: number) => {
+                if (this.playback === session) this.audio[key](value);
+                else session.active[key]?.(value);
+              };
+            }
+            return session.active[key];
+          },
+        });
       }
       Object.defineProperty(publicResult, "audioProcessor", {
         get: () => session.active.audioProcessor,

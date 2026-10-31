@@ -10,6 +10,7 @@ export class FluentAudioState {
   public karaoke = false;
 
   private result: FFmpegRunResultExtended | null = null;
+  private readonly eqMirrors = new Set<FFmpegRunResultExtended>();
   private sampleRate?: number;
   private channels?: number;
   private cachedOptions: AudioProcessingOptions | null = null;
@@ -41,6 +42,23 @@ export class FluentAudioState {
   /** Attach a live processor result — all setters will bridge through it. */
   attachResult(result: FFmpegRunResultExtended | null): void {
     this.result = result;
+    if (!result) this.eqMirrors.clear();
+  }
+
+  /** Keep a prepared decoder's EQ current without moving the active controls. */
+  mirrorEq(result: FFmpegRunResultExtended): () => void {
+    result.setBass?.(this.bass);
+    result.setMids?.(this.mids);
+    result.setTreble?.(this.treble);
+    this.eqMirrors.add(result);
+    return () => this.eqMirrors.delete(result);
+  }
+
+  private forwardEq(key: "setBass" | "setMids" | "setTreble", value: number): void {
+    this.result?.[key]?.(value);
+    for (const mirror of this.eqMirrors) {
+      if (mirror !== this.result) mirror[key]?.(value);
+    }
   }
 
   setVolume(v: number): this {
@@ -51,19 +69,19 @@ export class FluentAudioState {
 
   setBass(v: number): this {
     this.bass = v;
-    this.result?.setBass?.(v);
+    this.forwardEq("setBass", v);
     return this;
   }
 
   setTreble(v: number): this {
     this.treble = v;
-    this.result?.setTreble?.(v);
+    this.forwardEq("setTreble", v);
     return this;
   }
 
   setMids(v: number): this {
     this.mids = v;
-    this.result?.setMids?.(v);
+    this.forwardEq("setMids", v);
     return this;
   }
 
@@ -109,8 +127,7 @@ export class FluentAudioState {
 
   changeBass(v: number): boolean {
     if (this.result?.setBass) {
-      this.result.setBass(v);
-      this.bass = v;
+      this.setBass(v);
       return true;
     }
     return false;
@@ -118,8 +135,7 @@ export class FluentAudioState {
 
   changeTreble(v: number): boolean {
     if (this.result?.setTreble) {
-      this.result.setTreble(v);
-      this.treble = v;
+      this.setTreble(v);
       return true;
     }
     return false;
@@ -127,8 +143,7 @@ export class FluentAudioState {
 
   changeMids(v: number): boolean {
     if (this.result?.setMids) {
-      this.result.setMids(v);
-      this.mids = v;
+      this.setMids(v);
       return true;
     }
     return false;

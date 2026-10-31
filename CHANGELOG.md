@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.4] – 2026-10-31
+
+### Fixed
+- **Live EQ during prepared Automix:** Bass, mids, and treble updates now reach both the active and prepared incoming decoder while waiting for a transition and throughout its overlap. Incoming startup catches up with settings changed during analysis; cancellation, failure, and handover remove the temporary forwarding. Mixed-result EQ setters use the same path, preventing stale prepared settings from returning after handover. Already-processed PCM retains its prior EQ until downstream buffers drain.
+
 ## [0.6.3] – 2026-10-31
 
 ### Fixed
