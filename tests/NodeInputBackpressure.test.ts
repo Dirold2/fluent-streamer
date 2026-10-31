@@ -4,9 +4,11 @@ import FluentStream from "../src/Fluent/FluentStream.js";
 
 function adapt(source: Readable): ReadableStream<Uint8Array> {
   const fluent = new FluentStream().input(source);
-  return (fluent as unknown as {
-    inputStreams: Array<{ stream: ReadableStream<Uint8Array> }>;
-  }).inputStreams[0]!.stream;
+  return (
+    fluent as unknown as {
+      inputStreams: Array<{ stream: ReadableStream<Uint8Array> }>;
+    }
+  ).inputStreams[0]!.stream;
 }
 
 function expectDetached(source: Readable) {
@@ -56,7 +58,11 @@ describe("Fluent Node input backpressure", () => {
   it.each([undefined, "stop", new Error("cancelled")])(
     "destroys and detaches the source on cancel (%s)",
     async (reason) => {
-      const source = new Readable({ read() { this.push(Buffer.alloc(1024)); } });
+      const source = new Readable({
+        read() {
+          this.push(Buffer.alloc(1024));
+        },
+      });
       const stream = adapt(source);
       await stream.cancel(reason);
       await vi.waitFor(() => expectDetached(source));
@@ -67,7 +73,9 @@ describe("Fluent Node input backpressure", () => {
   it("handles errors from a custom destroy during cancellation", async () => {
     const source = new Readable({
       read() {},
-      destroy(_error, callback) { callback(new Error("destroy failed")); },
+      destroy(_error, callback) {
+        callback(new Error("destroy failed"));
+      },
     });
     await adapt(source).cancel();
     await vi.waitFor(() => expectDetached(source));
@@ -96,7 +104,10 @@ describe("Fluent Node input backpressure", () => {
     const source = Readable.from([]);
     source.resume();
     await new Promise<void>((resolve) => source.once("end", resolve));
-    await expect(adapt(source).getReader().read()).resolves.toEqual({ done: true, value: undefined });
+    await expect(adapt(source).getReader().read()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    });
     expectDetached(source);
   });
 

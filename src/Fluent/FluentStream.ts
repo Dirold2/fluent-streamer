@@ -20,14 +20,15 @@ import { FluentAudioState } from "./FluentAudioState.js";
 import { analyzeTrack, type DjAnalysis } from "../Audio/analysis/DjAnalysis.js";
 import {
   planAutomix,
+  planDropHandoff,
   type AutomixPlan,
   type AutomixDiagnostic,
 } from "../Audio/analysis/AutomixPlan.js";
 import type { PreparedMixerInput } from "../Audio/PlaybackMixer.js";
 
 export interface PrepareAutomixOptions {
-  /** Opt-in independent bass/high-band handoff; does not bypass grid checks. */
-  transitionMode?: "crossfade" | "beat-handoff";
+  /** Short, non-tempo-matched prepared handoff without long simultaneous playback. */
+  transitionMode?: "crossfade" | "beat-handoff" | "seamless";
   /** Explicit offline-calibrated transition override; bypasses grid gating only when supplied by the caller. */
   transitionOverride?: {
     /** Absolute outgoing source position. Omit to transition at the tail. */
@@ -36,6 +37,11 @@ export interface PrepareAutomixOptions {
     seconds: number;
     tempoFactor?: number;
   };
+  /** Opt-in: inspect an additional outgoing window in its second half and
+   * align the outgoing buildup to a confident first-half incoming energy rise.
+   * Adds one sequential FFmpeg/worker analysis; falls back to standard Automix.
+   */
+  dropHandoff?: boolean;
   /** Remaining outgoing time sampled when prepareAutomix is called. */
   outgoingRemainingMs: number;
   incomingDurationMs?: number;
@@ -996,9 +1002,23 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     if (
       options.transitionMode !== undefined &&
       options.transitionMode !== "crossfade" &&
-      options.transitionMode !== "beat-handoff"
+      options.transitionMode !== "beat-handoff" &&
+      options.transitionMode !== "seamless"
     )
       throw new FluentStreamValidationError("prepareAutomix: invalid transitionMode");
+    if (
+      options.transitionMode === "seamless" &&
+      (options.enableTempoMatch ||
+        options.dropHandoff ||
+        options.explicitDropMs !== undefined ||
+        (options.transitionOverride?.tempoFactor !== undefined &&
+          options.transitionOverride.tempoFactor !== 1) ||
+        (options.transitionOverride?.seconds !== undefined &&
+          options.transitionOverride.seconds > 0.5))
+    )
+      throw new FluentStreamValidationError(
+        "prepareAutomix: seamless mode requires native speed and at most 0.5 s overlap",
+      );
     const args = [...this.args];
     const globalArgs = [
       ...(this.lastRunOptions.extraGlobalArgs ?? this.options.extraGlobalArgs ?? []),
@@ -1108,20 +1128,93 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         headers: this.getMergedHeaders(),
         signal: controller.signal,
       };
-      const [outgoingAnalysis, incomingAnalysis] = await Promise.race([
-        Promise.all([
-          options.outgoingAnalysis ?? analyzeTrack(args[args.indexOf("-i") + 1]!, analysisOptions),
-          options.incomingAnalysis ?? analyzeTrack(url, analysisOptions),
-        ]),
-        aborted,
-      ]);
+      const emptyAnalysis: DjAnalysis = {
+        bpm: null,
+        bpmConfidence: 0,
+        beatPhaseMs: null,
+        beatPhaseConfidence: 0,
+        dropMs: null,
+        dropConfidence: 0,
+        analyzedDurationMs: 0,
+      };
+      const [outgoingAnalysis, incomingAnalysis] =
+        options.transitionMode === "seamless"
+          ? [options.outgoingAnalysis ?? emptyAnalysis, options.incomingAnalysis ?? emptyAnalysis]
+          : await Promise.race([
+              Promise.all([
+                options.outgoingAnalysis ??
+                  analyzeTrack(args[args.indexOf("-i") + 1]!, analysisOptions),
+                options.incomingAnalysis ?? analyzeTrack(url, analysisOptions),
+              ]),
+              aborted,
+            ]);
       controller.signal.throwIfAborted();
       if (this.playback !== session) throw new Error("prepareAutomix: playback stopped");
-      const frame = session.mixer.sourceFrame;
+      let frame = session.mixer.sourceFrame;
+      let lateAnalysis: DjAnalysis | undefined;
+      let lateWindowStartMs: number | undefined;
+      let latePlan: AutomixPlan | null = null;
+      if (
+        options.dropHandoff &&
+        !options.transitionOverride &&
+        options.incomingDurationMs !== undefined &&
+        (incomingAnalysis.dropCandidates
+          ? incomingAnalysis.dropCandidates.some(
+              (candidate) =>
+                Number.isFinite(candidate.ms) &&
+                candidate.ms >= 0 &&
+                candidate.ms < options.incomingDurationMs! / 2 &&
+                Number.isFinite(candidate.confidence) &&
+                candidate.confidence >= 0.7,
+            )
+          : incomingAnalysis.dropMs !== null &&
+            incomingAnalysis.dropMs < options.incomingDurationMs / 2 &&
+            incomingAnalysis.dropConfidence >= 0.7)
+      ) {
+        const outgoingDurationMs = initialPositionMs + options.outgoingRemainingMs;
+        const windowStartMs = Math.ceil(outgoingDurationMs / 2000) * 1000;
+        lateWindowStartMs = windowStartMs;
+        if (windowStartMs + 8000 < outgoingDurationMs) {
+          try {
+            lateAnalysis = await analyzeTrack(args[args.indexOf("-i") + 1]!, {
+              ...analysisOptions,
+              startSeconds: windowStartMs / 1000,
+            });
+            controller.signal.throwIfAborted();
+            if (this.playback !== session) throw new Error("prepareAutomix: playback stopped");
+            latePlan = planDropHandoff({
+              outgoingLateAnalysis: lateAnalysis,
+              incomingAnalysis,
+              windowStartMs,
+              outgoingDurationMs,
+              outgoingPositionMs: sourceMs(session.mixer.sourceFrame),
+              incomingDurationMs: options.incomingDurationMs,
+              enableTempoMatch: options.enableTempoMatch,
+              maxTempoChange: options.maxTempoChange,
+            });
+          } catch (error) {
+            controller.signal.throwIfAborted();
+            if (this.playback !== session) throw error;
+            // Optional extra analysis must not prevent the normal transition.
+            const logger = this.lastRunOptions.logger ?? this.logger;
+            try {
+              logger.debug("[FluentStream] Late drop analysis unavailable; using normal Automix", {
+                code: "FluentStream-drop-handoff-fallback",
+                detail: error,
+              });
+            } catch {
+              /* Logging cannot interrupt playback. */
+            }
+          }
+        }
+      }
+      frame = session.mixer.sourceFrame;
       const tempoFactor =
         options.transitionOverride?.tempoFactor ??
-        (options.enableTempoMatch && outgoingAnalysis.bpm && incomingAnalysis.bpm
-          ? outgoingAnalysis.bpm / incomingAnalysis.bpm
+        (options.enableTempoMatch &&
+        (latePlan ? lateAnalysis?.bpm : outgoingAnalysis.bpm) &&
+        incomingAnalysis.bpm
+          ? (latePlan ? lateAnalysis!.bpm! : outgoingAnalysis.bpm!) / incomingAnalysis.bpm
           : 1);
       const maxTempoChange = options.maxTempoChange ?? 0.08;
       if (
@@ -1148,54 +1241,90 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       ) {
         throw new FluentStreamValidationError("prepareAutomix: invalid transitionOverride");
       }
-      const plan = options.transitionOverride
-        ? {
-            seconds: options.transitionOverride.seconds,
-            cueMs: options.transitionOverride.cueMs,
-            dropMs: null,
-            reason: "tempo-phrase" as const,
-            startMs:
-              options.transitionOverride.startMs ??
-              sourceMs(frame) +
-                Math.max(
-                  0,
-                  options.outgoingRemainingMs -
-                    (sourceMs(frame) - initialPositionMs) -
-                    options.transitionOverride.seconds * 1000 -
-                    1000,
-                ),
-            beatPeriodMs: null,
-          }
-        : planAutomix({
-            outgoingAnalysis,
-            incomingAnalysis,
-            outgoingPositionMs: sourceMs(frame),
-            outgoingRemainingMs:
-              options.outgoingRemainingMs - (sourceMs(frame) - initialPositionMs),
-            incomingDurationMs: options.incomingDurationMs,
-            fallbackSeconds: options.fallbackSeconds ?? 8,
-            explicitDropMs: options.explicitDropMs,
-            enableTempoMatch: options.enableTempoMatch,
-            maxTempoChange,
-            onDiagnostic: (diagnostic) => {
-              try {
-                options.onDiagnostic?.(diagnostic);
-              } catch {
-                /* Diagnostics must not interrupt preparation. */
+      const remainingNow = options.outgoingRemainingMs - (sourceMs(frame) - initialPositionMs);
+      const fadeMs = Math.min(
+        350,
+        (remainingNow - 1000) / 2,
+        options.incomingDurationMs === undefined ? Infinity : options.incomingDurationMs / 4,
+      );
+      const plan =
+        options.transitionMode === "seamless"
+          ? fadeMs >= 100 && Number.isFinite(fadeMs)
+            ? {
+                seconds: options.transitionOverride?.seconds ?? fadeMs / 1000,
+                cueMs: options.transitionOverride?.cueMs ?? 0,
+                dropMs: null,
+                reason: "seamless" as const,
+                startMs:
+                  options.transitionOverride?.startMs ??
+                  initialPositionMs +
+                    options.outgoingRemainingMs -
+                    1000 -
+                    (options.transitionOverride?.seconds ?? fadeMs / 1000) * 1000,
+                beatPeriodMs: null,
               }
-              if (!(this.lastRunOptions.verbose ?? this.options.verbose)) return;
-              const logger = this.lastRunOptions.logger ?? this.logger;
-              const tag = this.lastRunOptions.loggerTag ?? this.options.loggerTag ?? "FluentStream";
-              try {
-                logger.debug(`[${tag}] Automix decision`, {
-                  code: "FluentStream-automix-decision",
-                  detail: diagnostic,
+            : null
+          : options.transitionOverride
+            ? {
+                seconds: options.transitionOverride.seconds,
+                cueMs: options.transitionOverride.cueMs,
+                dropMs: null,
+                reason: "tempo-phrase" as const,
+                startMs:
+                  options.transitionOverride.startMs ??
+                  sourceMs(frame) +
+                    Math.max(
+                      0,
+                      options.outgoingRemainingMs -
+                        (sourceMs(frame) - initialPositionMs) -
+                        options.transitionOverride.seconds * 1000 -
+                        1000,
+                    ),
+                beatPeriodMs: null,
+              }
+            : (() => {
+                const base = planAutomix({
+                  outgoingAnalysis,
+                  incomingAnalysis,
+                  outgoingPositionMs: sourceMs(frame),
+                  outgoingRemainingMs:
+                    options.outgoingRemainingMs - (sourceMs(frame) - initialPositionMs),
+                  incomingDurationMs: options.incomingDurationMs,
+                  fallbackSeconds: options.fallbackSeconds ?? 8,
+                  explicitDropMs: options.explicitDropMs,
+                  enableTempoMatch: options.enableTempoMatch,
+                  maxTempoChange,
+                  onDiagnostic: (diagnostic) => {
+                    const decision = latePlan
+                      ? {
+                          ...diagnostic,
+                          outcome: latePlan.reason,
+                          fallbackReason: null,
+                          outgoingHandoffDropMs: latePlan.startMs + latePlan.seconds * 1000,
+                          outgoingLateWindowStartMs: lateWindowStartMs,
+                        }
+                      : diagnostic;
+                    try {
+                      options.onDiagnostic?.(decision);
+                    } catch {
+                      /* Diagnostics must not interrupt preparation. */
+                    }
+                    if (!(this.lastRunOptions.verbose ?? this.options.verbose)) return;
+                    const logger = this.lastRunOptions.logger ?? this.logger;
+                    const tag =
+                      this.lastRunOptions.loggerTag ?? this.options.loggerTag ?? "FluentStream";
+                    try {
+                      logger.debug(`[${tag}] Automix decision`, {
+                        code: "FluentStream-automix-decision",
+                        detail: decision,
+                      });
+                    } catch {
+                      /* Logger failures must not affect the plan. */
+                    }
+                  },
                 });
-              } catch {
-                /* Logger failures must not affect the plan. */
-              }
-            },
-          });
+                return latePlan ?? base;
+              })();
       if (!plan)
         throw new FluentStreamValidationError(
           "prepareAutomix: insufficient remaining time or invalid timing",
@@ -1263,6 +1392,15 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
           controller.signal.throwIfAborted();
           const currentFrame = session.mixer.sourceFrame;
           let startMs = plan.startMs;
+          if (
+            (plan.reason === "drop-handoff" || plan.reason === "seamless") &&
+            sourceMs(currentFrame) > startMs
+          ) {
+            await cancel();
+            throw new FluentStreamValidationError(
+              "prepareAutomix: prepared handoff missed its start; prepare the next transition",
+            );
+          }
           if (plan.beatPeriodMs !== null && sourceMs(currentFrame) > startMs)
             startMs +=
               Math.ceil((sourceMs(currentFrame) - startMs) / plan.beatPeriodMs) * plan.beatPeriodMs;

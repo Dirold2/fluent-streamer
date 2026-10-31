@@ -19,6 +19,7 @@ import Processor from "../src/Core/Processor.js";
 const hasFFmpeg = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
 const directory = mkdtempSync(join(tmpdir(), "automix-integration-"));
 const fixture = join(directory, "tone.wav");
+const lateFixture = join(directory, "late-tone.wav");
 if (hasFFmpeg) {
   const generated = spawnSync("ffmpeg", [
     "-v",
@@ -34,6 +35,20 @@ if (hasFFmpeg) {
     fixture,
   ]);
   if (generated.status !== 0) throw new Error(generated.stderr.toString());
+  const longer = spawnSync("ffmpeg", [
+    "-v",
+    "error",
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=440:duration=30",
+    "-ar",
+    "48000",
+    "-ac",
+    "2",
+    lateFixture,
+  ]);
+  if (longer.status !== 0) throw new Error(longer.stderr.toString());
 }
 afterAll(() => rmSync(directory, { recursive: true, force: true }));
 const unknown: DjAnalysis = {
@@ -64,13 +79,13 @@ afterEach(async () => {
   );
   vi.restoreAllMocks();
 });
-function track() {
+function track(source = fixture) {
   return new FluentStream({
     enableCrossfade: true,
     autoDrainOutput: false,
     disableThrottling: true,
   })
-    .input(fixture)
+    .input(source)
     .audioCodec("pcm_s16le")
     .outputOptions("-vn", "-f", "s16le", "-ar", "48000", "-ac", "2")
     .output(FluentStream.stdout);
@@ -91,6 +106,146 @@ const cached = {
 
 // These exercise real decoder ownership and pull-driven PCM, not wall-clock timers.
 describe.skipIf(!hasFFmpeg)("automix preparation integration", () => {
+  it("decodes the selected late window through real FFmpeg and the analysis worker", async () => {
+    const result = await analysis.analyzeTrack(lateFixture, { startSeconds: 15 });
+    expect(result.analyzedDurationMs).toBeGreaterThan(14900);
+    expect(result.analyzedDurationMs).toBeLessThanOrEqual(15000);
+  }, 30000);
+
+  it("uses a short native-speed tail handoff without DJ analysis or a long mashup", async () => {
+    const fluent = track();
+    const { reader } = await run(fluent);
+    const analyze = vi.spyOn(analysis, "analyzeTrack");
+    const prepared = await fluent.prepareAutomix(fixture, {
+      outgoingRemainingMs: 10000,
+      incomingDurationMs: 12000,
+      transitionMode: "seamless",
+    });
+    expect(analyze).not.toHaveBeenCalled();
+    expect(prepared.plan).toMatchObject({
+      reason: "seamless",
+      seconds: 0.35,
+      cueMs: 0,
+      startMs: 8650,
+      beatPeriodMs: null,
+    });
+    let complete = false;
+    const started = prepared.start().then(() => {
+      complete = true;
+    });
+    for (let i = 0; i < 1000 && !complete; i++) expect((await reader.read()).done).toBe(false);
+    await started;
+  }, 10000);
+
+  it("rejects tempo matching and long overlaps in seamless mode", async () => {
+    const fluent = track();
+    await run(fluent);
+    for (const invalid of [
+      { enableTempoMatch: true },
+      { dropHandoff: true },
+      { explicitDropMs: 3000 },
+      { transitionOverride: { cueMs: 0, seconds: 6 } },
+    ]) {
+      await expect(
+        fluent.prepareAutomix(fixture, {
+          outgoingRemainingMs: 10000,
+          transitionMode: "seamless",
+          ...invalid,
+        }),
+      ).rejects.toThrow("seamless mode");
+    }
+  });
+
+  it("prepares an opt-in second-half drop handoff using a late decoder window", async () => {
+    const fluent = track(lateFixture);
+    const { reader } = await run(fluent);
+    const late = { ...grid, dropMs: 8000, dropConfidence: 0.9, analyzedDurationMs: 15000 };
+    const analyze = vi.spyOn(analysis, "analyzeTrack").mockResolvedValueOnce(late);
+    const decisions: AutomixDiagnostic[] = [];
+    const prepared = await fluent.prepareAutomix(fixture, {
+      outgoingRemainingMs: 30000,
+      incomingDurationMs: 12000,
+      outgoingAnalysis: grid,
+      incomingAnalysis: { ...grid, dropMs: 3000, dropConfidence: 0.9 },
+      dropHandoff: true,
+      onDiagnostic: (diagnostic) => decisions.push(diagnostic),
+    });
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]?.outcome).toBe("drop-handoff");
+    expect(decisions[0]?.outgoingHandoffDropMs).toBe(23000);
+    expect(decisions[0]?.outgoingLateWindowStartMs).toBe(15000);
+    expect(analyze).toHaveBeenCalledWith(
+      lateFixture,
+      expect.objectContaining({ startSeconds: 15 }),
+    );
+    expect(prepared.plan).toMatchObject({
+      reason: "drop-handoff",
+      startMs: 21000,
+      cueMs: 1000,
+      seconds: 2,
+      dropMs: 3000,
+    });
+    let completed = false;
+    const started = prepared.start().then(() => {
+      completed = true;
+    });
+    for (let i = 0; i < 1500 && !completed; i++) {
+      expect((await reader.read()).done).toBe(false);
+    }
+    await started;
+    expect(fluent.getPlaybackPositionMs()).toBeGreaterThanOrEqual(3000);
+  });
+
+  it("keeps the usual plan when the optional late drop is not trustworthy", async () => {
+    const fluent = track(lateFixture);
+    await run(fluent);
+    vi.spyOn(analysis, "analyzeTrack").mockResolvedValueOnce({
+      ...grid,
+      dropMs: null,
+      analyzedDurationMs: 15000,
+    });
+    const prepared = await fluent.prepareAutomix(fixture, {
+      outgoingRemainingMs: 30000,
+      incomingDurationMs: 12000,
+      outgoingAnalysis: grid,
+      incomingAnalysis: { ...grid, dropMs: 3000, dropConfidence: 0.9 },
+      dropHandoff: true,
+    });
+    expect(prepared.plan.reason).not.toBe("drop-handoff");
+    await prepared.cancel();
+  });
+
+  it("skips the extra decoder if the incoming first half has no eligible rise", async () => {
+    const fluent = track(lateFixture);
+    await run(fluent);
+    const analyze = vi.spyOn(analysis, "analyzeTrack");
+    const prepared = await fluent.prepareAutomix(fixture, {
+      outgoingRemainingMs: 30000,
+      incomingDurationMs: 12000,
+      outgoingAnalysis: grid,
+      incomingAnalysis: { ...grid, dropMs: 10000, dropConfidence: 0.9 },
+      dropHandoff: true,
+    });
+    expect(analyze).not.toHaveBeenCalled();
+    expect(prepared.plan.reason).not.toBe("drop-handoff");
+    await prepared.cancel();
+  });
+
+  it("keeps the ordinary transition if optional late decoding fails", async () => {
+    const fluent = track(lateFixture);
+    await run(fluent);
+    vi.spyOn(analysis, "analyzeTrack").mockRejectedValueOnce(new Error("late source unavailable"));
+    const prepared = await fluent.prepareAutomix(fixture, {
+      outgoingRemainingMs: 30000,
+      incomingDurationMs: 12000,
+      outgoingAnalysis: grid,
+      incomingAnalysis: { ...grid, dropMs: 3000, dropConfidence: 0.9 },
+      dropHandoff: true,
+    });
+    expect(prepared.plan.reason).not.toBe("drop-handoff");
+    await prepared.cancel();
+  });
+
   it("forwards live EQ while ready and overlapping, retaining it after handover", async () => {
     const fluent = track().enableAudioProcessing();
     const { result, reader } = await run(fluent);

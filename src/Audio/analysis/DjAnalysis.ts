@@ -10,10 +10,16 @@ import type { PcmAnalysisOptions } from "./DjAnalysisWorkerClient.js";
 
 export type DjAnalysisOptions = Pick<ProcessorOptions, "ffmpegPath" | "headers" | "timeout"> & {
   signal?: AbortSignal;
+  /** Decode a 90-second analysis window starting at this absolute source time. Results remain window-relative. */
+  startSeconds?: number;
 };
 
 const RATE = 4000;
 const MAX_BYTES = 90 * RATE * 2;
+
+function httpSeekArgs(startSeconds: number, source: string): string[] {
+  return startSeconds > 0 && /^https?:\/\//i.test(source) ? ["-ss", String(startSeconds)] : [];
+}
 
 /** Analyze a dedicated copy in a worker; the caller's input is never transferred. */
 export async function analyzePcmAsync(
@@ -43,6 +49,9 @@ export async function analyzeTrack(
   const timeout = options.timeout ?? 25000;
   if (!Number.isFinite(timeout) || timeout <= 0)
     throw new RangeError("timeout must be finite and positive");
+  const startSeconds = options.startSeconds ?? 0;
+  if (!Number.isFinite(startSeconds) || startSeconds < 0)
+    throw new RangeError("startSeconds must be finite and nonnegative");
   const abort = new AbortController();
   const forwardAbort = () => abort.abort(options.signal?.reason);
   options.signal?.addEventListener("abort", forwardAbort, { once: true });
@@ -55,13 +64,14 @@ export async function analyzeTrack(
     autoDrainOutput: false,
     disableThrottling: true,
     ffmpegLogLevel: "error",
+    extraGlobalArgs: httpSeekArgs(startSeconds, source),
     logger: { debug() {}, info() {}, log() {}, warn() {}, error() {} },
   });
   // Processor's URL source adds HTTP reconnect flags, which local inputs reject.
   const http = /^https?:\/\//i.test(source);
   if (http) processor.setInputSources([{ type: "url", url: source, index: 0 }]);
   processor.setArgs([
-    ...(http ? [] : ["-i", source]),
+    ...(http ? [] : [...(startSeconds > 0 ? ["-ss", String(startSeconds)] : []), "-i", source]),
     "-t",
     "90",
     "-vn",

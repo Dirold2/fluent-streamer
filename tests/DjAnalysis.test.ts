@@ -44,6 +44,7 @@ describe("analyzePcm", () => {
     }
     expect(tracked.intervalErrorMs).toBeLessThan(25);
     expect(result.stableSections!.length).toBeGreaterThan(0);
+    expect(result.localRhythm).toBeDefined();
     for (const section of result.stableSections!) {
       expect(section.validationStartMs).toBe(section.endMs);
       expect(section.validationEndMs).toBeLessThanOrEqual(result.analyzedDurationMs);
@@ -119,6 +120,7 @@ describe("analyzePcm", () => {
       expect(result.bpmConfidence).toBeLessThan(0.35);
       expect(result.beatPhaseMs).toBeNull();
       expect(result.dropMs).toBeNull();
+      expect(result.structuralCues).toEqual([]);
     }
   });
 
@@ -190,6 +192,44 @@ describe("analyzePcm", () => {
     expect(analyzePcm(accent, 4000).dropMs).toBeNull();
   });
 
+  it("keeps chronological rise candidates even when a later rise is stronger", () => {
+    const pcm = clicks(120, 137, 30);
+    for (let i = 0; i < pcm.length; i++) {
+      const second = i / 4000;
+      pcm[i] = Math.round(
+        pcm[i]! * (second < 10 || (second >= 17 && second < 22) ? 0.08 : second < 17 ? 0.6 : 1),
+      );
+    }
+    const result = analyzePcm(pcm, 4000);
+    expect(result.dropCandidates!.map((candidate) => candidate.ms)).toEqual([10000, 22000]);
+    expect(result.dropMs).toBe(22000);
+  });
+
+  it("reports sustained low-band arrangement entrances without calling them drops", () => {
+    const rate = 4000;
+    const pcm = new Int16Array(rate * 30);
+    const beats = clicks(120, 137, 30, rate);
+    for (let i = 0; i < pcm.length; i++) {
+      const t = i / rate;
+      const frequency = t < 12 ? 440 : 75;
+      pcm[i] = Math.round(7500 * Math.sin(2 * Math.PI * frequency * t) + 0.4 * beats[i]!);
+    }
+    const analysis = analyzePcm(pcm, rate);
+    expect(analysis.structuralCues!.some((cue) => cue.ms >= 11000 && cue.ms <= 13000)).toBe(true);
+    expect(analysis.dropMs).toBeNull();
+    expect(analyzePcm(pcm.subarray(0, 10 * rate), rate).structuralCues).toEqual([]);
+  });
+
+  it("does not treat a single bass accent as a sustained structural entrance", () => {
+    const rate = 4000;
+    const pcm = clicks(120, 137, 30, rate);
+    for (let i = 0; i < pcm.length; i++)
+      pcm[i] = Math.round(pcm[i]! * 0.4 + 7500 * Math.sin((2 * Math.PI * 440 * i) / rate));
+    for (let i = 12 * rate; i < 12 * rate + rate / 10; i++)
+      pcm[i] = Math.round(7500 * Math.sin((2 * Math.PI * 75 * i) / rate));
+    expect(analyzePcm(pcm, rate).structuralCues).toEqual([]);
+  });
+
   it("safely abstains at extremely low positive sample rates", () => {
     expect(analyzePcm(new Int16Array(10), 0.1).bpm).toBeNull();
   });
@@ -252,6 +292,34 @@ describe("analyzeTrack", () => {
       type: "url",
       url: "https://example.test/audio",
     });
+  });
+
+  it("seeks a bounded late analysis window before the input, reporting relative times", async () => {
+    const { run } = mockRun([]);
+    const args = vi.spyOn(Processor.prototype, "setArgs");
+    const full: string[][] = [];
+    run.mockImplementation(async function (this: Processor) {
+      full.push(this.getFullArgs());
+      return {
+        output: new ReadableStream<Uint8Array>({
+          start(c) {
+            c.close();
+          },
+        }),
+        done: Promise.resolve(),
+      } as Awaited<ReturnType<Processor["run"]>>;
+    });
+    await analyzeTrack("https://example.test/audio", { startSeconds: 110 });
+    expect(full[0]!.indexOf("-ss")).toBeLessThan(full[0]!.indexOf("-i"));
+    expect(full[0]).toContain("110");
+    expect(args.mock.calls[0]![0]).toContain("90");
+    expect(args.mock.calls[0]![0]).not.toContain("110");
+    expect((await analyzeTrack("test.mp3", { startSeconds: 12 })).analyzedDurationMs).toBe(0);
+    expect(args.mock.calls[1]![0].slice(0, 4)).toEqual(["-ss", "12", "-i", "test.mp3"]);
+  });
+
+  it.each([-1, NaN, Infinity])("rejects invalid window start %s", async (startSeconds) => {
+    await expect(analyzeTrack("test.mp3", { startSeconds })).rejects.toThrow(RangeError);
   });
 
   it("awaits process completion, propagates failures, and cleans up", async () => {

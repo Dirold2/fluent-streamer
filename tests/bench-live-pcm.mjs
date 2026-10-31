@@ -2,29 +2,42 @@
 // Run after `npm run build`: node tests/bench-live-pcm.mjs
 // Local FFmpeg fixture and one 20 ms consumer; no network, Discord, or browser.
 // Results describe this process only, not audible underruns in a downstream player.
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
-import { setTimeout as sleep } from 'node:timers/promises';
-import { FluentStream } from '../dist/index.js';
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { monitorEventLoopDelay, performance } from "node:perf_hooks";
+import { setTimeout as sleep } from "node:timers/promises";
+import { FluentStream } from "../dist/index.js";
 
 const RATE = 48000;
 const FRAME_BYTES = 3840;
 const PERIOD_MS = 20;
 const TICKS = 250;
-const directory = mkdtempSync(join(tmpdir(), 'fluent-live-pcm-'));
-const file = join(directory, 'tone.wav');
+const directory = mkdtempSync(join(tmpdir(), "fluent-live-pcm-"));
+const file = join(directory, "tone.wav");
 const loop = monitorEventLoopDelay({ resolution: 1 });
 let result;
 let reader;
 let transition;
 try {
-  const generated = spawnSync('ffmpeg', [
-    '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=220:duration=12',
-    '-ar', String(RATE), '-ac', '2', file,
-  ], { encoding: 'utf8', timeout: 30000 });
+  const generated = spawnSync(
+    "ffmpeg",
+    [
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=220:duration=12",
+      "-ar",
+      String(RATE),
+      "-ac",
+      "2",
+      file,
+    ],
+    { encoding: "utf8", timeout: 30000 },
+  );
   if (generated.error || generated.status !== 0) {
     throw generated.error ?? new Error(`FFmpeg fixture failed: ${generated.stderr}`);
   }
@@ -36,8 +49,8 @@ try {
     autoDrainOutput: false,
   })
     .input(file)
-    .audioCodec('pcm_s16le')
-    .outputOptions('-vn', '-f', 's16le', '-ar', String(RATE), '-ac', '2')
+    .audioCodec("pcm_s16le")
+    .outputOptions("-vn", "-f", "s16le", "-ar", String(RATE), "-ac", "2")
     .output(FluentStream.stdout);
   result = await stream.run();
   void result.done.catch(() => {});
@@ -57,7 +70,7 @@ try {
         const wait = performance.now() - start;
         readWaits.push(wait);
         if (wait > PERIOD_MS) slowReads++;
-        if (next.done) throw new Error('PCM source ended before diagnostic completed');
+        if (next.done) throw new Error("PCM source ended before diagnostic completed");
         chunk = next.value;
         offset = 0;
         if (!chunk.length) continue;
@@ -94,26 +107,33 @@ try {
   await transition;
   loop.disable();
   const sorted = (items) => [...items].sort((a, b) => a - b);
-  const percentile = (items, fraction) => items.length ? sorted(items)[Math.ceil(items.length * fraction) - 1] : 0;
-  console.log(JSON.stringify({
-    note: 'Local single-consumer PCM generation, not Discord/WebRTC playback',
-    framesConsumed: TICKS,
-    bytesConsumed: TICKS * FRAME_BYTES,
-    startupMs,
-    readWaitMs: {
-      count: readWaits.length,
-      over20ms: slowReads,
-      p99: percentile(readWaits, 0.99),
-      max: Math.max(0, ...readWaits),
-    },
-    tickLateMs: {
-      over20ms: lateTicks,
-      p99: percentile(tickLateness, 0.99),
-      max: Math.max(0, ...tickLateness),
-    },
-    eventLoopDelayMs: { p99: loop.percentile(99) / 1e6, max: loop.max / 1e6 },
-    mixer: stream.getPlaybackStats(),
-  }, null, 2));
+  const percentile = (items, fraction) =>
+    items.length ? sorted(items)[Math.ceil(items.length * fraction) - 1] : 0;
+  console.log(
+    JSON.stringify(
+      {
+        note: "Local single-consumer PCM generation, not Discord/WebRTC playback",
+        framesConsumed: TICKS,
+        bytesConsumed: TICKS * FRAME_BYTES,
+        startupMs,
+        readWaitMs: {
+          count: readWaits.length,
+          over20ms: slowReads,
+          p99: percentile(readWaits, 0.99),
+          max: Math.max(0, ...readWaits),
+        },
+        tickLateMs: {
+          over20ms: lateTicks,
+          p99: percentile(tickLateness, 0.99),
+          max: Math.max(0, ...tickLateness),
+        },
+        eventLoopDelayMs: { p99: loop.percentile(99) / 1e6, max: loop.max / 1e6 },
+        mixer: stream.getPlaybackStats(),
+      },
+      null,
+      2,
+    ),
+  );
 } finally {
   loop.disable();
   try {

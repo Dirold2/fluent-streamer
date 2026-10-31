@@ -1,2 +1,7 @@
 // Keep the synchronous core self-contained for native TypeScript workers.
-export { findStableSections, type StableSection } from "./DjAnalysisCore.js";
+export {
+  findStableSections,
+  findLocalRhythmEvidence,
+  type StableSection,
+  type LocalRhythmEvidence,
+} from "./DjAnalysisCore.js";

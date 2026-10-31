@@ -19,13 +19,7 @@ describe("Blob URL support", () => {
   it("формирует правильные FFmpeg аргументы для blob", () => {
     const blobUrl = "blob:nodedata:test-uuid";
     stream.input(blobUrl).format("mp3").output("output.mp3");
-    expect(stream.getArgs()).toEqual([
-      "-i",
-      "pipe:0",
-      "-f",
-      "mp3",
-      "output.mp3",
-    ]);
+    expect(stream.getArgs()).toEqual(["-i", "pipe:0", "-f", "mp3", "output.mp3"]);
   });
 
   it("принимает различные форматы blob URL", () => {
@@ -56,9 +50,7 @@ describe("Blob URL support", () => {
   });
 
   it("inputBlob выбрасывает ошибку для пустой строки", () => {
-    expect(() => stream.inputBlob("")).toThrow(
-      "inputBlob(): blobUrl must be a non-empty string",
-    );
+    expect(() => stream.inputBlob("")).toThrow("inputBlob(): blobUrl must be a non-empty string");
   });
 
   it("inputBlob выбрасывает ошибку для null", () => {

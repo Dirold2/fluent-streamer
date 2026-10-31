@@ -9,12 +9,13 @@ export type {
   PcmAnalysisOptions,
 } from "./Audio/analysis/DjAnalysis.js";
 export type { PlaybackMixerStats } from "./Audio/PlaybackMixer.js";
-export { planAutomix } from "./Audio/analysis/AutomixPlan.js";
+export { planAutomix, planDropHandoff } from "./Audio/analysis/AutomixPlan.js";
 export type {
   AutomixPlan,
   AutomixPlanOptions,
   AutomixDiagnostic,
   AutomixFallbackReason,
+  DropHandoffOptions,
 } from "./Audio/analysis/AutomixPlan.js";
 export type { PrepareAutomixOptions, PreparedAutomix } from "./Fluent/FluentStream.js";
 

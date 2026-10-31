@@ -17,7 +17,9 @@ dist/
 build/
 tests/.tmp/
 .dj-diagnostics/
-scripts/
+scripts/*
+!scripts/render-drop-candidate.mjs
+!scripts/render-live-handoff.mjs
 
 # TypeScript
 *.tsbuildinfo

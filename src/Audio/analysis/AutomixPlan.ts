@@ -53,6 +53,10 @@ export interface AutomixDiagnostic {
     explicitDropMs: number | null;
   }>;
   readonly outcome: AutomixPlan["reason"] | null;
+  /** Populated only for the opt-in late-window handoff; absolute outgoing source ms. */
+  readonly outgoingHandoffDropMs?: number;
+  /** Absolute source position of the additional outgoing analysis window. */
+  readonly outgoingLateWindowStartMs?: number;
 }
 
 export interface AutomixPlanOptions {
@@ -72,7 +76,7 @@ export interface AutomixPlan {
   seconds: number;
   cueMs: number;
   dropMs: number | null;
-  reason: "energy-entry" | "tempo-phrase" | "crossfade";
+  reason: "energy-entry" | "tempo-phrase" | "crossfade" | "drop-handoff" | "seamless";
   /** Absolute outgoing track position, not a delay from now. */
   startMs: number;
   /** Outgoing beat period; null for an unquantized crossfade. */
@@ -337,4 +341,136 @@ export function planAutomix(options: AutomixPlanOptions): AutomixPlan | null {
     },
     null,
   );
+}
+
+/** Opt-in late-window advice. The outgoing analysis is relative to windowStartMs;
+ * incoming analysis must start at zero. Only a measured, high-contrast rise on
+ * both sides is eligible; energy rises are NOT proven musical downbeats.
+ */
+export interface DropHandoffOptions {
+  outgoingLateAnalysis: DjAnalysis;
+  incomingAnalysis: DjAnalysis;
+  windowStartMs: number;
+  outgoingDurationMs: number;
+  outgoingPositionMs: number;
+  incomingDurationMs: number;
+  enableTempoMatch?: boolean;
+  maxTempoChange?: number;
+}
+
+function firstConfidentDrop(analysis: DjAnalysis, minMs: number, maxMs: number): number | null {
+  const candidates = analysis.dropCandidates ?? [
+    { ms: analysis.dropMs, confidence: analysis.dropConfidence },
+  ];
+  const valid = candidates
+    .filter(
+      (candidate): candidate is { ms: number; confidence: number } =>
+        candidate.ms !== null &&
+        Number.isFinite(candidate.ms) &&
+        candidate.ms >= minMs &&
+        candidate.ms < maxMs &&
+        candidate.ms < analysis.analyzedDurationMs &&
+        Number.isFinite(candidate.confidence) &&
+        candidate.confidence >= 0.7 &&
+        candidate.confidence <= 1,
+    )
+    .sort((a, b) => a.ms - b.ms);
+  return valid[0]?.ms ?? null;
+}
+
+/** Returns null rather than fabricating a drop when evidence/timing is insufficient. */
+export function planDropHandoff(options: DropHandoffOptions): AutomixPlan | null {
+  const {
+    outgoingLateAnalysis: outgoing,
+    incomingAnalysis: incoming,
+    windowStartMs,
+    outgoingDurationMs,
+    outgoingPositionMs,
+    incomingDurationMs,
+  } = options;
+  const maxChange = options.maxTempoChange ?? 0.08;
+  if (
+    ![windowStartMs, outgoingDurationMs, outgoingPositionMs, incomingDurationMs, maxChange].every(
+      Number.isFinite,
+    ) ||
+    windowStartMs < 0 ||
+    outgoingPositionMs < 0 ||
+    outgoingDurationMs <= outgoingPositionMs + 1000 ||
+    incomingDurationMs <= 0 ||
+    maxChange < 0 ||
+    maxChange >= 1 ||
+    !reliableGrid(outgoing) ||
+    !reliableGrid(incoming) ||
+    !Number.isFinite(outgoing.analyzedDurationMs) ||
+    !Number.isFinite(incoming.analyzedDurationMs) ||
+    windowStartMs < outgoingDurationMs / 2
+  )
+    return null;
+
+  // Select the earliest *confident* rise within each requested half. The old
+  // dropMs field deliberately retains the strongest rise for existing callers.
+  const outgoingDrop = firstConfidentDrop(
+    outgoing,
+    Math.max(
+      0,
+      outgoingDurationMs / 2 - windowStartMs,
+      outgoingPositionMs + 1000 + (4 * 60000) / outgoing.bpm! - windowStartMs,
+    ),
+    outgoingDurationMs - windowStartMs - 1000,
+  );
+  const incomingDropMs = firstConfidentDrop(incoming, 0, incomingDurationMs / 2);
+  if (outgoingDrop === null || incomingDropMs === null) return null;
+  const outgoingDropMs = windowStartMs + outgoingDrop;
+  // Never treat a late-window rise as the first-half event, or a late
+  // incoming rise as the intended first drop. Also leave 1 s of source tail.
+  if (outgoingDropMs > outgoingDurationMs - 1000 || incomingDropMs >= incomingDurationMs / 2)
+    return null;
+
+  const factor = options.enableTempoMatch ? outgoing.bpm! / incoming.bpm! : 1;
+  if (
+    !Number.isFinite(factor) ||
+    Math.abs(factor - 1) > maxChange ||
+    (!options.enableTempoMatch &&
+      Math.max(outgoing.bpm!, incoming.bpm!) / Math.min(outgoing.bpm!, incoming.bpm!) > 1.03)
+  )
+    return null;
+  const period = 60000 / outgoing.bpm!;
+  const overlapMs =
+    Math.floor(
+      Math.min(
+        16000,
+        incomingDurationMs / 4,
+        incomingDropMs / factor,
+        outgoingDropMs - outgoingPositionMs - 1000,
+      ) /
+        (4 * period),
+    ) *
+    4 *
+    period;
+  if (overlapMs < 4 * period) return null;
+  const startMs = outgoingDropMs - overlapMs;
+  const cueMs = incomingDropMs - overlapMs * factor;
+  if (
+    cueMs < 0 ||
+    startMs < outgoingPositionMs + 1000 ||
+    cueMs + overlapMs * factor > incomingDurationMs
+  )
+    return null;
+  const outgoingPhase =
+    (((windowStartMs + outgoing.beatPhaseMs! - startMs) % period) + period) % period;
+  const incomingPhase = ((((incoming.beatPhaseMs! - cueMs) / factor) % period) + period) % period;
+  const phaseDelta = Math.abs(outgoingPhase - incomingPhase);
+  const phaseError = Math.min(phaseDelta, period - phaseDelta);
+  const drift = options.enableTempoMatch
+    ? 0
+    : Math.abs(1 - period / (60000 / incoming.bpm!)) * overlapMs;
+  if (phaseError + drift > Math.min(period, 60000 / incoming.bpm!) / 16) return null;
+  return {
+    seconds: overlapMs / 1000,
+    startMs,
+    cueMs,
+    dropMs: incomingDropMs,
+    reason: "drop-handoff",
+    beatPeriodMs: period,
+  };
 }

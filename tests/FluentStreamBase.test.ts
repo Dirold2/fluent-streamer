@@ -136,9 +136,7 @@ describe("FluentStream Unit Tests", () => {
 
     it("crossfadeAudio works with custom options", () => {
       const s = new FluentStream();
-      s.input("a.mp3")
-        .input("b.mp3")
-        .crossfadeAudio(10, { curve1: "exp", curve2: "log" });
+      s.input("a.mp3").input("b.mp3").crossfadeAudio(10, { curve1: "exp", curve2: "log" });
       const summary = s.getInputSummary();
       const found = summary.complexFilters.find(
         (f) =>
@@ -166,9 +164,7 @@ describe("FluentStream Unit Tests", () => {
         );
       }
       if (!didThrow) {
-        throw new Error(
-          "Expected input() to throw on multiple stream inputs, but it did not.",
-        );
+        throw new Error("Expected input() to throw on multiple stream inputs, but it did not.");
       }
     });
 
@@ -230,11 +226,7 @@ describe("FluentStream Unit Tests", () => {
 
     it("handles multiple inputs correctly", () => {
       const outFile = path.join(__outDir, "output.mp3");
-      stream
-        .input("input1.mp3")
-        .input("input2.mp3")
-        .crossfadeAudio(5)
-        .output(outFile);
+      stream.input("input1.mp3").input("input2.mp3").crossfadeAudio(5).output(outFile);
 
       const args = stream.getArgs();
 

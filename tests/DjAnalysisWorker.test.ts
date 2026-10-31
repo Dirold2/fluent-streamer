@@ -59,13 +59,20 @@ describe("off-thread DJ analysis (compiled workers)", () => {
     "Bun accepts the first request before the worker core import finishes",
     () => {
       const entry = pathToFileURL(join(directory, "DjAnalysis.js")).href;
-      const result = spawnSync("bun", ["--eval", `
+      const result = spawnSync(
+        "bun",
+        [
+          "--eval",
+          `
         const { analyzePcmAsync } = await import(${JSON.stringify(entry)});
         for (let i = 0; i < 3; i++) {
           const result = await analyzePcmAsync(new Int16Array(40000), 4000, { timeout: 3000 });
           if (result.analyzedDurationMs !== 10000) throw new Error("Unexpected analysis duration");
         }
-      `], { encoding: "utf8", timeout: 15000 });
+      `,
+        ],
+        { encoding: "utf8", timeout: 15000 },
+      );
       expect(result.error).toBeUndefined();
       expect(result.stderr).toBe("");
       expect(result.status).toBe(0);

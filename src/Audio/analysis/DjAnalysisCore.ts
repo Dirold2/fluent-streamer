@@ -14,6 +14,92 @@ export interface StableSection {
   phaseShiftMs: number;
 }
 
+export interface LocalRhythmEvidence {
+  /** Second local fit; BPM/phase are relative to the analyzed PCM window. */
+  bpm: number;
+  beatPhaseMs: number;
+  validationStartMs: number;
+  validationEndMs: number;
+  /** Agreement between two locally fitted grids, in milliseconds at the later holdout. */
+  crossPhaseErrorMs: number;
+  bpmDifference: number;
+  /** Conditional on the shared global tempo seed and overlapping training windows. */
+  previewOnly: true;
+}
+
+/** Compare neighboring holdout-validated fits without promoting a global BPM.
+ * Training windows can overlap and the seed is shared: this is corroborating
+ * local evidence, not an independent or calibrated confidence estimate.
+ */
+export function findLocalRhythmEvidence(sections: readonly StableSection[]): LocalRhythmEvidence[] {
+  const candidates: LocalRhythmEvidence[] = [];
+  for (const first of sections) {
+    for (const second of sections) {
+      if (
+        first === second ||
+        !Number.isFinite(first.bpm) ||
+        !Number.isFinite(second.bpm) ||
+        !Number.isFinite(first.beatPhaseMs) ||
+        !Number.isFinite(second.beatPhaseMs) ||
+        !Number.isFinite(first.validationEndMs) ||
+        !Number.isFinite(second.validationStartMs) ||
+        !Number.isFinite(second.validationEndMs) ||
+        first.bpm < 70 ||
+        first.bpm > 180 ||
+        second.bpm < 70 ||
+        second.bpm > 180 ||
+        ![first, second].every((section) => {
+          const beatMs = 60000 / section.bpm;
+          return (
+            section.beatPhaseMs >= 0 &&
+            section.beatPhaseMs < beatMs &&
+            section.endMs === section.validationStartMs &&
+            section.trainingCoverage >= 0.5 &&
+            section.validationCoverage >= 0.5 &&
+            section.trainingMatchedBeats >= 20 &&
+            section.validationMatchedBeats >= 8 &&
+            section.trainingErrorMs >= 0 &&
+            section.trainingErrorMs <= beatMs * 0.05 &&
+            section.validationErrorMs >= 0 &&
+            section.validationErrorMs <= beatMs * 0.05 &&
+            Math.abs(section.phaseShiftMs) <= beatMs * 0.05
+          );
+        }) ||
+        first.validationEndMs !== second.validationStartMs ||
+        second.validationEndMs - second.validationStartMs < 8000
+      )
+        continue;
+      const bpmDifference = Math.abs(first.bpm / second.bpm - 1);
+      if (bpmDifference > 0.005) continue;
+      const period = 60000 / second.bpm;
+      const errors = [second.validationStartMs, second.validationEndMs - period].map((time) => {
+        const previousPeriod = 60000 / first.bpm;
+        const previousBeat =
+          first.beatPhaseMs +
+          Math.round((time - first.beatPhaseMs) / previousPeriod) * previousPeriod;
+        const currentBeat =
+          second.beatPhaseMs + Math.round((time - second.beatPhaseMs) / period) * period;
+        return Math.abs(previousBeat - currentBeat);
+      });
+      const crossPhaseErrorMs = Math.max(...errors);
+      if (crossPhaseErrorMs > Math.min(period, 60000 / first.bpm) / 16) continue;
+      candidates.push({
+        bpm: second.bpm,
+        beatPhaseMs: second.beatPhaseMs,
+        validationStartMs: second.validationStartMs,
+        validationEndMs: second.validationEndMs,
+        crossPhaseErrorMs,
+        bpmDifference,
+        previewOnly: true,
+      });
+    }
+  }
+  return candidates.sort(
+    (a, b) =>
+      a.validationStartMs - b.validationStartMs || a.crossPhaseErrorMs - b.crossPhaseErrorMs,
+  );
+}
+
 function normalizePhase(phase: number, period: number): number {
   const normalized = ((phase % period) + period) % period;
   return Math.min(normalized, period - normalized) < period * 1e-10 ? 0 : normalized;
@@ -569,12 +655,23 @@ export interface DjAnalysis {
   beatTracking?: BeatTrackingResult;
   /** Local fits confirmed by subsequent observed attacks, conditional on tempo seed. */
   stableSections?: StableSection[];
+  /** Holdout-corroborated local grids; diagnostic only, not a global BPM override. */
+  localRhythm?: LocalRhythmEvidence[];
   bpmConfidence: number;
   /** Beat grid offset in [0, 60000 / bpm), relative to the start of the input. */
   beatPhaseMs: number | null;
   beatPhaseConfidence: number;
   dropMs: number | null;
   dropConfidence: number;
+  /** Chronological sustained energy-rise candidates; not verified musical drops. */
+  dropCandidates?: { ms: number; confidence: number }[];
+  /** Diagnostic low-band arrangement entries; neither musical drops nor beat/downbeat labels. */
+  structuralCues?: {
+    ms: number;
+    bassShareBefore: number;
+    bassShareAfter: number;
+    onsetCount: number;
+  }[];
   /** Number of spectral onset events used by the grid fit. */
   onsetCount?: number;
   /** Number of low-frequency kick/bass onset events. */
@@ -650,6 +747,8 @@ export function analyzePcm(pcm: Int16Array, sampleRate: number): DjAnalysis {
     beatPhaseConfidence: 0,
     dropMs: null,
     dropConfidence: 0,
+    dropCandidates: [],
+    structuralCues: [],
     analyzedDurationMs: (length / sampleRate) * 1000,
   };
   if (length / sampleRate < 8) return result;
@@ -693,10 +792,14 @@ export function analyzePcm(pcm: Int16Array, sampleRate: number): DjAnalysis {
     const before = (rms[second - 1]! + rms[second - 2]! + rms[second - 3]!) / 3;
     const after = Math.min(rms[second]!, rms[second + 1]!, rms[second + 2]!);
     const contrast = after / Math.max(before, 0.0001);
-    if (after > 0.01 && contrast > bestDropContrast) {
-      bestDropContrast = contrast;
-      result.dropMs = second * 1000;
-      result.dropConfidence = clamp((contrast - 2) / 4);
+    if (after > 0.01 && contrast > 3) {
+      const confidence = clamp((contrast - 2) / 4);
+      result.dropCandidates!.push({ ms: second * 1000, confidence });
+      if (contrast > bestDropContrast) {
+        bestDropContrast = contrast;
+        result.dropMs = second * 1000;
+        result.dropConfidence = confidence;
+      }
     }
   }
 
@@ -707,6 +810,8 @@ export function analyzePcm(pcm: Int16Array, sampleRate: number): DjAnalysis {
   const frames = Math.floor((count - FFT_SIZE) / HOP) + 1;
   const flux = new Float64Array(frames);
   const bassFlux = new Float64Array(frames);
+  const bassShare = new Float64Array(seconds);
+  const spectralPower = new Float64Array(seconds);
   const previous = new Float64Array(FFT_SIZE / 2);
   const real = new Float64Array(FFT_SIZE);
   const imaginary = new Float64Array(FFT_SIZE);
@@ -714,12 +819,19 @@ export function analyzePcm(pcm: Int16Array, sampleRate: number): DjAnalysis {
     for (let j = 0; j < FFT_SIZE; j++) real[j] = samples[frame * HOP + j]! * window[j]!;
     imaginary.fill(0);
     fft(real, imaginary);
+    const second = Math.floor((frame * HOP) / rate);
     for (let bin = 1; bin < FFT_SIZE / 2; bin++) {
-      const magnitude = Math.log1p(Math.hypot(real[bin]!, imaginary[bin]!));
+      const absolute = Math.hypot(real[bin]!, imaginary[bin]!);
+      const magnitude = Math.log1p(absolute);
+      const frequency = (bin * rate) / FFT_SIZE;
+      if (second < seconds && frequency >= 40) {
+        const power = absolute * absolute;
+        spectralPower[second] = spectralPower[second]! + power;
+        if (frequency <= 180) bassShare[second] = bassShare[second]! + power;
+      }
       const delta = Math.max(0, magnitude - previous[bin]!);
       if (frame > 0) {
         flux[frame] = flux[frame]! + delta;
-        const frequency = (bin * rate) / FFT_SIZE;
         if (frequency >= 40 && frequency <= 180) bassFlux[frame] = bassFlux[frame]! + delta;
       }
       previous[bin] = magnitude;
@@ -774,6 +886,38 @@ export function analyzePcm(pcm: Int16Array, sampleRate: number): DjAnalysis {
       const time = (i * HOP) / rate;
       if (!bassOnsets.length || time - bassOnsets[bassOnsets.length - 1]! > 0.18)
         bassOnsets.push(time);
+    }
+  }
+
+  // Arrangement changes can be audible even with almost constant loudness.
+  // Compare low-band share rather than raw RMS, and require three seconds of
+  // persistent energy plus actual onsets. This is diagnostic: an instrument
+  // entrance, key change, or bass fill is not necessarily a musical drop.
+  for (let second = 3; second < seconds - 2; second++) {
+    const before =
+      (bassShare[second - 3]! / Math.max(1e-9, spectralPower[second - 3]!) +
+        bassShare[second - 2]! / Math.max(1e-9, spectralPower[second - 2]!) +
+        bassShare[second - 1]! / Math.max(1e-9, spectralPower[second - 1]!)) /
+      3;
+    const after = Math.min(
+      ...[second, second + 1, second + 2].map(
+        (index) => bassShare[index]! / Math.max(1e-9, spectralPower[index]!),
+      ),
+    );
+    const attacks = onsets.filter((time) => time >= second && time < second + 3).length;
+    if (
+      rms[second]! > 0.01 &&
+      after >= 0.25 &&
+      after - before >= 0.18 &&
+      after / (before + 0.02) >= 1.2 &&
+      (!result.structuralCues!.length || second * 1000 - result.structuralCues!.at(-1)!.ms >= 4000)
+    ) {
+      result.structuralCues!.push({
+        ms: second * 1000,
+        bassShareBefore: before,
+        bassShareAfter: after,
+        onsetCount: attacks,
+      });
     }
   }
 
@@ -840,6 +984,7 @@ export function analyzePcm(pcm: Int16Array, sampleRate: number): DjAnalysis {
     60 / selectedTempo.bpm,
     result.analyzedDurationMs / 1000,
   );
+  result.localRhythm = findLocalRhythmEvidence(result.stableSections);
   const tempoEstimate = selectedTempo.bpm;
   let bpm = tempoEstimate;
   // Bass/kick is intentionally a corroborating signal only. It must not

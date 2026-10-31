@@ -29,13 +29,9 @@ async function cleanupDir() {
 
 async function runFfmpeg(args: string[], opts: { fail?: boolean } = {}) {
   const out = args[args.length - 1];
-  if (opts.fail)
-    return { code: 1, stdout: "", stderr: "mock error: input not found" };
+  if (opts.fail) return { code: 1, stdout: "", stderr: "mock error: input not found" };
   if (String(out).endsWith(".wav")) {
-    fs.writeFileSync(
-      out,
-      Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(1536)]),
-    );
+    fs.writeFileSync(out, Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(1536)]));
   }
   if (String(out).endsWith(".aac")) {
     const b = Buffer.alloc(256);

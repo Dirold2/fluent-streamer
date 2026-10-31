@@ -13,7 +13,8 @@ describe("NodeFFmpegRunner", () => {
         "-e",
         `process.${output}.end(Buffer.alloc(${total}, 42))`,
       ]);
-      const child = (ffmpegProcess as unknown as { process: ChildProcessWithoutNullStreams }).process;
+      const child = (ffmpegProcess as unknown as { process: ChildProcessWithoutNullStreams })
+        .process;
       const source = child[output];
       const reader = ffmpegProcess[output].getReader();
       try {
@@ -39,7 +40,8 @@ describe("NodeFFmpegRunner", () => {
 
   it.each(["stdout", "stderr"] as const)("destroys %s on cancellation", async (output) => {
     const ffmpegProcess = new NodeFFmpegRunner().spawn(globalThis.process.execPath, [
-      "-e", "setInterval(() => {}, 1000)",
+      "-e",
+      "setInterval(() => {}, 1000)",
     ]);
     const child = (ffmpegProcess as unknown as { process: ChildProcessWithoutNullStreams }).process;
     try {
@@ -52,7 +54,8 @@ describe("NodeFFmpegRunner", () => {
 
   it.each(["stdout", "stderr"] as const)("forwards %s errors", async (output) => {
     const ffmpegProcess = new NodeFFmpegRunner().spawn(globalThis.process.execPath, [
-      "-e", "setInterval(() => {}, 1000)",
+      "-e",
+      "setInterval(() => {}, 1000)",
     ]);
     const child = (ffmpegProcess as unknown as { process: ChildProcessWithoutNullStreams }).process;
     try {
@@ -65,7 +68,10 @@ describe("NodeFFmpegRunner", () => {
     }
   });
   it("replays an exit that occurs before subscription", async () => {
-    const ffmpegProcess = new NodeFFmpegRunner().spawn(globalThis.process.execPath, ["-e", "process.exit(0)"]);
+    const ffmpegProcess = new NodeFFmpegRunner().spawn(globalThis.process.execPath, [
+      "-e",
+      "process.exit(0)",
+    ]);
 
     await delay(50);
 

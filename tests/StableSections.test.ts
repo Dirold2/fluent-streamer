@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { findStableSections } from "../src/Audio/analysis/StableSections.js";
+import {
+  findStableSections,
+  findLocalRhythmEvidence,
+} from "../src/Audio/analysis/StableSections.js";
 
 function beats(duration: number, period = 0.5, phase = 0.2): number[] {
   return Array.from(
@@ -7,6 +10,49 @@ function beats(duration: number, period = 0.5, phase = 0.2): number[] {
     (_, index) => phase + index * period,
   ).filter((time) => time < duration);
 }
+
+describe("findLocalRhythmEvidence", () => {
+  it("requires neighboring holdout grids to agree at both ends", () => {
+    const sections = findStableSections(beats(50), 0.5, 50);
+    const evidence = findLocalRhythmEvidence(sections);
+    expect(evidence).toHaveLength(2);
+    expect(evidence[0]).toMatchObject({ bpm: 120, validationStartMs: 30000, previewOnly: true });
+    expect(evidence[0]!.crossPhaseErrorMs).toBeLessThan(1e-7);
+    expect(findLocalRhythmEvidence(sections.slice(0, 1))).toEqual([]);
+  });
+
+  it("rejects changing tempo or a phase mismatch instead of declaring confidence", () => {
+    const sections = findStableSections(beats(50), 0.5, 50);
+    expect(
+      findLocalRhythmEvidence([
+        sections[0]!,
+        {
+          ...sections[1]!,
+          bpm: 123,
+        },
+      ]),
+    ).toEqual([]);
+    expect(
+      findLocalRhythmEvidence([
+        sections[0]!,
+        {
+          ...sections[1]!,
+          beatPhaseMs: 120,
+        },
+      ]),
+    ).toEqual([]);
+    expect(
+      findLocalRhythmEvidence([
+        sections[0]!,
+        {
+          ...sections[1]!,
+          validationCoverage: 0.2,
+        },
+      ]),
+    ).toEqual([]);
+    expect(findLocalRhythmEvidence([])).toEqual([]);
+  });
+});
 
 describe("findStableSections", () => {
   it("returns only full training/holdout pairs with strong regular support", () => {

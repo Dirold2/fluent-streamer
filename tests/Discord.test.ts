@@ -37,10 +37,7 @@ class AudioService extends MiniEmitter<AudioServiceEvents> {
     const fluent = new FluentStream();
 
     // Устанавливаем заголовки, если заданы
-    if (
-      this.currentOptions.headers &&
-      Object.keys(this.currentOptions.headers).length > 0
-    ) {
+    if (this.currentOptions.headers && Object.keys(this.currentOptions.headers).length > 0) {
       fluent.setHeaders(this.currentOptions.headers);
     }
 
@@ -57,16 +54,7 @@ class AudioService extends MiniEmitter<AudioServiceEvents> {
         "0",
       )
       .audioCodec("pcm_s16le")
-      .outputOptions(
-        "-f",
-        "s16le",
-        "-ar",
-        "48000",
-        "-ac",
-        "2",
-        "-af",
-        filters.join(","),
-      )
+      .outputOptions("-f", "s16le", "-ar", "48000", "-ac", "2", "-af", filters.join(","))
       .output("pipe:1");
 
     this.ffmpeg = fluent;
