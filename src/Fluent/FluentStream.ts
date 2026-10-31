@@ -15,7 +15,7 @@ import type {
   FFmpegProgress,
 } from "../Types/index.js";
 import { PlaybackMixer, validateLiveCrossfadeOptions } from "../Audio/PlaybackMixer.js";
-import { buildReturningAtempo } from "../Audio/analysis/Atempo.js";
+import { buildReturningAtempo, createReturningTempoTimeline } from "../Audio/analysis/Atempo.js";
 import { FluentAudioState } from "./FluentAudioState.js";
 import { analyzeTrack, type DjAnalysis } from "../Audio/analysis/DjAnalysis.js";
 import {
@@ -93,6 +93,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     active: FFmpegRunResultExtended;
     result: FFmpegRunResultExtended;
     originMs: number;
+    tempoTimeline?: ReturnType<typeof createReturningTempoTimeline>;
   };
   private crossfadeInProgress = false;
   private automixCancellation?: () => void;
@@ -787,6 +788,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       this.audio.attachResult(incoming);
       this.args = args;
       session.originMs = seconds * 1000;
+      session.tempoTimeline = undefined;
       return session.result;
     } catch (error) {
       if (next && !mixerOwnsNext) {
@@ -930,6 +932,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         this.audio.attachResult(incoming);
         this.args = clean;
         session.originMs = (options.startTime ?? 0) * 1000;
+        session.tempoTimeline = undefined;
         this.logCrossfade("completed", time, started);
       }
     } catch (error) {
@@ -950,6 +953,17 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
    * effects are snapshotted at preparation time; later setters affect only the
    * active decoder until the prepared track becomes active. No EOF hold is taken.
    */
+  /** Absolute source position in milliseconds, based on consumed mixed PCM.
+   * Tempo timing follows the configured FFmpeg schedule, not device playback latency.
+   */
+  public getPlaybackPositionMs(): number | null {
+    const session = this.playback;
+    if (!session) return null;
+    const seconds =
+      session.mixer.sourceFrame / (this.options.audioProcessorOptions?.sampleRate ?? 48000);
+    return session.originMs + (session.tempoTimeline?.toSource(seconds) ?? seconds) * 1000;
+  }
+
   /** Current PCM generation diagnostics, or null outside a mixed playback session. */
   public getPlaybackStats() {
     return this.playback?.mixer.stats ?? null;
@@ -986,6 +1000,14 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     const rate = this.options.audioProcessorOptions?.sampleRate ?? 48000;
     const initialFrame = session.mixer.sourceFrame;
     const originMs = session.originMs;
+    const timeline = session.tempoTimeline;
+    const sourceMs = (frame: number) =>
+      originMs + (timeline ? timeline.toSource(frame / rate) : frame / rate) * 1000;
+    const outputFrame = (positionMs: number) =>
+      (timeline
+        ? timeline.toOutput((positionMs - originMs) / 1000)
+        : (positionMs - originMs) / 1000) * rate;
+    const initialPositionMs = sourceMs(initialFrame);
     const controller = new AbortController();
     const signals = [options.signal, this.lastRunOptions.abortSignal ?? this.options.abortSignal];
     const abort = () => {
@@ -1109,9 +1131,9 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
           options.transitionOverride.seconds <= 0 ||
           (options.transitionOverride.startMs !== undefined &&
             (!Number.isFinite(options.transitionOverride.startMs) ||
-              options.transitionOverride.startMs < originMs + (frame / rate) * 1000 ||
+              options.transitionOverride.startMs < sourceMs(frame) ||
               options.transitionOverride.startMs + options.transitionOverride.seconds * 1000 >
-                originMs + (initialFrame / rate) * 1000 + options.outgoingRemainingMs - 1000)))
+                initialPositionMs + options.outgoingRemainingMs - 1000)))
       ) {
         throw new FluentStreamValidationError("prepareAutomix: invalid transitionOverride");
       }
@@ -1123,12 +1145,11 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
             reason: "tempo-phrase" as const,
             startMs:
               options.transitionOverride.startMs ??
-              originMs +
-                (frame / rate) * 1000 +
+              sourceMs(frame) +
                 Math.max(
                   0,
                   options.outgoingRemainingMs -
-                    ((frame - initialFrame) / rate) * 1000 -
+                    (sourceMs(frame) - initialPositionMs) -
                     options.transitionOverride.seconds * 1000 -
                     1000,
                 ),
@@ -1137,9 +1158,9 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         : planAutomix({
             outgoingAnalysis,
             incomingAnalysis,
-            outgoingPositionMs: originMs + (frame / rate) * 1000,
+            outgoingPositionMs: sourceMs(frame),
             outgoingRemainingMs:
-              options.outgoingRemainingMs - ((frame - initialFrame) / rate) * 1000,
+              options.outgoingRemainingMs - (sourceMs(frame) - initialPositionMs),
             incomingDurationMs: options.incomingDurationMs,
             fallbackSeconds: options.fallbackSeconds ?? 8,
             explicitDropMs: options.explicitDropMs,
@@ -1224,21 +1245,22 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
           }
           controller.signal.throwIfAborted();
           const currentFrame = session.mixer.sourceFrame;
-          let startFrame = Math.max(0, Math.round(((plan.startMs - originMs) / 1000) * rate));
+          let startMs = plan.startMs;
+          if (plan.beatPeriodMs !== null && sourceMs(currentFrame) > startMs)
+            startMs +=
+              Math.ceil((sourceMs(currentFrame) - startMs) / plan.beatPeriodMs) * plan.beatPeriodMs;
+          let startFrame = Math.max(0, Math.round(outputFrame(startMs)));
           const beatPeriodFrames =
-            plan.beatPeriodMs === null
+            plan.beatPeriodMs === null || timeline
               ? undefined
               : Math.max(1, Math.round((plan.beatPeriodMs / 1000) * rate));
           if (beatPeriodFrames && currentFrame > startFrame)
             startFrame +=
               Math.ceil((currentFrame - startFrame) / beatPeriodFrames) * beatPeriodFrames;
-          const endFrame = initialFrame + (options.outgoingRemainingMs / 1000) * rate;
+          const endFrame = outputFrame(initialPositionMs + options.outgoingRemainingMs - 1000);
           // The incoming cue is already decoded, so do not silently change the plan.
           // Preserve the planner's one-second outgoing tail even after late arming.
-          if (
-            Math.max(currentFrame, startFrame) + Math.round(plan.seconds * rate) >
-            endFrame - rate
-          ) {
+          if (Math.max(currentFrame, startFrame) + Math.round(plan.seconds * rate) > endFrame) {
             await cancel();
             throw new FluentStreamValidationError(
               "prepareAutomix: prepared plan is stale; insufficient remaining time",
@@ -1273,6 +1295,10 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
             this.args[this.args.indexOf("-i") + 1] = url;
             this.args.splice(this.args.indexOf("-i"), 0, "-ss", String(plan.cueMs / 1000));
             session.originMs = plan.cueMs;
+            session.tempoTimeline =
+              options.enableTempoMatch && Math.abs(tempoFactor - 1) > 1e-12
+                ? createReturningTempoTimeline(tempoFactor, plan.seconds)
+                : undefined;
           } finally {
             unlock();
           }

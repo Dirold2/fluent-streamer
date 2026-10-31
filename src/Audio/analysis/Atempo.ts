@@ -24,12 +24,12 @@ export function buildAtempoPlan(factor: number): AtempoPlan {
   return { factor, filters, filter: filters.length ? filters.join(",") : "anull" };
 }
 
-/** Commands use input seconds; integrate speed over output time for each step. */
-export function buildReturningAtempo(
+/** Piecewise source/output clock matching the command schedule used by FFmpeg. */
+export function createReturningTempoTimeline(
   factor: number,
   overlapSeconds: number,
   returnSeconds = 4,
-): string {
+) {
   if (
     !Number.isFinite(factor) ||
     factor < 0.5 ||
@@ -40,17 +40,52 @@ export function buildReturningAtempo(
     returnSeconds <= 0
   )
     throw new RangeError("Invalid returning tempo timing or factor");
-  if (factor === 1) return "anull";
   const steps = Math.max(1, Math.ceil(returnSeconds / 0.1));
   const dt = returnSeconds / steps;
-  let inputTime = factor * overlapSeconds;
+  const segments = [{ output: 0, source: 0, speed: factor }];
+  let output = overlapSeconds;
+  let source = factor * overlapSeconds;
   let speed = factor;
-  const commands: string[] = [];
+  const commands: { time: number; speed: number }[] = [];
   for (let step = 1; step <= steps; step++) {
-    inputTime += speed * dt;
+    output += dt;
+    source += speed * dt;
     speed = factor + ((1 - factor) * step) / steps;
-    commands.push(`${format(inputTime)} atempo@automix tempo ${format(speed)}`);
+    segments.push({ output, source, speed });
+    commands.push({ time: source, speed });
   }
+  return {
+    commands,
+    toSource(outputSeconds: number): number {
+      let segment = segments[0]!;
+      for (const candidate of segments) {
+        if (candidate.output > outputSeconds) break;
+        segment = candidate;
+      }
+      return segment.source + (outputSeconds - segment.output) * segment.speed;
+    },
+    toOutput(sourceSeconds: number): number {
+      let segment = segments[0]!;
+      for (const candidate of segments) {
+        if (candidate.source > sourceSeconds) break;
+        segment = candidate;
+      }
+      return segment.output + (sourceSeconds - segment.source) / segment.speed;
+    },
+  };
+}
+
+/** Commands use input seconds; integrate speed over output time for each step. */
+export function buildReturningAtempo(
+  factor: number,
+  overlapSeconds: number,
+  returnSeconds = 4,
+): string {
+  const timeline = createReturningTempoTimeline(factor, overlapSeconds, returnSeconds);
+  if (factor === 1) return "anull";
+  const commands = timeline.commands.map(
+    ({ time, speed }) => `${format(time)} atempo@automix tempo ${format(speed)}`,
+  );
   return `asetpts=N/SR/TB,asendcmd=c='${commands.join(";")}',atempo@automix=${format(factor)}`;
 }
 

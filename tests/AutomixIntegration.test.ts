@@ -13,6 +13,7 @@ import {
 import type { FFmpegRunResultExtended } from "../src/Types/index.js";
 import * as analysis from "../src/Audio/analysis/DjAnalysis.js";
 import { PlaybackMixer } from "../src/Audio/PlaybackMixer.js";
+import { createReturningTempoTimeline } from "../src/Audio/analysis/Atempo.js";
 import Processor from "../src/Core/Processor.js";
 
 const hasFFmpeg = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
@@ -90,6 +91,56 @@ const cached = {
 
 // These exercise real decoder ownership and pull-driven PCM, not wall-clock timers.
 describe.skipIf(!hasFFmpeg)("automix preparation integration", () => {
+  it("maps the next transition from source time back to PCM frames after tempo return", async () => {
+    const fluent = track();
+    expect(fluent.getPlaybackPositionMs()).toBeNull();
+    const { reader } = await run(fluent);
+    const factor = 0.9255181866;
+    const overlap = 0.1;
+    const prepared = await fluent.prepareAutomix(fixture, {
+      ...cached,
+      enableTempoMatch: true,
+      transitionOverride: { startMs: 0, cueMs: 1000, seconds: overlap, tempoFactor: factor },
+    });
+    let complete = false;
+    const started = prepared.start().then(() => {
+      complete = true;
+    });
+    while (!complete) {
+      expect((await reader.read()).done).toBe(false);
+      await delay(1);
+    }
+    await started;
+    // A consumed-frame clock must not advance while the consumer is paused.
+    const frame = vi
+      .spyOn(PlaybackMixer.prototype, "sourceFrame", "get")
+      .mockReturnValue(6 * 48000);
+    const clock = createReturningTempoTimeline(factor, overlap);
+    expect(fluent.getPlaybackPositionMs()).toBeCloseTo(1000 + clock.toSource(6) * 1000, 8);
+    const nextStart = 1000 + clock.toSource(7) * 1000;
+    const next = await fluent.prepareAutomix(fixture, {
+      ...cached,
+      transitionOverride: { startMs: nextStart, cueMs: 0, seconds: 0.1 },
+    });
+    const schedule = vi.spyOn(PlaybackMixer.prototype, "crossfadePrepared");
+    frame.mockRestore();
+    complete = false;
+    const nextStarted = next.start().then(() => {
+      complete = true;
+    });
+    while (!complete) {
+      expect((await reader.read()).done).toBe(false);
+      await delay(1);
+    }
+    await nextStarted;
+    expect(schedule.mock.calls[0]![3]!.startFrame).toBe(7 * 48000);
+    const nativeFrame = vi
+      .spyOn(PlaybackMixer.prototype, "sourceFrame", "get")
+      .mockReturnValue(48000);
+    expect(fluent.getPlaybackPositionMs()).toBe(1000);
+    nativeFrame.mockRestore();
+  });
+
   it("preserves explicit mid-track start rather than replacing it with the tail", async () => {
     const fluent = track();
     await run(fluent);

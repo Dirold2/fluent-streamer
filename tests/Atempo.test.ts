@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAtempoPlan } from "../src/Audio/analysis/Atempo.js";
+import { buildAtempoPlan, createReturningTempoTimeline } from "../src/Audio/analysis/Atempo.js";
 
 describe("buildAtempoPlan", () => {
   it.each([
@@ -13,6 +13,28 @@ describe("buildAtempoPlan", () => {
   });
   it.each([0, -1, NaN, Infinity])("rejects invalid factor %s", (factor) => {
     expect(() => buildAtempoPlan(factor)).toThrow(RangeError);
+  });
+});
+
+describe("returning tempo clock", () => {
+  it.each([0.5, 0.9255181866, 1, 1.08, 2])("round trips source/output at factor %s", (factor) => {
+    const clock = createReturningTempoTimeline(factor, 4.7195135);
+    for (const output of [0, 1, 4.7195135, 4.8, 6, 8.7195135, 20, 200]) {
+      const source = clock.toSource(output);
+      expect(clock.toOutput(source)).toBeCloseTo(output, 10);
+    }
+    expect(clock.toSource(2)).toBeCloseTo(2 * factor, 10);
+    expect(clock.toSource(100) - clock.toSource(20)).toBeCloseTo(80, 10);
+    for (const { time, speed } of clock.commands) {
+      const output = clock.toOutput(time);
+      expect(clock.toSource(output)).toBeCloseTo(time, 10);
+      expect(clock.toSource(output + 0.001) - time).toBeCloseTo(speed * 0.001, 10);
+    }
+  });
+  it("retains the integrated source offset after returning to native speed", () => {
+    const clock = createReturningTempoTimeline(0.9255181866, 4.7195135);
+    expect(20 - clock.toSource(20)).toBeGreaterThan(0.49);
+    expect(20 - clock.toSource(20)).toBeLessThan(0.51);
   });
 });
 

@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **Automix source-time after tempo matching:** Track a piecewise source/output timeline using the same speed steps as the FFmpeg tempo-return commands. Subsequent preparation subtracts elapsed source time, converts absolute source cue schedules back to PCM frames, and maps the outgoing tail reserve through the tempo timeline. The accumulated offset remains accounted for after returning to native speed; seek and native-speed track replacement reset the mapping. This models the configured tempo schedule, not sample-exact FFmpeg filter latency or downstream device playback.
+
+### Added
+- **Mixed-session source position:** `streamer.getPlaybackPositionMs()` returns the absolute source position in milliseconds from consumed mixed PCM, including the Automix tempo-return schedule, or `null` outside a mixed session. External players can use this instead of a wall-clock position for subsequent scheduling. This does not measure fan-out delivery or underruns at browser/Discord clients.
+
 ## [0.6.0] – 2026-10-27
 
 ### Added
