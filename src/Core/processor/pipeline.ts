@@ -86,6 +86,78 @@ export function createAudioProcessor(
   return audioProcessor;
 }
 
+// Keep native stdout chunks raw until downstream requests each small DSP block.
+// A transform that enqueues all slices would still process the whole track ahead.
+export function splitPcmStream(
+  source: ReadableStream<Uint8Array>,
+  sampleRate: number,
+  channels: number,
+): ReadableStream<Uint8Array> {
+  const frameBytes = channels * 2;
+  const blockBytes = Math.max(1, Math.floor(sampleRate / 50)) * frameBytes;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let chunk: Uint8Array | undefined;
+  let offset = 0;
+  let stopped = false;
+
+  const release = () => {
+    if (!reader) return;
+    try {
+      reader.releaseLock();
+      reader = undefined;
+    } catch {
+      // A native read may still be pending; its pull finally retries cleanup.
+    }
+  };
+
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        try {
+          reader ??= source.getReader();
+          while (!chunk || offset === chunk.byteLength) {
+            chunk = undefined;
+            offset = 0;
+            const result = await reader.read();
+            if (stopped) return;
+            if (result.done) {
+              stopped = true;
+              controller.close();
+              return;
+            }
+            chunk = result.value;
+          }
+          const end = Math.min(offset + blockBytes, chunk.byteLength);
+          controller.enqueue(chunk.subarray(offset, end));
+          offset = end;
+          if (offset === chunk.byteLength) chunk = undefined;
+        } catch (err) {
+          if (!stopped) {
+            stopped = true;
+            controller.error(err);
+          }
+        } finally {
+          if (stopped) {
+            chunk = undefined;
+            release();
+          }
+        }
+      },
+      async cancel(reason) {
+        stopped = true;
+        chunk = undefined;
+        try {
+          if (reader) await reader.cancel(reason);
+          else await source.cancel(reason);
+        } finally {
+          release();
+        }
+      },
+    },
+    { highWaterMark: 0 },
+  );
+}
+
 export type OutputPipelineResult = {
   throttledOutput: TransformStream<Uint8Array, Uint8Array>;
   pipelinePromise: Promise<void> | null;
@@ -116,7 +188,7 @@ export function setupOutputPipeline(
     return { throttledOutput, pipelinePromise: null };
   }
 
-  const pipelinePromise = process.stdout
+  const pipelinePromise = splitPcmStream(process.stdout, sampleRate, channels)
     .pipeThrough(audioProcessor)
     .pipeThrough(throttledOutput)
     .pipeTo(outputStream.writable, { signal: callbacks.signal })

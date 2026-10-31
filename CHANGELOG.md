@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.6] – 2026-10-31
+
+### Fixed
+- **Live DSP with large native stdout chunks:** Split raw PCM lazily into blocks of at most 20 ms before `AudioProcessor`, preserving downstream backpressure instead of processing an entire native stdout chunk ahead of playback. This prevents a buffered whole-track chunk from completing DSP early and making later EQ updates ineffective while the consumer is still playing that audio. Tests cover fragmented bytes, cancellation, upstream errors, bounded processing, and measured live EQ response with a large raw chunk. Native raw buffering itself remains runtime-dependent and is not eliminated by the splitter.
+
 ## [0.6.5] – 2026-10-31
 
 ### Added
