@@ -742,6 +742,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     this.seekInProgress = true;
     let next: FFmpegRunResultExtended | undefined;
     let mixerOwnsNext = false;
+    let unmirrorEq: (() => void) | undefined;
     try {
       const ap = session.active.audioProcessor;
       if (ap) {
@@ -769,6 +770,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       void incoming.done.catch(() => {});
       abortSignal?.throwIfAborted();
       if (this.playback !== session) throw new Error("seek: playback stopped");
+      unmirrorEq = this.audio.mirrorEq(incoming);
       const transition = session.mixer.seek(
         incoming.output,
         0.02,
@@ -797,6 +799,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       }
       throw error;
     } finally {
+      unmirrorEq?.();
       release();
       this.seekInProgress = false;
     }
@@ -880,6 +883,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     const started = performance.now();
     let next: FFmpegRunResultExtended | undefined;
     let mixerOwnsNext = false;
+    let unmirrorEq: (() => void) | undefined;
     try {
       this.logCrossfade("preparing", time, started);
       const ap = session.active.audioProcessor;
@@ -911,6 +915,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       const incoming = next;
       void incoming.done.catch(() => {});
       if (this.playback !== session) throw new Error("crossfade: playback stopped");
+      unmirrorEq = this.audio.mirrorEq(incoming);
       const transition = session.mixer.crossfade(
         incoming.output,
         time,
@@ -943,6 +948,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       }
       throw error;
     } finally {
+      unmirrorEq?.();
       release();
       this.crossfadeInProgress = false;
     }

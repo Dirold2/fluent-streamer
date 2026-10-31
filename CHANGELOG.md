@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.5] – 2026-10-31
+
+### Added
+- **Local PCM pacing diagnostic:** `node tests/bench-live-pcm.mjs` (also runnable with Bun after `npm run build`) plays a generated local WAV through FFmpeg, live EQ, and a crossfade into a single 20-ms consumer. It reports startup separately from source-read waits, tick lateness, event-loop delay, and mixed-session generation stats. This is a controlled library check, not a measurement of Discord, WebRTC, network, or audible underruns.
+
+### Fixed
+- **Short crossfade startup:** Limit incoming warmup to the number of PCM frames actually needed by a sub-20-ms or zero-duration crossfade, instead of always waiting for 20 ms of incoming audio. A stalled incoming source no longer blocks a one-frame switch at outgoing EOF after its first frame arrives. Longer crossfades retain their 20-ms warmup and downstream delivery still depends on the consumer's pacing and available source data.
+- **Live EQ across crossfade and mixed seek:** Extend prepared-Automix EQ forwarding to ordinary crossfade and mixed-session seek replacement decoders. Bass, mids, and treble changes made during decoder startup or overlap are no longer lost at handover. Temporary forwarding is removed when the operation settles. Real-FFmpeg regression tests measure PCM RMS changes for all three bands during ordinary playback, mixed playback, and crossfade handover; already-processed PCM still retains its previous EQ until buffers drain.
+
 ## [0.6.4] – 2026-10-31
 
 ### Fixed

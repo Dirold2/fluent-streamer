@@ -288,7 +288,7 @@ describe("PlaybackMixer", () => {
           deadlineMissCount: 1,
           frameShortageCount: 0,
           pendingReadCount: 0,
-          prebufferedFrames: 959,
+          prebufferedFrames: 0,
           preparing: false,
         });
       } finally {
@@ -893,6 +893,35 @@ describe("PlaybackMixer", () => {
     expect(next.cancel).toHaveBeenCalledTimes(1);
   });
 
+  it.each([0, 1 / 48000])(
+    "finishes a %s-second crossfade at outgoing EOF with one incoming frame still open",
+    async (seconds) => {
+      const next = controlled();
+      const mixer = new PlaybackMixer(source([]), 48000, 1, retire());
+      const fade = mixer.crossfade(next.stream, seconds, retire());
+      const completed = observe(fade);
+      const reader = mixer.output.getReader();
+      try {
+        const reading = reader.read();
+        const outputReady = observe(reading);
+        await next.requested;
+        await checkpoint();
+        expect(outputReady).not.toHaveBeenCalled();
+        next.controller.enqueue(pcm([200]));
+        await checkpoint();
+        expect(outputReady).toHaveBeenCalledTimes(1);
+        expect(completed).toHaveBeenCalledTimes(1);
+        expect((await reading).value).toEqual(pcm([200]));
+        expect(next.pull).toHaveBeenCalledTimes(1);
+        expect(mixer.stats.prebufferedFrames).toBe(0);
+      } finally {
+        await mixer.stop();
+        reader.releaseLock();
+      }
+      await mixer.done;
+    },
+  );
+
   it.each([
     [1000, 20],
     [48000, 960],
@@ -910,18 +939,29 @@ describe("PlaybackMixer", () => {
       const old = controlled();
       const next = new ReadableStream({ pull }, { highWaterMark: 0 });
       const mixer = new PlaybackMixer(old.stream, sampleRate, 2, retire());
-      const fade = mixer.crossfade(next, 2 / sampleRate, retire());
+      const fade = mixer.crossfade(next, 0.02, retire());
       await buffered.promise;
       await checkpoint();
       expect(bytes).toBe(frames * 4);
       expect(pull).toHaveBeenCalledTimes(frames);
       expect(old.pull).not.toHaveBeenCalled();
       const reader = mixer.output.getReader();
-      old.controller.enqueue(pcm([1000, -1000, 1000, -1000]));
-      expect((await reader.read()).value).toEqual(pcm([1500, -1500, 2000, -2000]));
+      const fadeFrames = Math.round(sampleRate * 0.02);
+      old.controller.enqueue(pcm(Array.from({ length: fadeFrames }, () => [1000, -1000]).flat()));
+      let output = (await reader.read()).value!;
+      expect(output.byteLength).toBe(Math.min(fadeFrames, 1024) * 4);
+      let emitted = output.byteLength / 4;
+      while (emitted < fadeFrames) {
+        output = (await reader.read()).value!;
+        emitted += output.byteLength / 4;
+      }
+      expect(emitted).toBe(fadeFrames);
+      const samples = new DataView(output.buffer, output.byteOffset, output.byteLength);
+      expect(samples.getInt16(output.byteLength - 4, true)).toBe(2000);
+      expect(samples.getInt16(output.byteLength - 2, true)).toBe(-2000);
       await fade;
-      // Reading the two fade frames used buffered PCM, not further upstream demand.
-      expect(bytes).toBe(frames * 4);
+      // Reading the fade consumes only the frames it needs.
+      expect(bytes).toBe(fadeFrames * 4);
       await reader.cancel();
       await mixer.done;
       expect(next.locked).toBe(false);

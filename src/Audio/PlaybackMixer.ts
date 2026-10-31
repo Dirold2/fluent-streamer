@@ -481,7 +481,10 @@ export class PlaybackMixer {
         };
       });
       if (phase === "crossfade") {
-        const bufferedFrames = Math.max(1, Math.min(1024, Math.round(this.sampleRate * 0.02)));
+        const bufferedFrames = Math.min(
+          Math.max(1, frames),
+          Math.max(1, Math.min(1024, Math.round(this.sampleRate * 0.02))),
+        );
         void input.prefetch(this.frameBytes, bufferedFrames).catch((error: unknown) => {
           if (!this.closed) void this.finish(error, false, true).catch(() => {});
         });
