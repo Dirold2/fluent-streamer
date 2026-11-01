@@ -17,6 +17,7 @@ import type {
 import { PlaybackMixer, validateLiveCrossfadeOptions } from "../Audio/PlaybackMixer.js";
 import { buildReturningAtempo, createReturningTempoTimeline } from "../Audio/analysis/Atempo.js";
 import { FluentAudioState } from "./FluentAudioState.js";
+import { SeekSourceCache } from "./SeekSourceCache.js";
 import { analyzeTrack, type DjAnalysis } from "../Audio/analysis/DjAnalysis.js";
 import {
   planAutomix,
@@ -25,6 +26,19 @@ import {
   type AutomixDiagnostic,
 } from "../Audio/analysis/AutomixPlan.js";
 import type { PreparedMixerInput } from "../Audio/PlaybackMixer.js";
+
+const httpInputOptions = new Set([
+  "-rw_timeout", "-reconnect", "-reconnect_streamed", "-reconnect_on_network_error",
+  "-reconnect_on_http_error", "-reconnect_delay_max", "-reconnect_max_retries",
+  "-timeout", "-user_agent", "-headers",
+]);
+
+function withoutHttpInputOptions(args: string[]): string[] {
+  const firstInput = args.indexOf("-i");
+  const before = firstInput < 0 ? args.length : firstInput;
+  return args.filter((arg, i) => i >= before ||
+    (!httpInputOptions.has(arg) && !httpInputOptions.has(args[i - 1]!)));
+}
 
 export interface PrepareAutomixOptions {
   /** Short, non-tempo-matched prepared handoff without long simultaneous playback. */
@@ -104,6 +118,21 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
   private crossfadeInProgress = false;
   private automixCancellation?: () => void;
   private lastRunOptions: Partial<ProcessorOptions> = {};
+  private seekCache?: SeekSourceCache;
+  private seekCacheUrl?: string;
+  private disposedSeekCaches = new WeakSet<SeekSourceCache>();
+
+  public getSeekCacheStatus(): "disabled" | "loading" | "ready" | "miss" {
+    return this.seekCache?.status() ?? "disabled";
+  }
+
+  private singleHttpInput(): string | undefined {
+    const urls = this.inputSources.filter((source) => source.type === "url");
+    const args = this.args.flatMap((arg, i) => arg === "-i" ? [this.args[i + 1]!] : []);
+    if (urls.length + args.length !== 1) return undefined;
+    const url = urls[0]?.url ?? args[0];
+    return url && /^https?:\/\//i.test(url) ? url : undefined;
+  }
 
   public get volume(): number {
     return this.audio.volume;
@@ -700,8 +729,16 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     const abortSignal = this.lastRunOptions.abortSignal ?? this.options.abortSignal;
     abortSignal?.throwIfAborted();
     this.seekInProgress = true;
+    let cachedPath: string | undefined;
+    try {
+      if (this.singleHttpInput() === this.seekCacheUrl) cachedPath = await this.seekCache?.localPath();
+      if (cachedPath) this.emitLog("debug", "seek cache hit: using local compressed input");
+    } catch (error) {
+      this.emitLog("warn", `seek cache unavailable; using original source: ${String(error)}`);
+    }
     const savedArgs = [...this.args];
-    const options = { ...this.lastRunOptions };
+    const savedRunOptions = this.lastRunOptions;
+    const options = { ...savedRunOptions };
     const ap = previous.audioProcessor;
     // Result setters can bypass FluentAudioState, so capture the live DSP values.
     if (ap) {
@@ -721,7 +758,17 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       const cleanGlobal = globalArgs.filter(
         (arg, i) => arg !== "-ss" && globalArgs[i - 1] !== "-ss",
       );
-      if (urls.length) {
+      if (cachedPath) {
+        this.args = withoutHttpInputOptions(this.args);
+        if (urls.length) {
+          this.args.unshift("-ss", String(seconds), "-i", cachedPath);
+          this.inputSources = [];
+        } else {
+          this.args[this.args.indexOf("-i") + 1] = cachedPath;
+          this.args.splice(this.args.indexOf("-i"), 0, "-ss", String(seconds));
+        }
+        options.extraGlobalArgs = withoutHttpInputOptions(cleanGlobal);
+      } else if (urls.length) {
         options.extraGlobalArgs = [...cleanGlobal, "-ss", String(seconds)];
       } else {
         const index = this.args.indexOf("-i");
@@ -735,7 +782,13 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       result.setNormalize?.(normalize);
       return result;
     } finally {
+      if (cachedPath) {
+        this.args = savedArgs;
+        this.lastRunOptions = savedRunOptions;
+      }
+      if (cachedPath && urls.length) this.inputSources = urls;
       this.seekInProgress = false;
+      if (!this.processorResult) this.releaseSeekCache();
     }
   }
 
@@ -759,17 +812,39 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         this.audio.setCompressor(ap.compressor);
         this.audio.setKaraoke(ap.karaoke);
       }
+      const urls = this.inputSources.filter((source) => source.type === "url");
+      const sourceUrl = this.singleHttpInput();
+      let cachedPath: string | undefined;
+      try {
+        if (sourceUrl === this.seekCacheUrl) cachedPath = await this.seekCache?.localPath();
+        if (cachedPath) this.emitLog("debug", "seek cache hit: using local compressed input");
+      } catch (error) {
+        this.emitLog("warn", `seek cache unavailable; using original source: ${String(error)}`);
+      }
       const args = this.args.filter((arg, i) => arg !== "-ss" && this.args[i - 1] !== "-ss");
-      args.splice(args.indexOf("-i"), 0, "-ss", String(seconds));
+      if (cachedPath) {
+        const cleanArgs = withoutHttpInputOptions(args);
+        args.length = 0;
+        args.push(...cleanArgs);
+        if (urls.length) args.push("-i", cachedPath);
+        else args[args.indexOf("-i") + 1] = cachedPath;
+      }
+      if (!urls.length || cachedPath) {
+        args.splice(args.indexOf("-i"), 0, "-ss", String(seconds));
+      }
       const globalArgs = this.lastRunOptions.extraGlobalArgs ?? this.options.extraGlobalArgs ?? [];
+      const cleanGlobal = globalArgs.filter(
+        (arg, i) => arg !== "-ss" && globalArgs[i - 1] !== "-ss",
+      );
       const processor = this.createProcessor({
         ...this.lastRunOptions,
-        extraGlobalArgs: globalArgs.filter(
-          (arg, i) => arg !== "-ss" && globalArgs[i - 1] !== "-ss",
-        ),
+        extraGlobalArgs: cachedPath
+          ? withoutHttpInputOptions(cleanGlobal)
+          : urls.length ? [...cleanGlobal, "-ss", String(seconds)] : cleanGlobal,
         autoDrainOutput: false,
         audioProcessorOptions: { ...this.audio.buildOptions(), normalize: ap?.normalize ?? false },
       });
+      if (cachedPath) processor.setInputSources([]);
       processor.setArgs(args);
       next = await processor.run();
       const incoming = next;
@@ -794,7 +869,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       if (this.playback !== session) throw new Error("seek: playback stopped");
       session.active = incoming;
       this.audio.attachResult(incoming);
-      this.args = args;
+      this.args = cachedPath ? this.args : args;
       session.originMs = seconds * 1000;
       session.tempoTimeline = undefined;
       return session.result;
@@ -808,7 +883,20 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       unmirrorEq?.();
       release();
       this.seekInProgress = false;
+      if (!this.processorResult) this.releaseSeekCache();
     }
+  }
+
+  private releaseSeekCache(cache = this.seekCache): void {
+    if (!cache || this.disposedSeekCaches.has(cache)) return;
+    this.disposedSeekCaches.add(cache);
+    if (this.seekCache === cache) {
+      this.seekCache = undefined;
+      this.seekCacheUrl = undefined;
+    }
+    void cache.dispose().catch((error) => {
+      this.emitLog("warn", `seek cache cleanup failed: ${String(error)}`);
+    });
   }
 
   private parseSeekPosition(position: string): number {
@@ -1701,6 +1789,21 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     );
     this.isDirty = true;
     const result = await processor.run();
+    if (!this.seekInProgress && (extraOpts.seekCache ?? this.options.seekCache)) {
+      const url = this.singleHttpInput();
+      const maxBytes = extraOpts.seekCacheMaxBytes ?? this.options.seekCacheMaxBytes ?? 16 * 1024 * 1024;
+      const customInputHeaders = [...this.args, ...(extraOpts.extraGlobalArgs ?? this.options.extraGlobalArgs ?? [])]
+        .some((arg) => arg === "-headers" || arg === "-user_agent");
+      if (url && !customInputHeaders && Number.isSafeInteger(maxBytes) && maxBytes > 0) {
+        this.seekCacheUrl = url;
+        this.seekCache = new SeekSourceCache(url, {
+          ...this.getMergedHeaders(),
+          ...(this.options.userAgent ? { "User-Agent": this.options.userAgent } : {}),
+        }, maxBytes);
+        this.seekCache.start();
+      }
+    }
+    const runCache = this.seekCache;
     if (mixed) {
       const mixer = new PlaybackMixer(
         result.output,
@@ -1789,6 +1892,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         }
       };
       mixer.done.then(clear, clear);
+      mixer.done.then(() => { if (!this.seekInProgress) this.releaseSeekCache(runCache); }, () => { if (!this.seekInProgress) this.releaseSeekCache(runCache); });
       return publicResult;
     }
     this.processorResult = result;
@@ -1808,6 +1912,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       }
     };
     result.done.then(clearProcessorResult, clearProcessorResult);
+    result.done.then(() => { if (!this.seekInProgress) this.releaseSeekCache(runCache); }, () => { if (!this.seekInProgress) this.releaseSeekCache(runCache); });
 
     await new Promise((resolve) => setTimeout(resolve, 50));
 

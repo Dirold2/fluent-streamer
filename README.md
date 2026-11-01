@@ -699,6 +699,17 @@ if (next) {
 // Use the current result.done / result.stop / other controls from now on.
 ```
 
+**Optional HTTP seek cache:** Set `seekCache: true` on a stream with one HTTP input (or in `run()` options). While the original FFmpeg decoder plays, a separate `fetch` downloads the **compressed** file in the background. Once fully downloaded, subsequent seeks use a temporary local file instead of reopening the CDN; check `streamer.getSeekCacheStatus()` (`'disabled' | 'loading' | 'ready' | 'miss'`) before relying on the optimization. ordinary seek still replaces `result.output`, while mixed seek retains its existing output. The default `seekCacheMaxBytes` is 16 MiB per stream (set a smaller positive integer to cap memory); oversized, failed, incomplete or still-downloading sources fall back to the original HTTP seek. `hcacher` holds at most one in-memory compressed entry per stream; after the first cached seek it is materialized as a private temporary file, reused for later seeks and deleted when the playback session ends. This is opt-in because it adds a **second full HTTP request** during playback, extra network traffic, memory and temporary disk use; it does not speed up a seek made before download completes, work for unbounded sources, or solve downstream PCM/WebRTC buffering. Example:
+
+```ts
+const streamer = new FluentStream({
+  seekCache: true,
+  seekCacheMaxBytes: 12 * 1024 * 1024,
+  autoDrainOutput: false,
+});
+// Configure a single HTTP input and PCM stdout as in the example above.
+```
+
 For ordinary seek, the old output stream ends during a seek. Replace the consumed `output` and clear any external player queue yourself; the library does **not** automatically clear it and does **not** guarantee gapless playback. `autoDrainOutput: false` is recommended when your application consumes the output.
 
 **Lifecycle (ordinary, non-mixed runs):** `done` belongs to one FFmpeg run, not the entire playback session. Settlement of the old `done` during a restart does **not** mean that the playback session has ended. Do not attach unconditional session/player teardown to an old result's `done`; track the replacement result and handle seek transitions separately.

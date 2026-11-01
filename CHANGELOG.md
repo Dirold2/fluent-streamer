@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.2] – 2026-11-01
+
+### Added
+- **Opt-in compressed HTTP seek cache:** `seekCache: true` starts a bounded background download of a single HTTP input without delaying initial FFmpeg playback. `hcacher` holds at most one complete compressed file per stream (16 MiB default, configurable with `seekCacheMaxBytes`); a ready entry is written to a private temporary file for repeated local FFmpeg seeks, and cleaned up on session end. Unready, failed and oversized downloads fall back to the original HTTP URL; this does not guarantee instant seeks, eliminate external output buffering, or cache newly crossfaded tracks. Tests cover repeated ordinary and mixed-session seek against a no-Range HTTP server and size-limit fallback. Opting in adds a second full HTTP request and bounded per-stream memory/disk use.
+
 ## [0.7.1] – 2026-11-01
 
 ### Fixed

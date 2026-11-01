@@ -1,6 +1,6 @@
 {
   "name": "fluent-streamer",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Fluent FFmpeg wrapper with real-time audio effects, timeout and progress tracking.",
   "type": "module",
   "main": "dist/index.js",
@@ -28,7 +28,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "hemmiter": "^0.1.0"
+    "hemmiter": "^0.1.0",
+    "hcacher": "^0.3.0"
   },
   "optionalDependencies": {
     "@ffmpeg/core": "^0.12.10",

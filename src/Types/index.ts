@@ -99,6 +99,10 @@ export interface ProcessorOptions {
   useAudioProcessor?: boolean;
   audioProcessorOptions?: AudioProcessingOptions;
   autoDrainOutput?: boolean;
+  /** Opt-in background cache of a single HTTP input for repeated seek. */
+  seekCache?: boolean;
+  /** Maximum compressed bytes for the optional seek cache (default 16 MiB). */
+  seekCacheMaxBytes?: number;
   /** Stable PCM output for live crossfade; disables auto-drain. Consume output for done to settle. */
   enableCrossfade?: boolean;
 }
