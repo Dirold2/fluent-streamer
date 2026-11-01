@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.1] – 2026-11-01
+
+### Fixed
+- **Prepared Automix cue-zero playback over HTTP:** Do not add `-ss 0` when opening the incoming decoder at cue zero. On HTTP sources that ignore byte-range requests, the unnecessary seek could discard initially probed audio and start the prepared track from later PCM. Nonzero cues still use an explicit seek. Added a real-FFmpeg regression test with a local HTTP server that ignores ranges, delayed consumption of prebuffered audio, and distinct incoming tones to verify the original cue-zero audio survives the seamless handoff without reopening the incoming URL.
+
 ## [0.7.0] – 2026-11-01
 
 ### Added

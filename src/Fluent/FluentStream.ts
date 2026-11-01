@@ -1330,7 +1330,9 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
           "prepareAutomix: insufficient remaining time or invalid timing",
         );
       const frozenPlan = Object.freeze({ ...plan });
-      clean.splice(clean.indexOf("-i"), 0, "-ss", String(plan.cueMs / 1000));
+      // A zero seek can discard probed HTTP audio when the server ignores ranges.
+      // Reopening the input already starts at cue zero; only seek for a nonzero cue.
+      if (plan.cueMs > 0) clean.splice(clean.indexOf("-i"), 0, "-ss", String(plan.cueMs / 1000));
       if (options.enableTempoMatch && Math.abs(tempoFactor - 1) > 1e-12) {
         const tempoFilter = buildReturningAtempo(tempoFactor, plan.seconds);
         const filterIndex = clean.lastIndexOf("-af");
