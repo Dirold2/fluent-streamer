@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.3] – 2026-11-01
+
+### Changed
+- **Stream HTTP seek cache to disk:** The opt-in cache now uses `hyperttp.stream()` and writes the original compressed bytes directly to a private temporary file with backpressure and the existing `seekCacheMaxBytes` limit. `hcacher` stores only the path after successful complete download; incomplete, oversized, cancelled or failed downloads remove the partial file and retain HTTP seek fallback. This avoids collecting or copying a whole track on the playback event loop. Node and Bun integration tests cover seek, cleanup and failure paths.
+
 ## [0.7.2] – 2026-11-01
 
 ### Added

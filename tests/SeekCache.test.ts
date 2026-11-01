@@ -126,6 +126,55 @@ it("does not block seek while download is pending; removes private file on dispo
   }
 });
 
+it("rejects an oversized chunked response without making a partial file seekable", async () => {
+  const server = createServer((_req, response) => {
+    response.writeHead(200, { "Content-Type": "audio/mpeg" });
+    response.write(Buffer.alloc(128));
+    response.end(Buffer.alloc(128));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as { port: number };
+  const cache = new SeekSourceCache(`http://127.0.0.1:${port}/audio`, {}, 150);
+  try {
+    cache.start();
+    for (let i = 0; i < 200 && cache.status() === "loading"; i++) await delay(10);
+    expect(cache.status()).toBe("miss");
+    expect(await cache.localPath()).toBeUndefined();
+  } finally {
+    await cache.dispose();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+it("cancels a stalled transfer and removes the partial file", async () => {
+  let responseStarted!: () => void;
+  const seen = new Promise<void>((resolve) => { responseStarted = resolve; });
+  const server = createServer((_req, response) => {
+    response.writeHead(200, { "Content-Type": "audio/mpeg" });
+    response.write(Buffer.alloc(128));
+    responseStarted();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as { port: number };
+  const cache = new SeekSourceCache(`http://127.0.0.1:${port}/audio`, {}, 1024);
+  try {
+    cache.start();
+    await seen;
+    for (let i = 0; i < 200 && !(cache as any).directory; i++) await delay(10);
+    const directory = (cache as any).directory as string;
+    expect(directory).toBeTruthy();
+    expect(cache.status()).toBe("loading");
+    await cache.dispose();
+    expect(await cache.localPath()).toBeUndefined();
+    await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await cache.dispose();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 it.skipIf(!hasFFmpeg)("caches compressed HTTP input for ordinary repeated seek", async () => {
   await scenario(false, 1024 * 1024);
 }, 15000);
