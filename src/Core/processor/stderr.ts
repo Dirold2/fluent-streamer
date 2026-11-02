@@ -1,3 +1,4 @@
+import { redactMediaUrls } from "./logging.js";
 import type { FFmpegProgress } from "../../Types/index.js";
 import { getTimeString } from "../utils.js";
 import type { ProcessorConfig } from "./config.js";
@@ -185,7 +186,7 @@ export function buildProcessExitError(
   signal: string | null,
   stderrBuffer: string,
 ): Error {
-  const stderrSnippet = stderrBuffer.trim().slice(-1000);
+  const stderrSnippet = redactMediaUrls(stderrBuffer).trim().slice(-1000);
   let message = `FFmpeg exited with code ${code}`;
 
   if (signal) message += ` (signal ${signal})`;

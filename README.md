@@ -56,6 +56,18 @@ It buffers the complete input and runs FFmpeg WASM before exposing output; it do
 
 ---
 
+## FFmpeg log privacy
+
+HTTP(S) media URLs are hidden as `[redacted-url]` in FFmpeg command logs, abnormal-exit stderr tails and process-exit errors by default. The whole URL is hidden because credentials/signatures can appear in the path as well as the query. This does not change the URL sent to FFmpeg.
+
+For temporary debugging, explicitly opt in before starting your app:
+
+```sh
+FLUENT_STREAMER_LOG_URLS=1 bun ./src/main.ts
+```
+
+Only the exact value `1` enables full URLs. Command logs still require `verbose: true`. Full URLs may contain credentials or expiring access tokens; do not publish these logs. Raw hooks (`onBeforeChildProcessSpawn`, `stderrLogHandler`) remain unsanitized; custom logging in these hooks and other application logs must handle secrets separately.
+
 ## Usage
 
 ```ts

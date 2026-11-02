@@ -317,7 +317,7 @@ describe.skipIf(!hasFFmpeg)("automix preparation integration", () => {
     const startup = Promise.withResolvers<void>();
     const entered = Promise.withResolvers<FFmpegRunResultExtended>();
     const originalRun = Processor.prototype.run;
-    vi.spyOn(Processor.prototype, "run").mockImplementationOnce(async function () {
+    vi.spyOn(Processor.prototype, "run").mockImplementationOnce(async function (this: Processor) {
       const incoming = await originalRun.call(this);
       entered.resolve(incoming);
       await startup.promise;

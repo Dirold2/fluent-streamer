@@ -21,6 +21,7 @@ import {
   setupOutputPipeline,
 } from "./processor/pipeline.js";
 import { createSilenceBuffer, createSilenceMs } from "./processor/silence.js";
+import { redactMediaUrls } from "./processor/logging.js";
 import { StderrTracker, buildProcessExitError, readStderrStream } from "./processor/stderr.js";
 import { resolveFfmpegPath } from "./processor/ffmpegPath.js";
 
@@ -537,7 +538,7 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
     if (!this.config.verbose) return;
 
     this.config.logger.info?.(
-      `[${getTimeString()}] [${this.config.loggerTag}] FFmpeg command: ${this.config.ffmpegPath} ${fullArgs.join(" ")}`,
+      `[${getTimeString()}] [${this.config.loggerTag}] FFmpeg command: ${this.config.ffmpegPath} ${redactMediaUrls(fullArgs.join(" "))}`,
     );
     this.config.logger.info?.(
       `[${getTimeString()}] [${this.config.loggerTag}] Audio config: volume=${this.currentVolume}, bass=${this.currentBass}dB, treble=${this.currentTreble}dB, mids=${this.currentMids}dB, compressor=${this.currentCompressor}`,
@@ -683,7 +684,7 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
       const error = isTimeout
         ? new Error(`FFmpeg process timed out after ${this.config.timeout}ms`)
         : buildProcessExitError(code, signal, this.stderrTracker.getBuffer());
-      const tail = this.stderrTracker.getBuffer().trim().slice(-4000);
+      const tail = redactMediaUrls(this.stderrTracker.getBuffer()).trim().slice(-4000);
 
       if (tail && this.config.verbose) {
         this.config.logger.error?.(

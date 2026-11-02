@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.4]  – 2026-11-01
+
+### Fixed
+- **Private media URLs in FFmpeg logs:** HTTP(S) URLs are replaced with `[redacted-url]` in verbose command logs, abnormal-exit stderr tails and process-exit errors by default, including signatures embedded in paths. Set `FLUENT_STREAMER_LOG_URLS=1` to explicitly enable full URLs for debugging. Executed arguments and raw diagnostic hooks are unchanged.
+
 ## [0.7.3] – 2026-11-01
 
 ### Changed
