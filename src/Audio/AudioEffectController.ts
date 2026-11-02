@@ -1,10 +1,11 @@
 import type { AudioProcessor } from "../Audio/AudioProcessor.js";
 import type { Logger } from "../Types/index.js";
+import { LOG_LEVELS, logMessage, type LogLevel } from "../Core/processor/logging.js";
 import { getTimeString } from "../Core/utils.js";
 
 export class AudioEffectController {
   private audioProcessor: AudioProcessor;
-  private logger: Logger;
+  private logger: Logger | undefined;
   private loggerTag: string;
   private verbose: boolean;
 
@@ -18,7 +19,7 @@ export class AudioEffectController {
 
   constructor(
     audioProcessor: AudioProcessor,
-    config: { logger: Logger; loggerTag: string; verbose?: boolean },
+    config: { logger?: Logger; loggerTag: string; verbose?: boolean },
     initialState: {
       volume: number;
       bass: number;
@@ -85,11 +86,10 @@ export class AudioEffectController {
     if (this.canUpdate()) {
       this.audioProcessor.compressor = c;
     }
-    if (this.verbose) {
-      this.logger.info?.(
-        `[${getTimeString()}] [${this.loggerTag}] Compressor changed: ${String(oldValue)} → ${String(c)}`,
-      );
-    }
+    this.log(
+      LOG_LEVELS.effectChanged,
+      `[${getTimeString()}] [${this.loggerTag}] Compressor changed: ${String(oldValue)} → ${String(c)}`,
+    );
   }
 
   setNormalize(n: boolean): void {
@@ -98,11 +98,10 @@ export class AudioEffectController {
     if (this.canUpdate()) {
       this.audioProcessor.normalize = n; // Управление новым эффектом авто-нормализации
     }
-    if (this.verbose) {
-      this.logger.info?.(
-        `[${getTimeString()}] [${this.loggerTag}] Normalize changed: ${String(oldValue)} → ${String(n)}`,
-      );
-    }
+    this.log(
+      LOG_LEVELS.effectChanged,
+      `[${getTimeString()}] [${this.loggerTag}] Normalize changed: ${String(oldValue)} → ${String(n)}`,
+    );
   }
 
   setKaraoke(enabled: boolean): void {
@@ -111,11 +110,10 @@ export class AudioEffectController {
     if (this.canUpdate()) {
       this.audioProcessor.setKaraoke(enabled);
     }
-    if (this.verbose) {
-      this.logger.info?.(
-        `[${getTimeString()}] [${this.loggerTag}] Karaoke changed: ${String(oldValue)} → ${String(enabled)}`,
-      );
-    }
+    this.log(
+      LOG_LEVELS.effectChanged,
+      `[${getTimeString()}] [${this.loggerTag}] Karaoke changed: ${String(oldValue)} → ${String(enabled)}`,
+    );
   }
 
   startFade(targetVolume: number, durationMs: number): void {
@@ -132,11 +130,14 @@ export class AudioEffectController {
     );
   }
 
+  private log(level: LogLevel, message: string, meta?: Record<string, unknown>): void {
+    logMessage({ logger: this.logger, verbose: this.verbose }, level, message, meta);
+  }
+
   private logChange(label: string, oldValue: number, newValue: number): void {
-    if (this.verbose) {
-      this.logger.info?.(
-        `[${getTimeString()}] [${this.loggerTag}] ${label} changed: ${oldValue} → ${newValue}`,
-      );
-    }
+    this.log(
+      LOG_LEVELS.effectChanged,
+      `[${getTimeString()}] [${this.loggerTag}] ${label} changed: ${oldValue} → ${newValue}`,
+    );
   }
 }

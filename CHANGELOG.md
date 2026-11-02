@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.5] – 2026-11-02
+
+### Changed
+- **Quieter info level and public logging options:** Export shared `LoggingOptions` (`logger?: Logger`, `verbose?: boolean`) and `LogLevel`. Centralize technical event levels in `LOG_LEVELS`; FFmpeg command/configuration, playback statistics, bitrate, blob validation and live DSP changes now use `debug` instead of `info`. External loggers remain responsible for level filtering.
+- **Unified object-logger dispatch:** Processor, FluentStream, audio effects and internal pipeline helpers use a shared logging policy. Custom `Logger` methods receive messages independently of `verbose`, preserving their receiver and metadata; without a logger, only errors are printed unless `verbose: true`. Updated test loggers to the new `playerError`/`child` interface and retained URL redaction. The library does not close externally supplied loggers.
+
 ## [0.7.4]  – 2026-11-01
 
 ### Fixed

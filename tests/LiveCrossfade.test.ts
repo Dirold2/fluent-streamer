@@ -485,7 +485,16 @@ describe("live crossfade validation", () => {
 
 describe.skipIf(!hasFFmpeg)("crossfade logging", () => {
   it("logs ordered lifecycle stages with durations and no source URLs", async () => {
-    const logger = { debug: vi.fn(), info: vi.fn(), log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      playerError: vi.fn(),
+      child() {
+        return this;
+      },
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
     const fluent = track();
     const result = await fluent.run({ verbose: true, logger, loggerTag: "DJ" });
     active.add(result);
@@ -513,8 +522,17 @@ describe.skipIf(!hasFFmpeg)("crossfade logging", () => {
     }
   });
 
-  it("respects verbose false even when a logger is supplied", async () => {
-    const logger = { debug: vi.fn(), info: vi.fn(), log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  it("forwards to a supplied logger independently of verbose", async () => {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      playerError: vi.fn(),
+      child() {
+        return this;
+      },
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
     const fluent = track();
     const result = await fluent.run({ logger, verbose: false });
     active.add(result);
@@ -523,11 +541,20 @@ describe.skipIf(!hasFFmpeg)("crossfade logging", () => {
     await consumeTransition(reader, fluent.crossfade(fixture, 0.01));
     expect(
       logger.debug.mock.calls.filter((call) => String(call[0]).includes("Crossfade")),
-    ).toHaveLength(0);
+    ).toHaveLength(3);
   });
 
   it("logs interrupted transitions without swallowing the rejection", async () => {
-    const logger = { debug: vi.fn(), info: vi.fn(), log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      playerError: vi.fn(),
+      child() {
+        return this;
+      },
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
     const fluent = track();
     const result = await fluent.run({ verbose: true, logger });
     active.add(result);

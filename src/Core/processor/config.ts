@@ -13,7 +13,7 @@ export type ProcessorConfig = {
   timeout: number;
   maxStderrBuffer: number;
   enableProgressTracking: boolean;
-  logger: NonNullable<ProcessorOptions["logger"]>;
+  logger: ProcessorOptions["logger"];
   verbose: boolean;
   debug: boolean;
   abortSignal?: AbortSignal;
@@ -41,7 +41,7 @@ export function buildProcessorConfig(options: ProcessorOptions = {}): ProcessorC
     timeout: options.timeout ?? 0,
     maxStderrBuffer: options.maxStderrBuffer ?? 1024 * 1024,
     enableProgressTracking: options.enableProgressTracking ?? false,
-    logger: options.logger ?? console,
+    logger: options.logger,
     debug: options.debug ?? false,
     verbose: options.verbose ?? false,
     abortSignal: options.abortSignal,

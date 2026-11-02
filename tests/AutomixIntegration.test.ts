@@ -718,7 +718,16 @@ describe.skipIf(!hasFFmpeg)("automix decision diagnostics", () => {
   it.each([false, true])(
     "delivers decisions independently of verbose=%s and logs safely",
     async (verbose) => {
-      const logger = { debug: vi.fn(), info: vi.fn(), log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const logger = {
+        debug: vi.fn(),
+        info: vi.fn(),
+        playerError: vi.fn(),
+        child() {
+          return this;
+        },
+        warn: vi.fn(),
+        error: vi.fn(),
+      };
       const fluent = track();
       const result = await fluent.run({ verbose, logger, loggerTag: "DJ" });
       runs.push(result);
@@ -742,14 +751,14 @@ describe.skipIf(!hasFFmpeg)("automix decision diagnostics", () => {
       const entries = logger.debug.mock.calls.filter((call) =>
         String(call[0]).includes("Automix decision"),
       );
-      expect(entries).toHaveLength(verbose ? 1 : 0);
-      if (verbose) {
+      expect(entries).toHaveLength(1);
+      {
         expect(entries[0]).toEqual([
           "[DJ] Automix decision",
-          {
+          expect.objectContaining({
             code: "FluentStream-automix-decision",
             detail: diagnostic.mock.calls[0]![0],
-          },
+          }),
         ]);
         expect(JSON.stringify(entries)).not.toContain(fixture);
       }
@@ -763,7 +772,10 @@ describe.skipIf(!hasFFmpeg)("automix decision diagnostics", () => {
         if (message.includes("Automix decision")) throw new Error("logging failed");
       }),
       info() {},
-      log() {},
+      playerError() {},
+      child() {
+        return this;
+      },
       warn() {},
       error() {},
     };

@@ -66,7 +66,21 @@ For temporary debugging, explicitly opt in before starting your app:
 FLUENT_STREAMER_LOG_URLS=1 bun ./src/main.ts
 ```
 
-Only the exact value `1` enables full URLs. Command logs still require `verbose: true`. Full URLs may contain credentials or expiring access tokens; do not publish these logs. Raw hooks (`onBeforeChildProcessSpawn`, `stderrLogHandler`) remain unsanitized; custom logging in these hooks and other application logs must handle secrets separately.
+Only the exact value `1` enables full URLs. Command logs are sent to a supplied logger regardless of `verbose`; console fallback requires `verbose: true`. Full URLs may contain credentials or expiring access tokens; do not publish these logs. Raw hooks (`onBeforeChildProcessSpawn`, `stderrLogHandler`) remain unsanitized; custom logging in these hooks and other application logs must handle secrets separately.
+
+## External logger and levels
+
+`Logger`, `LoggingOptions` and `LogLevel` are public type exports. Pass your logger through `logger?: Logger`:
+
+```ts
+import { FluentStream, type Logger } from "fluent-streamer";
+
+export function createPlayer(logger?: Logger) {
+  return new FluentStream({ logger });
+}
+```
+
+The external logger receives messages independently of `verbose` and controls its own filtering. FFmpeg commands/configuration, bitrate, playback statistics, blob validation and live effect changes are `debug`, not `info`. Internal event levels are centralized in `src/Core/processor/logging.ts` (`LOG_LEVELS`). Warnings and errors retain their levels. Without a logger, non-error console output requires `verbose: true`.
 
 ## Usage
 
@@ -265,7 +279,7 @@ All analysis entry points inspect at most **90 seconds** from the beginning of t
 - `outgoing` and `incoming` contain scalar analysis snapshots of **both tracks**: `bpm`, `bpmConfidence`, `beatPhaseMs`, `beatPhaseConfidence`, `dropMs`, `dropConfidence`, and `analyzedDurationMs`. Missing/non-finite numbers become `null`; no source URLs are included. `outgoingGridIssues` / `incomingGridIssues` explain grid validation failures. `timing` records `outgoingPositionMs`, `outgoingRemainingMs`, `incomingDurationMs`, `fallbackSeconds`, and `explicitDropMs`, also sanitized to finite numbers or `null`.
 - `fallbackReason: AutomixFallbackReason | null` is one of `unreliable-both-grids`, `unreliable-outgoing-grid`, `unreliable-incoming-grid`, `tempo-mismatch`, `insufficient-overlap`, `insufficient-grid-window`, `incoming-duration-limit`, or `invalid-timing`; it is `null` when no fallback/rejection reason applies. `outcome` is the resulting plan reason (`energy-entry`, `tempo-phrase`, `crossfade`, or opt-in `drop-handoff`), or `null` when no plan is possible.
 - `tempoRatio` is faster/slower positive finite BPM (or `null`), even for unreliable grids. `octaveRelated` flags ratios from 1.85 to 2.15: it is **diagnostic only**, not tempo correction, permission to bypass confidence gates, or an automatic drop seek.
-- With `verbose: true`, the configured logger also receives `logger.debug("[tag] Automix decision", { code: "FluentStream-automix-decision", detail: diagnostic })`, where `tag` is the effective `loggerTag` (default `FluentStream`). Logger exceptions are swallowed too. These decision diagnostics are separate from `getPlaybackStats()` mixer/buffering statistics below.
+- A configured logger receives `logger.debug("[tag] Automix decision", { code: "FluentStream-automix-decision", detail: diagnostic, ... })` independently of `verbose`, where `tag` is the effective `loggerTag` (default `FluentStream`). Logger exceptions are swallowed too. These decision diagnostics are separate from `getPlaybackStats()` mixer/buffering statistics below.
 
 Diagnostics do **not** relax the conservative safety thresholds above or change fallback behavior: unreliable grids or incompatible tempos still use incoming **cue 0 with no drop seek**, even with `explicitDropMs`.
 
@@ -507,8 +521,8 @@ Creates a new FluentStream instance with optional processor options.
 - `autoDrainOutput?: boolean` - Defaults to `true`. An unlocked output is automatically drained after 100 ms. Set `false` when attaching your own player or stream consumer.
 - `enableCrossfade?: boolean` - Explicit opt-in (default `false`) for stable mixed PCM output and live `.crossfade()`; disables auto-drain. See [Live Crossfade](#live-crossfade).
 - `audioProcessorOptions?: AudioProcessingOptions` - Audio effect defaults (volume, bass, treble, mids, compressor, normalize, karaoke, sampleRate, channels, cloneInput)
-- `logger?: Logger` - Custom logger instance (debug, info, warn, error)
-- `verbose?: boolean` - Enable debug log output
+- `logger?: Logger` - Custom object logger (`debug`, `info`, `warn`, `error`, `playerError`, `child`, optional `end`). Messages are forwarded as `logger[level](message, meta)` regardless of `verbose`; the logger controls its own filtering. The library does not own or end the supplied logger.
+- `verbose?: boolean` - Enable non-error console output when no custom logger is supplied. Console errors are always reported.
 
 ### Input/Output Methods
 
@@ -859,8 +873,7 @@ For URL/file playback through a clocked player, start without `-re`, `-fflags no
 **Enable verbose logging:**
 ```ts
 const streamer = new FluentStream({
-  logger: console, // Enable console logging
-  verbose: true,   // Show debug messages
+  verbose: true, // Console fallback; no custom logger required
 });
 ```
 

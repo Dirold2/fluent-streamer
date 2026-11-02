@@ -243,7 +243,16 @@ describe("karaoke DSP", () => {
 describe("karaoke runtime integration", () => {
   it("bridges controller updates and guards closed processors", () => {
     const p = processor();
-    const logger = { debug: vi.fn(), info: vi.fn(), log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      playerError: vi.fn(),
+      child() {
+        return this;
+      },
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
     const controller = new AudioEffectController(
       p,
       { logger, loggerTag: "test", verbose: true },
@@ -251,7 +260,7 @@ describe("karaoke runtime integration", () => {
     );
     controller.setKaraoke(true);
     expect(p.karaoke).toBe(true);
-    expect(logger.info).toHaveBeenCalledWith(
+    expect(logger.debug).toHaveBeenCalledWith(
       expect.stringContaining("Karaoke changed: false → true"),
     );
     p.emit("close");

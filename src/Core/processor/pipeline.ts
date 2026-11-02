@@ -1,3 +1,4 @@
+import { logMessage } from "./logging.js";
 import type { FFmpegProcess } from "../../Types/core.js";
 import { AudioProcessor } from "../../Audio/AudioProcessor.js";
 import { ThrottleStream } from "../ThrottleStream.js";
@@ -194,11 +195,11 @@ export function setupOutputPipeline(
     .pipeTo(outputStream.writable, { signal: callbacks.signal })
     .then(() => {
       callbacks.onPipelineComplete();
-      if (config.verbose) {
-        config.logger.debug?.(
-          `[${getTimeString()}] [${config.loggerTag}] Output pipeline completed`,
-        );
-      }
+      logMessage(
+        config,
+        "debug",
+        `[${getTimeString()}] [${config.loggerTag}] Output pipeline completed`,
+      );
     })
     .catch((err) => {
       if (!callbacks.hasFinished() && !callbacks.signal?.aborted) {

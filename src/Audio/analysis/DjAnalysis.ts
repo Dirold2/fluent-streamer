@@ -65,7 +65,16 @@ export async function analyzeTrack(
     disableThrottling: true,
     ffmpegLogLevel: "error",
     extraGlobalArgs: httpSeekArgs(startSeconds, source),
-    logger: { debug() {}, info() {}, log() {}, warn() {}, error() {} },
+    logger: {
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+      playerError() {},
+      child() {
+        return this;
+      },
+    },
   });
   // Processor's URL source adds HTTP reconnect flags, which local inputs reject.
   const http = /^https?:\/\//i.test(source);

@@ -1,13 +1,13 @@
 import { MiniEmitter } from "hemmiter";
 import Processor from "../Core/Processor.js";
-import { HUMANITY_HEADERS, DEFAULT_LOGGER } from "./constants.js";
+import { HUMANITY_HEADERS } from "./constants.js";
+import { logMessage, type LogLevel } from "../Core/processor/logging.js";
 import { FluentStreamValidationError } from "./errors.js";
 import { getStackTrace, countInputs, summarizeInputs } from "./utils.js";
 
 import type {
   FFmpegRunResultExtended,
   ProcessorOptions,
-  Logger,
   LogMeta,
   CrossfadeAudioOptions,
   LiveCrossfadeOptions,
@@ -28,16 +28,24 @@ import {
 import type { PreparedMixerInput } from "../Audio/PlaybackMixer.js";
 
 const httpInputOptions = new Set([
-  "-rw_timeout", "-reconnect", "-reconnect_streamed", "-reconnect_on_network_error",
-  "-reconnect_on_http_error", "-reconnect_delay_max", "-reconnect_max_retries",
-  "-timeout", "-user_agent", "-headers",
+  "-rw_timeout",
+  "-reconnect",
+  "-reconnect_streamed",
+  "-reconnect_on_network_error",
+  "-reconnect_on_http_error",
+  "-reconnect_delay_max",
+  "-reconnect_max_retries",
+  "-timeout",
+  "-user_agent",
+  "-headers",
 ]);
 
 function withoutHttpInputOptions(args: string[]): string[] {
   const firstInput = args.indexOf("-i");
   const before = firstInput < 0 ? args.length : firstInput;
-  return args.filter((arg, i) => i >= before ||
-    (!httpInputOptions.has(arg) && !httpInputOptions.has(args[i - 1]!)));
+  return args.filter(
+    (arg, i) => i >= before || (!httpInputOptions.has(arg) && !httpInputOptions.has(args[i - 1]!)),
+  );
 }
 
 export interface PrepareAutomixOptions {
@@ -105,7 +113,6 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
 
   private audio: FluentAudioState;
 
-  private logger: Logger;
   private processorResult: FFmpegRunResultExtended | null = null;
   private seekInProgress = false;
   private playback?: {
@@ -128,7 +135,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
 
   private singleHttpInput(): string | undefined {
     const urls = this.inputSources.filter((source) => source.type === "url");
-    const args = this.args.flatMap((arg, i) => arg === "-i" ? [this.args[i + 1]!] : []);
+    const args = this.args.flatMap((arg, i) => (arg === "-i" ? [this.args[i + 1]!] : []));
     if (urls.length + args.length !== 1) return undefined;
     const url = urls[0]?.url ?? args[0];
     return url && /^https?:\/\//i.test(url) ? url : undefined;
@@ -181,7 +188,6 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     this.options = { ...options };
     this.headers =
       typeof options.headers === "object" && options.headers !== null ? options.headers : undefined;
-    this.logger = options.logger ?? DEFAULT_LOGGER;
 
     const ap = options.audioProcessorOptions;
     this.audio = new FluentAudioState({
@@ -197,18 +203,20 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     });
   }
 
-  private emitLog(
-    level: "debug" | "info" | "warn" | "error",
-    message: string,
-    meta?: LogMeta,
-  ): void {
+  private log(level: LogLevel, message: string, meta?: LogMeta): void {
     const fullMeta = { ...meta };
     if (!fullMeta.stackTrace) {
       fullMeta.stackTrace = getStackTrace();
     }
-    if (typeof this.logger[level] === "function") {
-      this.logger[level](message, fullMeta);
-    }
+    logMessage(
+      {
+        logger: this.lastRunOptions.logger ?? this.options.logger,
+        verbose: this.lastRunOptions.verbose ?? this.options.verbose,
+      },
+      level,
+      message,
+      fullMeta,
+    );
   }
 
   private getMergedHeaders(): Record<string, string> {
@@ -361,7 +369,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
           !opts?.allowDuplicate &&
           this.inputSources.some((s) => s.type === "url" && s.url === input)
         ) {
-          this.emitLog("warn", `input(): Duplicate URL input detected: "${input}"`, {
+          this.log("warn", `input(): Duplicate URL input detected: "${input}"`, {
             code: "FluentStream-duplicate-url-input",
           });
           return this;
@@ -375,7 +383,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         !opts?.allowDuplicate &&
         this.args.some((v, i) => v === "-i" && this.args[i + 1] === input)
       ) {
-        this.emitLog("warn", `input(): Duplicate string input detected: "${input}"`, {
+        this.log("warn", `input(): Duplicate string input detected: "${input}"`, {
           code: "FluentStream-duplicate-string-input",
         });
         return this;
@@ -471,7 +479,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       }
 
       if (!opts?.allowDuplicate && this.inputStreams.some((s) => s.stream === input)) {
-        this.emitLog("warn", "input(): Duplicate Readable stream detected (skipped)", {
+        this.log("warn", "input(): Duplicate Readable stream detected (skipped)", {
           code: "FluentStream-duplicate-pipe",
         });
         return this;
@@ -564,7 +572,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       );
 
       if (!hasHTTPInput) {
-        this.emitLog(
+        this.log(
           "warn",
           "userAgent: applies ONLY to HTTP/HTTPS inputs. FFmpeg will ignore it for other protocols.",
           { code: "FluentStream-non-http-useragent" },
@@ -731,10 +739,11 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     this.seekInProgress = true;
     let cachedPath: string | undefined;
     try {
-      if (this.singleHttpInput() === this.seekCacheUrl) cachedPath = await this.seekCache?.localPath();
-      if (cachedPath) this.emitLog("debug", "seek cache hit: using local compressed input");
+      if (this.singleHttpInput() === this.seekCacheUrl)
+        cachedPath = await this.seekCache?.localPath();
+      if (cachedPath) this.log("debug", "seek cache hit: using local compressed input");
     } catch (error) {
-      this.emitLog("warn", `seek cache unavailable; using original source: ${String(error)}`);
+      this.log("warn", `seek cache unavailable; using original source: ${String(error)}`);
     }
     const savedArgs = [...this.args];
     const savedRunOptions = this.lastRunOptions;
@@ -817,9 +826,9 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       let cachedPath: string | undefined;
       try {
         if (sourceUrl === this.seekCacheUrl) cachedPath = await this.seekCache?.localPath();
-        if (cachedPath) this.emitLog("debug", "seek cache hit: using local compressed input");
+        if (cachedPath) this.log("debug", "seek cache hit: using local compressed input");
       } catch (error) {
-        this.emitLog("warn", `seek cache unavailable; using original source: ${String(error)}`);
+        this.log("warn", `seek cache unavailable; using original source: ${String(error)}`);
       }
       const args = this.args.filter((arg, i) => arg !== "-ss" && this.args[i - 1] !== "-ss");
       if (cachedPath) {
@@ -840,7 +849,9 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         ...this.lastRunOptions,
         extraGlobalArgs: cachedPath
           ? withoutHttpInputOptions(cleanGlobal)
-          : urls.length ? [...cleanGlobal, "-ss", String(seconds)] : cleanGlobal,
+          : urls.length
+            ? [...cleanGlobal, "-ss", String(seconds)]
+            : cleanGlobal,
         autoDrainOutput: false,
         audioProcessorOptions: { ...this.audio.buildOptions(), normalize: ap?.normalize ?? false },
       });
@@ -895,7 +906,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       this.seekCacheUrl = undefined;
     }
     void cache.dispose().catch((error) => {
-      this.emitLog("warn", `seek cache cleanup failed: ${String(error)}`);
+      this.log("warn", `seek cache cleanup failed: ${String(error)}`);
     });
   }
 
@@ -942,13 +953,11 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     durationSeconds: number,
     started: number,
   ): void {
-    if (!(this.lastRunOptions.verbose ?? this.options.verbose)) return;
-    const logger = this.lastRunOptions.logger ?? this.logger;
     const tag = this.lastRunOptions.loggerTag ?? this.options.loggerTag ?? "FluentStream";
     // Do not log source URLs: they can contain credentials or signed query parameters.
     try {
       const level = stage === "failed" ? "error" : "debug";
-      logger[level](`[${tag}] Crossfade ${stage}`, {
+      this.log(level, `[${tag}] Crossfade ${stage}`, {
         code: `FluentStream-crossfade-${stage}`,
         detail: { durationSeconds, elapsedMs: performance.now() - started },
       });
@@ -1284,12 +1293,15 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
             controller.signal.throwIfAborted();
             if (this.playback !== session) throw error;
             // Optional extra analysis must not prevent the normal transition.
-            const logger = this.lastRunOptions.logger ?? this.logger;
             try {
-              logger.debug("[FluentStream] Late drop analysis unavailable; using normal Automix", {
-                code: "FluentStream-drop-handoff-fallback",
-                detail: error,
-              });
+              this.log(
+                "debug",
+                "[FluentStream] Late drop analysis unavailable; using normal Automix",
+                {
+                  code: "FluentStream-drop-handoff-fallback",
+                  detail: error,
+                },
+              );
             } catch {
               /* Logging cannot interrupt playback. */
             }
@@ -1397,12 +1409,10 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
                     } catch {
                       /* Diagnostics must not interrupt preparation. */
                     }
-                    if (!(this.lastRunOptions.verbose ?? this.options.verbose)) return;
-                    const logger = this.lastRunOptions.logger ?? this.logger;
                     const tag =
                       this.lastRunOptions.loggerTag ?? this.options.loggerTag ?? "FluentStream";
                     try {
-                      logger.debug(`[${tag}] Automix decision`, {
+                      this.log("debug", `[${tag}] Automix decision`, {
                         code: "FluentStream-automix-decision",
                         detail: decision,
                       });
@@ -1710,7 +1720,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       for (let i = 0; i < finalArgs.length - 1; i++) {
         if (finalArgs[i] === "-filter_complex") {
           hasFilterComplex = true;
-          this.emitLog(
+          this.log(
             "warn",
             "assembleArgs: Duplicate -filter_complex detected. Using combined filters.",
             { code: "FluentStream-duplicate-filter-complex" },
@@ -1791,15 +1801,22 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     const result = await processor.run();
     if (!this.seekInProgress && (extraOpts.seekCache ?? this.options.seekCache)) {
       const url = this.singleHttpInput();
-      const maxBytes = extraOpts.seekCacheMaxBytes ?? this.options.seekCacheMaxBytes ?? 16 * 1024 * 1024;
-      const customInputHeaders = [...this.args, ...(extraOpts.extraGlobalArgs ?? this.options.extraGlobalArgs ?? [])]
-        .some((arg) => arg === "-headers" || arg === "-user_agent");
+      const maxBytes =
+        extraOpts.seekCacheMaxBytes ?? this.options.seekCacheMaxBytes ?? 16 * 1024 * 1024;
+      const customInputHeaders = [
+        ...this.args,
+        ...(extraOpts.extraGlobalArgs ?? this.options.extraGlobalArgs ?? []),
+      ].some((arg) => arg === "-headers" || arg === "-user_agent");
       if (url && !customInputHeaders && Number.isSafeInteger(maxBytes) && maxBytes > 0) {
         this.seekCacheUrl = url;
-        this.seekCache = new SeekSourceCache(url, {
-          ...this.getMergedHeaders(),
-          ...(this.options.userAgent ? { "User-Agent": this.options.userAgent } : {}),
-        }, maxBytes);
+        this.seekCache = new SeekSourceCache(
+          url,
+          {
+            ...this.getMergedHeaders(),
+            ...(this.options.userAgent ? { "User-Agent": this.options.userAgent } : {}),
+          },
+          maxBytes,
+        );
         this.seekCache.start();
       }
     }
@@ -1892,7 +1909,14 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         }
       };
       mixer.done.then(clear, clear);
-      mixer.done.then(() => { if (!this.seekInProgress) this.releaseSeekCache(runCache); }, () => { if (!this.seekInProgress) this.releaseSeekCache(runCache); });
+      mixer.done.then(
+        () => {
+          if (!this.seekInProgress) this.releaseSeekCache(runCache);
+        },
+        () => {
+          if (!this.seekInProgress) this.releaseSeekCache(runCache);
+        },
+      );
       return publicResult;
     }
     this.processorResult = result;
@@ -1912,7 +1936,14 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       }
     };
     result.done.then(clearProcessorResult, clearProcessorResult);
-    result.done.then(() => { if (!this.seekInProgress) this.releaseSeekCache(runCache); }, () => { if (!this.seekInProgress) this.releaseSeekCache(runCache); });
+    result.done.then(
+      () => {
+        if (!this.seekInProgress) this.releaseSeekCache(runCache);
+      },
+      () => {
+        if (!this.seekInProgress) this.releaseSeekCache(runCache);
+      },
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 50));
 

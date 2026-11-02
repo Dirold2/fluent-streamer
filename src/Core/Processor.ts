@@ -21,7 +21,7 @@ import {
   setupOutputPipeline,
 } from "./processor/pipeline.js";
 import { createSilenceBuffer, createSilenceMs } from "./processor/silence.js";
-import { redactMediaUrls } from "./processor/logging.js";
+import { LOG_LEVELS, logMessage, type LogLevel, redactMediaUrls } from "./processor/logging.js";
 import { StderrTracker, buildProcessExitError, readStderrStream } from "./processor/stderr.js";
 import { resolveFfmpegPath } from "./processor/ffmpegPath.js";
 
@@ -204,7 +204,8 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
       this.config.abortSignal?.throwIfAborted();
       this.process = runner.spawn(this.config.ffmpegPath, fullArgs);
     } catch (ex) {
-      this.config.logger.error?.(
+      this.log(
+        "error",
         `[${getTimeString()}] [${this.config.loggerTag}] Failed to spawn ffmpeg: ${(ex as Error).message}`,
       );
       this._finalize(ex as Error, "failed");
@@ -288,11 +289,10 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
 
     this.process.onExit((code, signal) => {
       this._pendingProcessExitLog = () => {
-        if (this.config.verbose) {
-          this.config.logger.debug?.(
-            `[${getTimeString()}] [${this.config.loggerTag}] Process exited with code ${code}, signal ${signal}`,
-          );
-        }
+        this.log(
+          "debug",
+          `[${getTimeString()}] [${this.config.loggerTag}] Process exited with code ${code}, signal ${signal}`,
+        );
       };
       this._onProcessExit(code, signal);
     });
@@ -344,12 +344,10 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
     if (this.processState === "running") this.processState = "terminating";
     this._runEmittedEnd = true;
     this.outputStream = null;
-
-    if (this.config.verbose) {
-      this.config.logger.debug?.(
-        `[${getTimeString()}] [${this.config.loggerTag}] Closed processor stream via .close()`,
-      );
-    }
+    this.log(
+      "debug",
+      `[${getTimeString()}] [${this.config.loggerTag}] Closed processor stream via .close()`,
+    );
 
     await this.kill();
     await this.donePromise;
@@ -366,12 +364,10 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
       this.terminationReason ??= "user";
       if (this.processState === "running") this.processState = "terminating";
       this._skipInProgress = true;
-
-      if (this.config.verbose) {
-        this.config.logger.debug?.(
-          `[${getTimeString()}] [${this.config.loggerTag}] Killing process with signal ${signal}`,
-        );
-      }
+      this.log(
+        "debug",
+        `[${getTimeString()}] [${this.config.loggerTag}] Killing process with signal ${signal}`,
+      );
 
       try {
         this.pipelineAbort?.abort();
@@ -390,22 +386,17 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
 
         this.process.kill(signal);
       } catch (error) {
-        if (this.config.verbose) {
-          this.config.logger.debug?.(
-            `[${getTimeString()}] [${this.config.loggerTag}] Kill error: ${error}`,
-          );
-        }
+        this.log("debug", `[${getTimeString()}] [${this.config.loggerTag}] Kill error: ${error}`);
       }
 
       if (this.donePromise) {
         try {
           await this.donePromise;
         } catch (err) {
-          if (this.config.verbose) {
-            this.config.logger.debug?.(
-              `[${getTimeString()}] [${this.config.loggerTag}] donePromise rejected during kill: ${err}`,
-            );
-          }
+          this.log(
+            "debug",
+            `[${getTimeString()}] [${this.config.loggerTag}] donePromise rejected during kill: ${err}`,
+          );
         }
       }
 
@@ -417,11 +408,11 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
   public async skip(): Promise<void> {
     const now = performance.now();
     if (now - this._lastSkipTime < this.SKIP_DEBOUNCE_MS) {
-      if (this.config.verbose) {
-        this.config.logger.warn?.(
-          `[${getTimeString()}] [${this.config.loggerTag}] Skip ignored: too soon after previous skip`,
-        );
-      }
+      this.log(
+        "warn",
+        `[${getTimeString()}] [${this.config.loggerTag}] Skip ignored: too soon after previous skip`,
+      );
+
       return;
     }
 
@@ -430,11 +421,11 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
   }
 
   public destroy(): void {
-    if (this.config.verbose) {
-      this.config.logger?.warn?.(
-        `[${getTimeString()}] [${this.config.loggerTag}] Processor force destroy() called`,
-      );
-    }
+    this.log(
+      "warn",
+      `[${getTimeString()}] [${this.config.loggerTag}] Processor force destroy() called`,
+    );
+
     this.terminationReason = "destroy";
     this._cleanup();
     void this.kill("SIGKILL");
@@ -534,13 +525,17 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
     }
   }
 
-  private _logSpawnDetails(fullArgs: string[]): void {
-    if (!this.config.verbose) return;
+  private log(level: LogLevel, message: string, meta?: Record<string, unknown>): void {
+    logMessage(this.config, level, message, meta);
+  }
 
-    this.config.logger.info?.(
+  private _logSpawnDetails(fullArgs: string[]): void {
+    this.log(
+      LOG_LEVELS.command,
       `[${getTimeString()}] [${this.config.loggerTag}] FFmpeg command: ${this.config.ffmpegPath} ${redactMediaUrls(fullArgs.join(" "))}`,
     );
-    this.config.logger.info?.(
+    this.log(
+      LOG_LEVELS.audioConfig,
       `[${getTimeString()}] [${this.config.loggerTag}] Audio config: volume=${this.currentVolume}, bass=${this.currentBass}dB, treble=${this.currentTreble}dB, mids=${this.currentMids}dB, compressor=${this.currentCompressor}`,
     );
   }
@@ -621,11 +616,11 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
     if (!this.config.timeout) return;
 
     this.timeoutHandle = setTimeout(() => {
-      if (this.config.verbose) {
-        this.config.logger.warn?.(
-          `[${getTimeString()}] [${this.config.loggerTag}] Process timeout after ${this.config.timeout}ms. Terminating.`,
-        );
-      }
+      this.log(
+        "warn",
+        `[${getTimeString()}] [${this.config.loggerTag}] Process timeout after ${this.config.timeout}ms. Terminating.`,
+      );
+
       this.terminationReason = "timeout";
       if (this.processState === "running") this.processState = "terminating";
       this.kill("SIGKILL");
@@ -664,8 +659,9 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
         }, 50);
       }
 
-      if (this.config.debug) {
-        this.config.logger.debug?.(
+      if (this.config.debug || this.config.logger) {
+        this.log(
+          "debug",
           `[${getTimeString()}] [${this.config.loggerTag}] Process exited normally with code ${code}, signal ${signal}`,
         );
       }
@@ -686,8 +682,9 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
         : buildProcessExitError(code, signal, this.stderrTracker.getBuffer());
       const tail = redactMediaUrls(this.stderrTracker.getBuffer()).trim().slice(-4000);
 
-      if (tail && this.config.verbose) {
-        this.config.logger.error?.(
+      if (tail) {
+        this.log(
+          "error",
           `[${getTimeString()}] [${this.config.loggerTag}] Process exited abnormally, stderr tail:\n${tail}`,
         );
       }
@@ -712,18 +709,16 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
 
     try {
       if (this.timeoutHandle) clearTimeout(this.timeoutHandle);
+      const duration = (performance.now() - this._startTime) / 1000;
+      const expectedDuration = this.stderrTracker.getDuration() || 0;
+      const ratio = expectedDuration > 0 ? duration / expectedDuration : 0;
 
-      if (this.config.verbose) {
-        const duration = (performance.now() - this._startTime) / 1000;
-        const expectedDuration = this.stderrTracker.getDuration() || 0;
-        const ratio = expectedDuration > 0 ? duration / expectedDuration : 0;
-
-        this.config.logger.info?.(
-          `[${getTimeString()}] [${this.config.loggerTag}] Playback complete: ` +
-            `actual=${duration.toFixed(1)}s, expected=${expectedDuration.toFixed(1)}s, ` +
-            `ratio=${ratio.toFixed(2)}, chunks=${this._totalChunks}`,
-        );
-      }
+      this.log(
+        LOG_LEVELS.playbackComplete,
+        `[${getTimeString()}] [${this.config.loggerTag}] Playback complete: ` +
+          `actual=${duration.toFixed(1)}s, expected=${expectedDuration.toFixed(1)}s, ` +
+          `ratio=${ratio.toFixed(2)}, chunks=${this._totalChunks}`,
+      );
 
       this._cleanup();
 

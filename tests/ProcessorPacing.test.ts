@@ -195,7 +195,7 @@ function outputHarness(raw: Uint8Array[], sampleRate = 8000, channels = 1) {
       disableThrottling: true,
       verbose: false,
       loggerTag: "test",
-      logger: {},
+      logger: undefined,
     },
     { onError, onPipelineComplete, hasFinished: () => false },
   );
@@ -240,7 +240,7 @@ it("setupOutputPipeline bounds huge stdout DSP work and keeps live bass effectiv
 
     const controls = new AudioEffectController(
       h.audio,
-      { logger: {}, loggerTag: "test" },
+      { logger: undefined, loggerTag: "test" },
       {
         volume: 1,
         bass: 0,

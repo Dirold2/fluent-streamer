@@ -10,7 +10,7 @@ const trackerConfig = {
   enableProgressTracking: false,
   verbose: false,
   loggerTag: "test",
-  logger: console,
+  logger: undefined,
 };
 const encode = (text: string) => new TextEncoder().encode(text);
 

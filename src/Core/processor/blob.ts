@@ -1,3 +1,5 @@
+import { LOG_LEVELS, logMessage } from "./logging.js";
+import type { Logger } from "../../Types/index.js";
 import { resolveBlobUrl as resolveBlobUrlHelper } from "../../Runner/FFmpegRunner.js";
 import { getTimeString } from "../utils.js";
 
@@ -40,7 +42,7 @@ export function validateAudioData(arrayBuffer: ArrayBuffer): boolean {
 
 export async function resolveBlobToStream(
   blobUrl: string,
-  log?: { verbose: boolean; loggerTag: string; logger: { info?: (msg: string) => void } },
+  log?: { verbose: boolean; loggerTag: string; logger?: Logger },
 ): Promise<ReadableStream<Uint8Array>> {
   try {
     const arrayBuffer = await resolveBlobUrlHelper(blobUrl);
@@ -51,8 +53,10 @@ export async function resolveBlobToStream(
       );
     }
 
-    if (log?.verbose) {
-      log.logger.info?.(
+    if (log) {
+      logMessage(
+        log,
+        LOG_LEVELS.blobValidated,
         `[${getTimeString()}] [${log.loggerTag}] ✅ Validated audio data from blob: ${arrayBuffer.byteLength} bytes`,
       );
     }

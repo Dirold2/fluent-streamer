@@ -1,11 +1,22 @@
 import { AudioProcessor } from "../Audio/AudioProcessor.js";
 
 export interface Logger {
-  debug(message: string, meta?: LogMeta): void;
-  info(message: string, meta?: LogMeta): void;
-  log(message: string, meta?: LogMeta): void;
-  warn(message: string, meta?: LogMeta): void;
-  error(message: string | Error, meta?: LogMeta): void;
+  error(message: string, meta?: Record<string, unknown>): void;
+  warn(message: string, meta?: Record<string, unknown>): void;
+  info(message: string, meta?: Record<string, unknown>): void;
+  debug(message: string, meta?: Record<string, unknown>): void;
+  playerError(error: unknown, url?: string): void;
+  child(meta: Record<string, unknown>): Logger;
+  end?(): void | Promise<void>;
+}
+
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+export interface LoggingOptions {
+  /** External object logger; controls its own level filtering. Not closed by the library. */
+  logger?: Logger;
+  /** Enable non-error console fallback when no external logger is supplied. */
+  verbose?: boolean;
 }
 
 export interface LogMeta {
@@ -51,7 +62,7 @@ export type InputSource =
     }
   | { type: "blob"; blobUrl: string; index: number };
 
-export interface ProcessorOptions {
+export interface ProcessorOptions extends LoggingOptions {
   ffmpegPath?: string;
 
   failFast?: boolean;
@@ -61,9 +72,7 @@ export interface ProcessorOptions {
   maxStderrBuffer?: number;
   enableProgressTracking?: boolean;
 
-  logger?: Logger;
   debug?: boolean;
-  verbose?: boolean;
   stdoutlog?: boolean;
   loggerTag?: string;
 

@@ -1,4 +1,4 @@
-import { redactMediaUrls } from "./logging.js";
+import { LOG_LEVELS, logMessage, type LogLevel, redactMediaUrls } from "./logging.js";
 import type { FFmpegProgress } from "../../Types/index.js";
 import { getTimeString } from "../utils.js";
 import type { ProcessorConfig } from "./config.js";
@@ -80,6 +80,10 @@ export class StderrTracker {
     private readonly callbacks: StderrTrackerCallbacks = {},
   ) {}
 
+  private log(level: LogLevel, message: string): void {
+    logMessage(this.config, level, message);
+  }
+
   getBuffer(): string {
     return this.buffer;
   }
@@ -132,11 +136,10 @@ export class StderrTracker {
     const totalSeconds = hours * 3600 + minutes * 60 + seconds + milliseconds / 1000;
     this.duration = Math.max(1, Math.min(3600, totalSeconds));
 
-    if (this.config.verbose) {
-      this.config.logger.debug?.(
-        `[${getTimeString()}] [${this.config.loggerTag}] Detected duration: ${this.duration.toFixed(3)}s`,
-      );
-    }
+    this.log(
+      "debug",
+      `[${getTimeString()}] [${this.config.loggerTag}] Detected duration: ${this.duration.toFixed(3)}s`,
+    );
   }
 
   private detectBitrate(text: string): void {
@@ -158,11 +161,10 @@ export class StderrTracker {
     this.bitrateDetected = true;
     this.callbacks.onBitrateDetected?.(this.bitrate);
 
-    if (this.config.verbose) {
-      this.config.logger.info?.(
-        `[${getTimeString()}] [${this.config.loggerTag}] Bitrate detected: ${this.bitrate} kbps`,
-      );
-    }
+    this.log(
+      LOG_LEVELS.bitrate,
+      `[${getTimeString()}] [${this.config.loggerTag}] Bitrate detected: ${this.bitrate} kbps`,
+    );
   }
 
   private trackProgress(text: string): void {
