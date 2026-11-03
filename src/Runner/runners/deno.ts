@@ -8,6 +8,9 @@ class DenoFFmpegProcess implements FFmpegProcess {
 
   private proc: ReturnType<InstanceType<typeof Deno.Command>["spawn"]>;
   private exitCallbacks: Array<(code: number | null, signal: string | null) => void> = [];
+  private exitResult: { code: number | null; signal: string | null } | null = null;
+  private errorCallbacks: Array<(error: Error) => void> = [];
+  private processError: Error | null = null;
 
   constructor(proc: ReturnType<InstanceType<typeof Deno.Command>["spawn"]>) {
     this.proc = proc;
@@ -16,23 +19,41 @@ class DenoFFmpegProcess implements FFmpegProcess {
     this.stdout = proc.stdout;
     this.stderr = proc.stderr;
 
-    proc.status
-      .then(({ code, signal }) => {
-        for (const cb of this.exitCallbacks) cb(code, signal);
-        this.exitCallbacks = [];
-      })
-      .catch(() => {
-        for (const cb of this.exitCallbacks) cb(null, null);
-        this.exitCallbacks = [];
-      });
+    proc.status.then(
+      ({ code, signal }) => this.notifyExit(code, signal),
+      (reason: unknown) => {
+        const error = reason instanceof Error ? reason : new Error(String(reason));
+        this.processError = error;
+        const callbacks = this.errorCallbacks;
+        this.errorCallbacks = [];
+        for (const cb of callbacks) queueMicrotask(() => cb(error));
+        this.notifyExit(null, null);
+      },
+    );
   }
 
   kill(signal: string): void {
     this.proc.kill(signal as any);
   }
 
+  private notifyExit(code: number | null, signal: string | null): void {
+    if (this.exitResult) return;
+    this.exitResult = { code, signal };
+    const callbacks = this.exitCallbacks;
+    this.exitCallbacks = [];
+    for (const cb of callbacks) queueMicrotask(() => cb(code, signal));
+  }
+
   onExit(cb: (code: number | null, signal: string | null) => void): void {
-    this.exitCallbacks.push(cb);
+    const result = this.exitResult;
+    if (result) queueMicrotask(() => cb(result.code, result.signal));
+    else this.exitCallbacks.push(cb);
+  }
+
+  onError(cb: (error: Error) => void): void {
+    const error = this.processError;
+    if (error) queueMicrotask(() => cb(error));
+    else this.errorCallbacks.push(cb);
   }
 }
 

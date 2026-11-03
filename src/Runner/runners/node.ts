@@ -16,12 +16,6 @@ class NodeFFmpegProcess implements FFmpegProcess {
   private processError: Error | null = null;
 
   constructor(process: ReturnType<typeof spawn>) {
-    process.once("exit", (code, signal) => {
-      this.exitResult = { code, signal };
-    });
-    process.once("error", (err) => {
-      this.processError = err;
-    });
     this.process = process;
     this.pid = process.pid ?? null;
 
@@ -42,14 +36,20 @@ class NodeFFmpegProcess implements FFmpegProcess {
     }) as unknown as ReadableStream<Uint8Array>;
 
     process.on("exit", (code, signal) => {
+      if (this.exitResult) return;
       const sigName = signal ? signal.toString() : null;
-      for (const cb of this.exitCallbacks) cb(code, sigName);
+      this.exitResult = { code, signal: sigName };
+      const callbacks = this.exitCallbacks;
       this.exitCallbacks = [];
+      for (const cb of callbacks) queueMicrotask(() => cb(code, sigName));
     });
 
     process.on("error", (err) => {
-      for (const cb of this.errorCallbacks) cb(err);
+      if (this.processError) return;
+      this.processError = err;
+      const callbacks = this.errorCallbacks;
       this.errorCallbacks = [];
+      for (const cb of callbacks) queueMicrotask(() => cb(err));
     });
   }
 
@@ -58,16 +58,18 @@ class NodeFFmpegProcess implements FFmpegProcess {
   }
 
   onExit(cb: (code: number | null, signal: string | null) => void): void {
-    if (this.exitResult) {
-      queueMicrotask(() => cb(this.exitResult!.code, this.exitResult!.signal));
+    const result = this.exitResult;
+    if (result) {
+      queueMicrotask(() => cb(result.code, result.signal));
       return;
     }
     this.exitCallbacks.push(cb);
   }
 
   onError(cb: (error: Error) => void): void {
-    if (this.processError) {
-      queueMicrotask(() => cb(this.processError!));
+    const error = this.processError;
+    if (error) {
+      queueMicrotask(() => cb(error));
       return;
     }
     this.errorCallbacks.push(cb);

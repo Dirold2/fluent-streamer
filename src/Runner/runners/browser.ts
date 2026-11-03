@@ -29,7 +29,9 @@ class BrowserFFmpegProcess implements FFmpegProcess {
   private stdoutController!: ReadableStreamDefaultController<Uint8Array>;
   private exitCallbacks: Array<(code: number | null, signal: string | null) => void> = [];
   private ffmpegInstance: any = null;
-  private _killCalled = false;
+  private exitResult: { code: number | null; signal: string | null } | null = null;
+  private readonly fetchAbort = new AbortController();
+  private stdinController!: WritableStreamDefaultController;
 
   constructor(args: string[]) {
     this.stdinDone = new Promise((r) => {
@@ -37,11 +39,17 @@ class BrowserFFmpegProcess implements FFmpegProcess {
     });
 
     this.stdin = new WritableStream<Uint8Array>({
+      start: (c) => {
+        this.stdinController = c;
+      },
       write: (chunk) => {
         this.inputChunks.push(chunk.slice());
       },
       close: () => {
         this.stdinResolve();
+      },
+      abort: () => {
+        this.kill("SIGTERM");
       },
     });
 
@@ -58,15 +66,14 @@ class BrowserFFmpegProcess implements FFmpegProcess {
     });
 
     this._run(args).catch((err) => {
+      if (this.exitResult) return;
       const msg = err instanceof Error ? err.message : String(err);
       try {
         this.stderrController.enqueue(new TextEncoder().encode(msg + "\n"));
       } catch {
         /* closed */
       }
-      this._closeStreams();
-      for (const cb of this.exitCallbacks) cb(1, null);
-      this.exitCallbacks = [];
+      this._finish(typeof err?.exitCode === "number" ? err.exitCode : 1, null);
     });
   }
 
@@ -77,14 +84,15 @@ class BrowserFFmpegProcess implements FFmpegProcess {
     );
     if (hasPipeInput) {
       await this.stdinDone;
-      if (this._killCalled) return;
+      if (this.exitResult) return;
     }
 
     const FFmpeg = await getFFmpegCtor();
+    if (this.exitResult) return;
 
     const ffmpeg = new FFmpeg();
     this.ffmpegInstance = ffmpeg;
-    if (this._killCalled) {
+    if (this.exitResult) {
       this._cleanup();
       return;
     }
@@ -99,50 +107,32 @@ class BrowserFFmpegProcess implements FFmpegProcess {
     });
 
     await ffmpeg.load();
-    if (this._killCalled) {
+    if (this.exitResult) {
       this._cleanup();
       return;
     }
 
     // Resolve inputs and build modified args
     const modifiedArgs = await this._resolveArgs(args, ffmpeg);
-    if (this._killCalled) {
+    if (this.exitResult) {
       this._cleanup();
       return;
     }
 
-    // Execute FFmpeg
-    let exitCode = 0;
-    try {
-      await ffmpeg.exec(modifiedArgs);
-    } catch (err) {
-      // Wait for any remaining log callbacks to fire
-      await new Promise((r) => setTimeout(r, 10));
-      this._closeStreams();
-      exitCode = (err as any)?.exitCode ?? 1;
-      for (const cb of this.exitCallbacks) cb(exitCode, null);
-      this.exitCallbacks = [];
-      return;
-    }
+    // WASM execution is batch-only: expose output only after a successful exit.
+    const exitCode: number = await ffmpeg.exec(modifiedArgs);
+    if (this.exitResult) return;
 
-    // Read output file and pump to stdout
     const outFileName = this._getOutputFileName(modifiedArgs, args);
-    if (outFileName) {
-      try {
-        const data: Uint8Array = await ffmpeg.readFile(outFileName);
-        this.stdoutController.enqueue(data);
-      } catch {
-        // Output file not found
-      }
+    if (exitCode === 0 && outFileName) {
+      const data: Uint8Array = await ffmpeg.readFile(outFileName);
+      if (this.exitResult) return;
+      this.stdoutController.enqueue(data);
     }
-    this.stdoutController.close();
 
-    // Let any trailing log messages arrive
+    // Let any trailing log messages arrive before closing stderr.
     await new Promise((r) => setTimeout(r, 10));
-    this.stderrController.close();
-
-    for (const cb of this.exitCallbacks) cb(exitCode, null);
-    this.exitCallbacks = [];
+    this._finish(exitCode, null);
   }
 
   private async _resolveArgs(args: string[], ffmpeg: any): Promise<string[]> {
@@ -152,6 +142,7 @@ class BrowserFFmpegProcess implements FFmpegProcess {
     let urlInputIndex = 0;
 
     for (let i = 0; i < args.length; i++) {
+      if (this.exitResult) return result;
       const arg = args[i]!;
 
       if (arg === "-i" && i + 1 < args.length) {
@@ -161,15 +152,25 @@ class BrowserFFmpegProcess implements FFmpegProcess {
           if (!stdinWritten) {
             const data = this._concatChunks(this.inputChunks);
             await ffmpeg.writeFile(`stdin_${pipeInputIndex}.raw`, data);
+            this.inputChunks = [];
             stdinWritten = true;
           }
           result.push("-i", `stdin_${pipeInputIndex}.raw`);
           pipeInputIndex++;
           i++;
         } else if (next.startsWith("http://") || next.startsWith("https://")) {
-          const res = await fetch(next);
-          if (!res.ok) throw new Error(`HTTP ${res.status} fetching "${next}"`);
-          const buf = new Uint8Array(await res.arrayBuffer());
+          let buf: Uint8Array;
+          try {
+            const res = await fetch(next, { signal: this.fetchAbort.signal });
+            if (!res.ok) {
+              throw new Error(`HTTP ${res.status}`);
+            }
+            buf = new Uint8Array(await res.arrayBuffer());
+          } catch {
+            // Fetch/body errors may contain credentials or signed query parameters.
+            throw new Error("Failed to fetch browser FFmpeg input");
+          }
+          if (this.exitResult) return result;
           const urlFile = `url_${urlInputIndex}`;
           await ffmpeg.writeFile(urlFile, buf);
           result.push("-i", urlFile);
@@ -226,20 +227,45 @@ class BrowserFFmpegProcess implements FFmpegProcess {
   }
 
   private _cleanup(): void {
-    this.ffmpegInstance?.terminate();
+    const ffmpeg = this.ffmpegInstance;
     this.ffmpegInstance = null;
+    try {
+      ffmpeg?.terminate();
+    } catch {
+      /* cleanup must not prevent terminal notification */
+    }
+  }
+
+  private _finish(code: number | null, signal: string | null): void {
+    if (this.exitResult) return;
+    this.exitResult = { code, signal };
+    this.fetchAbort.abort();
+    this.stdinResolve();
+    this.inputChunks = [];
+    this.stdinController.error(new Error("Browser FFmpeg process exited"));
+    this._cleanup();
+    this._closeStreams();
+    const callbacks = this.exitCallbacks;
+    this.exitCallbacks = [];
+    for (const cb of callbacks) this._notifyExit(cb);
+  }
+
+  private _notifyExit(cb: (code: number | null, signal: string | null) => void): void {
+    const { code, signal } = this.exitResult!;
+    try {
+      cb(code, signal);
+    } catch {
+      // A subscriber must not interrupt cleanup or other exit subscribers.
+    }
   }
 
   kill(signal: string): void {
-    this._killCalled = true;
-    this._cleanup();
-    for (const cb of this.exitCallbacks) cb(null, signal);
-    this.exitCallbacks = [];
-    this._closeStreams();
+    this._finish(null, signal);
   }
 
   onExit(cb: (code: number | null, signal: string | null) => void): void {
-    this.exitCallbacks.push(cb);
+    if (this.exitResult) this._notifyExit(cb);
+    else this.exitCallbacks.push(cb);
   }
 }
 

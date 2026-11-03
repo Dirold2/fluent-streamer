@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.1] – 2026-11-03
+
+### Fixed
+- **Bun asynchronous stdin failures:** Await `FileSink.write()`, `flush()` and `end()` so synchronous and asynchronous pipe errors, including `EPIPE`, reject the corresponding Web Stream operation instead of escaping as unhandled rejections. Reject writes after process exit and avoid ending an already retired stdin.
+- **Native runner lifecycle notifications:** Cache and replay exit status to late subscribers in Bun and Deno; make Node, Bun and Deno notification delivery idempotent and reentrant-safe. Forward rejected Bun exit/Deno status promises through `onError`, including late subscriptions, while retaining native Node/Deno stream backpressure and error propagation.
+- **Browser/WASM lifecycle and cancellation:** Make completion idempotent and replay exit status to late subscribers; unblock pending stdin waits on kill/abort, cancel pending HTTP fetches, clear buffered input and terminate FFmpeg workers on completion, failure and cancellation. Honor numeric nonzero `ffmpeg.exec()` results and report output-read failures. HTTP-fetch errors no longer include source URLs. The adapter remains batch-based, not a live streaming runtime.
+
+### Added
+- **Cross-runtime runner regression coverage:** Add Bun stdin/lifecycle, Deno native-stream/status and browser/WASM lifecycle tests. Native Node tests and real Bun playback/seek/crossfade checks pass; Deno was also checked with a real FFmpeg PCM round-trip and late exit subscription. Browser coverage uses mocked WASM bindings, not an actual browser session.
+
+### Changed
+- **Runtime documentation:** Update English and Russian README versions and document the server adapters' stdin/error behavior and the browser's finite-input buffering limitations. Bun mock tests now spy on the existing `Bun.spawn` when run under Bun instead of replacing its non-configurable global.
+
 ## [0.8.0] – 2026-11-03
 
 ### Added

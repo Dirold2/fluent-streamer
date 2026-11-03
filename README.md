@@ -2,7 +2,7 @@
 
 [Перейти на русскую версию](https://github.com/Dirold2/fluent-streamer/tree/main/lang/ru)
 
-_Fluent_ FFmpeg wrapper for TypeScript runtimes, **v0.5.4**  
+_Fluent_ FFmpeg wrapper for TypeScript runtimes, **v0.8.1**
 Offers a fluent, chainable API for media/audio/video processing with FFmpeg, supporting streams, crossfade, audio effects, timeouts, and progress tracking.
 
 - **TypeScript-first**: typed, chainable, and modern
@@ -44,6 +44,15 @@ npm install @ffmpeg/ffmpeg @ffmpeg/core
 
 The browser runner is selected automatically when `window` is defined.
 It buffers the complete input and runs FFmpeg WASM before exposing output; it does not support live/infinite input streams or real-time output.
+
+### Runtime adapter behavior
+
+- **Node.js:** uses native Web Streams over child-process stdin/stdout/stderr. Writes preserve backpressure and asynchronous stdin errors, including `EPIPE`, are propagated through the stream. Process exit and spawn errors are replayed to late subscribers.
+- **Bun:** awaits `FileSink.write()`, `flush()`, and `end()`, so asynchronous pipe errors are delivered as stream errors instead of becoming unhandled rejections. Writes after FFmpeg exits are rejected and exit status is replayed to late subscribers.
+- **Deno:** uses the native `Deno.Command` Web Streams and caches/replays process status for late lifecycle subscribers.
+- **Browser/WASM:** is batch-oriented: stdin and HTTP inputs are buffered in the WASM virtual filesystem, and output is exposed after `ffmpeg.exec()` finishes. It is not a live streaming or backpressure-equivalent replacement for the server runtimes. Worker termination, pending fetch cancellation, stdin cancellation, and non-zero FFmpeg exits are handled explicitly.
+
+Replayable factories are supported by the server runtimes. Browser/WASM still requires finite buffered input and does not provide true incremental replayable decoding.
 
 ### Migrating from 0.4.x
 
