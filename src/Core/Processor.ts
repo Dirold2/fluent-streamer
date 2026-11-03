@@ -23,6 +23,7 @@ import {
 import { createSilenceBuffer, createSilenceMs } from "./processor/silence.js";
 import { LOG_LEVELS, logMessage, type LogLevel, redactMediaUrls } from "./processor/logging.js";
 import { StderrTracker, buildProcessExitError, readStderrStream } from "./processor/stderr.js";
+import { FactoryInput } from "./processor/factory.js";
 import { resolveFfmpegPath } from "./processor/ffmpegPath.js";
 
 type ProcessorState = "idle" | "running" | "terminating" | "finished" | "failed" | "closed";
@@ -36,6 +37,8 @@ type ProcessorEvents = {
 };
 
 export class Processor extends MiniEmitter<ProcessorEvents> {
+  private factoryInput: FactoryInput | null = null;
+  private openingRun = false;
   private process: FFmpegProcess | null = null;
   private outputController: TransformStreamDefaultController<Uint8Array> | null = null;
   private outputStream: ReadableStream<Uint8Array> | null = null;
@@ -172,12 +175,13 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
   }
 
   public reset(): void {
+    if (this.process || this.openingRun) throw new Error("Cannot reset an active FFmpeg run");
     this._resetRunState();
   }
 
   public async run(): Promise<FFmpegRunResultExtended> {
     this.config.abortSignal?.throwIfAborted();
-    if (this.process) throw new Error("FFmpeg process is already running");
+    if (this.process || this.openingRun) throw new Error("FFmpeg process is already running");
     if (this._skipInProgress) throw new Error("Skip operation in progress");
 
     this._resetRunState();
@@ -186,30 +190,50 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
     this._startTime = performance.now();
     this._totalChunks = 0;
 
-    await this._resolveBlobSources();
-    this.config.ffmpegPath = await resolveFfmpegPath(this.config.ffmpegPath);
-
-    if (this.config.abortSignal?.aborted) {
-      const error = new Error("FFmpeg run aborted before spawn");
-      this._finalize(error, "failed");
-      this.donePromise!.catch(() => {});
-      throw error;
-    }
-    const fullArgs = this.getFullArgs();
-    this._executeBeforeSpawnHook(fullArgs);
-    this._logSpawnDetails(fullArgs);
+    this.openingRun = true;
+    const runDone = this.donePromise!;
+    // Startup may fail before the caller can receive the done promise.
+    void runDone.catch(() => {});
+    this._handleAbortSignal();
+    const factorySources = this.config.inputSources.filter((source) => source.type === "factory");
+    const factory = factorySources.length ? new FactoryInput() : null;
+    this.factoryInput = factory;
 
     try {
-      const runner = await ffmpegManager.ensure();
-      this.config.abortSignal?.throwIfAborted();
+      if (factorySources.length) {
+        const otherStreams =
+          this.inputStreams.length +
+          this.config.inputSources.filter(
+            (source) => source.type === "stream" || source.type === "blob",
+          ).length;
+        if (factorySources.length + otherStreams > 1) {
+          throw new Error(
+            "Multiple stream inputs are not supported. Provide additional inputs as file paths or URLs.",
+          );
+        }
+        await factory!.open(factorySources[0]!.source);
+      }
+      await this._resolveBlobSources();
+      const pathPromise = resolveFfmpegPath(this.config.ffmpegPath);
+      this.config.ffmpegPath = factory ? await factory.wait(pathPromise) : await pathPromise;
+
+      if (this.config.abortSignal?.aborted || this.hasFinished || factory?.signal.aborted) {
+        throw new Error("FFmpeg run aborted before spawn");
+      }
+      const fullArgs = this.getFullArgs();
+      this._executeBeforeSpawnHook(fullArgs);
+      this._logSpawnDetails(fullArgs);
+      const runnerPromise = ffmpegManager.ensure();
+      const runner = factory ? await factory.wait(runnerPromise) : await runnerPromise;
+      if (this.config.abortSignal?.aborted || this.hasFinished || factory?.signal.aborted) {
+        throw new Error("FFmpeg run aborted before spawn");
+      }
       this.process = runner.spawn(this.config.ffmpegPath, fullArgs);
     } catch (ex) {
-      this.log(
-        "error",
-        `[${getTimeString()}] [${this.config.loggerTag}] Failed to spawn ffmpeg: ${(ex as Error).message}`,
-      );
       this._finalize(ex as Error, "failed");
       throw ex;
+    } finally {
+      this.openingRun = false;
     }
 
     this.process.onError?.((error) => {
@@ -219,6 +243,19 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
     });
 
     this._handleTimeout();
+
+    if (factory) {
+      if (!this.process.stdin) {
+        const error = new Error("FFmpeg factory input requires standard input");
+        this._finalize(error, "failed");
+        throw error;
+      }
+      void factory.pipeTo(this.process.stdin).catch((error: Error) => {
+        if (this.factoryInput !== factory || this.hasFinished || this.isTerminating) return;
+        this.emit("error", error);
+        this._finalize(error, "failed");
+      });
+    }
 
     pipeInputStreams(this.process, this.inputStreams, {
       onError: (err) => {
@@ -359,6 +396,13 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
   }
 
   public async kill(signal: string = "SIGTERM"): Promise<void> {
+    this.factoryInput?.dispose();
+    if (this.openingRun && !this.process) {
+      this.terminationReason ??= "user";
+      this.isTerminating = true;
+      this._finalize(new Error("FFmpeg run stopped before spawn"), "failed");
+      return;
+    }
     if (this.process && !this.isTerminating) {
       this.isTerminating = true;
       this.terminationReason ??= "user";
@@ -369,35 +413,48 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
         `[${getTimeString()}] [${this.config.loggerTag}] Killing process with signal ${signal}`,
       );
 
+      // Termination must not depend on a downstream reader consuming output or
+      // on cancellation settling. A transform may already be closed/errored.
+      const process = this.process;
       try {
-        this.pipelineAbort?.abort();
-        this.outputController?.error(new Error("Playback stopped"));
-        if (this.throttledOutput && !this.throttledOutput.readable.locked) {
-          try {
-            await this.throttledOutput.readable.cancel();
-          } catch {}
-        }
-
-        if (this.outputStream && !this.outputStream.locked) {
-          try {
-            await this.outputStream.cancel();
-          } catch {}
-        }
-
-        this.process.kill(signal);
+        process.kill(signal);
       } catch (error) {
         this.log("debug", `[${getTimeString()}] [${this.config.loggerTag}] Kill error: ${error}`);
+      } finally {
+        try {
+          this.pipelineAbort?.abort();
+        } catch {}
+        try {
+          this.outputController?.error(new Error("Playback stopped"));
+        } catch {}
+        if (this.throttledOutput && !this.throttledOutput.readable.locked) {
+          void this.throttledOutput.readable.cancel().catch(() => {});
+        }
+        if (this.outputStream && !this.outputStream.locked) {
+          void this.outputStream.cancel().catch(() => {});
+        }
       }
 
-      if (this.donePromise) {
-        try {
-          await this.donePromise;
-        } catch (err) {
-          this.log(
-            "debug",
-            `[${getTimeString()}] [${this.config.loggerTag}] donePromise rejected during kill: ${err}`,
-          );
-        }
+      // FFmpeg handles SIGTERM gracefully and may still block flushing a full
+      // stdout pipe. Escalate independently of output/pipeline completion.
+      const escalation =
+        signal === "SIGKILL"
+          ? undefined
+          : setTimeout(() => {
+              if (this.process !== process || this.hasFinished) return;
+              try {
+                process.kill("SIGKILL");
+              } catch {}
+            }, 200);
+      try {
+        if (this.donePromise) await this.donePromise;
+      } catch (err) {
+        this.log(
+          "debug",
+          `[${getTimeString()}] [${this.config.loggerTag}] donePromise rejected during kill: ${err}`,
+        );
+      } finally {
+        if (escalation) clearTimeout(escalation);
       }
 
       if (signal !== "SIGKILL") await new Promise((resolve) => setTimeout(resolve, 200));
@@ -572,6 +629,8 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
   }
 
   private _resetRunState(): void {
+    this.factoryInput?.dispose();
+    this.factoryInput = null;
     this._runEnded = false;
     this._runEmittedEnd = false;
     this._pendingProcessExitLog = null;
@@ -602,7 +661,10 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
     const { abortSignal } = this.config;
     if (!abortSignal) return;
 
-    const onAbort = () => this.kill("SIGTERM");
+    if (this.abortHandler) abortSignal.removeEventListener("abort", this.abortHandler);
+    const onAbort = () => {
+      void this.kill("SIGTERM");
+    };
 
     this.abortHandler = onAbort;
     if (abortSignal.aborted) {
@@ -642,6 +704,8 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
   }
 
   private _onProcessExit(code: number | null, signal: string | null): void {
+    this.factoryInput?.dispose();
+    this.factoryInput = null;
     if (this.hasFinished) return;
 
     const isUserTermination =
@@ -746,6 +810,8 @@ export class Processor extends MiniEmitter<ProcessorEvents> {
   }
 
   private _cleanup(): void {
+    this.factoryInput?.dispose();
+    this.factoryInput = null;
     if (this.abortHandler) this.config.abortSignal?.removeEventListener("abort", this.abortHandler);
     this.abortHandler = undefined;
     try {

@@ -1,5 +1,5 @@
 import { Processor } from "../../Core/Processor.js";
-import type { ProcessorOptions } from "../../Types/index.js";
+import type { ProcessorOptions, ReplayableInput } from "../../Types/index.js";
 
 import type { DjAnalysis } from "./DjAnalysisCore.js";
 import { runAnalysisWorker } from "./DjAnalysisWorkerClient.js";
@@ -42,7 +42,7 @@ export async function analyzePcmAsync(
 
 /** Decode through the runtime-selected Processor, never a Node-specific subprocess. */
 export async function analyzeTrack(
-  source: string,
+  source: ReplayableInput,
   options: DjAnalysisOptions = {},
 ): Promise<DjAnalysis> {
   options.signal?.throwIfAborted();
@@ -64,7 +64,7 @@ export async function analyzeTrack(
     autoDrainOutput: false,
     disableThrottling: true,
     ffmpegLogLevel: "error",
-    extraGlobalArgs: httpSeekArgs(startSeconds, source),
+    extraGlobalArgs: typeof source === "string" ? httpSeekArgs(startSeconds, source) : [],
     logger: {
       debug() {},
       info() {},
@@ -77,10 +77,14 @@ export async function analyzeTrack(
     },
   });
   // Processor's URL source adds HTTP reconnect flags, which local inputs reject.
-  const http = /^https?:\/\//i.test(source);
-  if (http) processor.setInputSources([{ type: "url", url: source, index: 0 }]);
+  const factory = typeof source !== "string";
+  const http = typeof source === "string" && /^https?:\/\//i.test(source);
+  if (factory) processor.setInputSources([{ type: "factory", source, index: 0 }]);
+  else if (http) processor.setInputSources([{ type: "url", url: source, index: 0 }]);
+  const seekArgs = startSeconds > 0 ? ["-ss", String(startSeconds)] : [];
   processor.setArgs([
-    ...(http ? [] : [...(startSeconds > 0 ? ["-ss", String(startSeconds)] : []), "-i", source]),
+    // Pipes cannot seek: decode/discard from a fresh stream to reach the window.
+    ...(factory ? ["-i", "pipe:0", ...seekArgs] : http ? [] : [...seekArgs, "-i", source]),
     "-t",
     "90",
     "-vn",

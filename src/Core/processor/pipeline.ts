@@ -190,8 +190,10 @@ export function setupOutputPipeline(
   }
 
   const pipelinePromise = splitPcmStream(process.stdout, sampleRate, channels)
-    .pipeThrough(audioProcessor)
-    .pipeThrough(throttledOutput)
+    // Abort every link: aborting only the final pipe can wait forever for an
+    // upstream transform write whose readable side is backpressured.
+    .pipeThrough(audioProcessor, { signal: callbacks.signal })
+    .pipeThrough(throttledOutput, { signal: callbacks.signal })
     .pipeTo(outputStream.writable, { signal: callbacks.signal })
     .then(() => {
       callbacks.onPipelineComplete();

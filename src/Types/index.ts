@@ -52,7 +52,14 @@ export interface AudioProcessingOptions {
   };
 }
 
+export interface ReplayableStreamSource {
+  open(signal: AbortSignal): ReadableStream<Uint8Array> | Promise<ReadableStream<Uint8Array>>;
+}
+
+export type ReplayableInput = string | ReplayableStreamSource;
+
 export type InputSource =
+  | { type: "factory"; source: ReplayableStreamSource; index: number }
   | { type: "stream"; stream: ReadableStream<Uint8Array>; index: number }
   | {
       type: "url";
@@ -106,7 +113,7 @@ export interface ProcessorOptions extends LoggingOptions {
 
   tailSilenceMs?: number;
   useAudioProcessor?: boolean;
-  audioProcessorOptions?: AudioProcessingOptions;
+  audioProcessorOptions?: Partial<AudioProcessingOptions>;
   autoDrainOutput?: boolean;
   /** Opt-in background cache of a single HTTP input for repeated seek. */
   seekCache?: boolean;
@@ -189,7 +196,11 @@ export interface FFmpegRunResultExtended extends FFmpegRunResult {
    * reject. Operations do not cancel or supersede an in-progress transition.
    */
   seek?: (position: number | string) => Promise<FFmpegRunResultExtended>;
-  crossfade?: (url: string, time?: number, options?: LiveCrossfadeOptions) => Promise<void>;
+  crossfade?: (
+    url: ReplayableInput,
+    time?: number,
+    options?: LiveCrossfadeOptions,
+  ) => Promise<void>;
   passthrough: ReadableStream<Uint8Array>;
   close: () => Promise<void> | void;
   audioProcessor?: AudioProcessor;

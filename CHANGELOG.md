@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0] – 2026-11-03
+
+### Added
+- **Replayable streaming sources:** Export `ReplayableStreamSource` with `open(signal: AbortSignal): ReadableStream<Uint8Array> | Promise<ReadableStream<Uint8Array>>` and `ReplayableInput`. Accept factories in `.input()`, live crossfade, prepared Automix and DJ analysis without provider-specific dependencies. Registration is lazy; each decoder or analyzer opens an independent stream with backpressure, without downloading the full file into memory or a temporary file. Existing file, URL and one-shot stream inputs retain their behavior.
+- **Factory seek and transition coverage:** Repeated seeks open fresh streams and use output-side `-ss` after `-i pipe:0`, decoding and discarding from the beginning rather than assuming stdin supports range seeking. Factories work as outgoing and incoming mixed-playback sources; activation reuses the prepared decoder. Analysis and transitions can open several independent downloads. Documented an abort-aware async-generator adapter and the performance limitations of reread-based seeking.
+
+### Fixed
+- **Factory resource ownership and cancellation:** Give each opening its own abort signal; abort before reader cancellation and release its lock on stop, startup failure, source failure, stdin closure and process exit. Pending openings reject promptly on cancellation, and late streams are disposed without affecting other openings of the same factory. Stopping a mixed session also cancels pending seek/crossfade startup; prepared-transition cancellation retires only its own resources.
+- **Backpressured decoder shutdown:** Propagate cancellation through the output pipeline and terminate FFmpeg independently of blocked output cleanup, with bounded escalation for a process stuck flushing stdout. Use Node's native writable Web Stream adapter to handle stdin backpressure and avoid unhandled `EPIPE` events during decoder retirement.
+- **Partial audio settings:** Accept `Partial<AudioProcessingOptions>` in `AudioProcessor` and `ProcessorOptions.audioProcessorOptions`, applying defaults for omitted effect settings. Corrected test helper types for typed-array buffers, factory diagnostics and synchronous/asynchronous stop results.
+
+### Changed
+- **Faster offline regression tests:** Compare PCM with native byte equality, aggregate per-frame stability extrema instead of constructing matchers in DSP loops, and shorten redundant live-EQ settling windows and fixtures while retaining real FFmpeg coverage and all scenarios. The local full run completed in 19.69 s with 901 passing tests and two expected failures; timings depend on the environment. No test timeouts were increased.
+
 ## [0.7.5] – 2026-11-02
 
 ### Changed

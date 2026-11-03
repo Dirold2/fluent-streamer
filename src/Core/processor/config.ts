@@ -51,14 +51,15 @@ export function buildProcessorConfig(options: ProcessorOptions = {}): ProcessorC
     ffmpegLogLevel: options.ffmpegLogLevel ?? "info",
     useAudioProcessor:
       typeof options.useAudioProcessor === "boolean" ? options.useAudioProcessor : false,
-    inputSources: [],
-    audioProcessorOptions: options.audioProcessorOptions ?? {
-      volume: 1,
-      bass: 0,
-      treble: 0,
-      mids: 0,
-      compressor: false,
-      normalize: false,
+    inputSources: [...(options.inputSources ?? [])],
+    audioProcessorOptions: {
+      ...options.audioProcessorOptions,
+      volume: options.audioProcessorOptions?.volume ?? 1,
+      bass: options.audioProcessorOptions?.bass ?? 0,
+      treble: options.audioProcessorOptions?.treble ?? 0,
+      mids: options.audioProcessorOptions?.mids ?? 0,
+      compressor: options.audioProcessorOptions?.compressor ?? false,
+      normalize: options.audioProcessorOptions?.normalize ?? false,
     },
     autoDrainOutput: options.autoDrainOutput ?? true,
   };

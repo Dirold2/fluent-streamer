@@ -48,9 +48,14 @@ class BoundedPCM {
   }
 
   async settledRms() {
-    // Far longer than the 50 ms ramp and the pipeline's bounded queued PCM.
-    await this.consume(4);
-    return this.consume(0.5);
+    // splitPcmStream bounds pre-DSP blocks to 20 ms; the default transform queues
+    // hold only a few processed blocks, and PlaybackMixer adds at most 20 ms of
+    // prebuffer plus one <=1024-frame output block. Raw FFmpeg stdout buffering
+    // is before DSP, so it cannot retain stale EQ. Allow 500 ms for these queues,
+    // the 50 ms ramp, and filter settling, while retaining per-block I/O yields.
+    await this.consume(0.5);
+    // 12 complete cycles of the slowest (60 Hz) tone; integral at 1 and 12 kHz too.
+    return this.consume(0.2);
   }
 }
 
@@ -84,7 +89,9 @@ beforeAll(() => {
         "-f",
         "lavfi",
         "-i",
-        `sine=frequency=${frequencies[band]}:sample_rate=${rate}:duration=180`,
+        // Long enough for both measurements and the 8 s crossfade plus drains;
+        // bounded backpressure keeps live setters well ahead of the fixture EOF.
+        `sine=frequency=${frequencies[band]}:sample_rate=${rate}:duration=60`,
         "-af",
         "volume=0.08",
         "-ac",

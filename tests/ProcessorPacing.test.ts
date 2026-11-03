@@ -256,7 +256,7 @@ it("setupOutputPipeline bounds huge stdout DSP work and keeps live bass effectiv
       for (let i = 0; i < bytes.length; i += 2) sum += samples.getInt16(i, true) ** 2;
       return Math.sqrt(sum / (bytes.length / 2));
     };
-    let next = baseline;
+    let next: Uint8Array = baseline;
     // Drain only fixed stage buffers plus the effect's 50 ms ramp, not the track.
     for (let i = 0; i < 12; i++) next = (await reader.read()).value!;
     expect(rms(next)).toBeGreaterThan(rms(baseline) * 1.5);

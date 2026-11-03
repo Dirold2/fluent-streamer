@@ -125,12 +125,7 @@ export class AudioProcessor extends MiniEmitter<AudioProcessorEvents> {
     return this.isWritableEnded;
   }
 
-  constructor(
-    options: AudioProcessingOptions & {
-      sampleRate?: number;
-      channels?: number;
-    },
-  ) {
+  constructor(options: Partial<AudioProcessingOptions> = {}) {
     super();
 
     this.sampleRate = options.sampleRate ?? 48000;

@@ -12,6 +12,8 @@ import type {
   CrossfadeAudioOptions,
   LiveCrossfadeOptions,
   InputSource,
+  ReplayableInput,
+  ReplayableStreamSource,
   FFmpegProgress,
 } from "../Types/index.js";
 import { PlaybackMixer, validateLiveCrossfadeOptions } from "../Audio/PlaybackMixer.js";
@@ -46,6 +48,31 @@ function withoutHttpInputOptions(args: string[]): string[] {
   return args.filter(
     (arg, i) => i >= before || (!httpInputOptions.has(arg) && !httpInputOptions.has(args[i - 1]!)),
   );
+}
+
+function isFactory(value: unknown): value is ReplayableStreamSource {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    typeof (value as ReplayableStreamSource).open === "function"
+  );
+}
+
+function isReplayable(value: unknown): value is ReplayableInput {
+  return (
+    isFactory(value) ||
+    (typeof value === "string" &&
+      !!value.trim() &&
+      !/^(pipe:|blob:)/.test(value) &&
+      value !== "-" &&
+      value !== "/dev/stdin")
+  );
+}
+
+/** Pipe seeking decodes from the beginning instead of pretending stdin supports ranges. */
+function positionInput(args: string[], source: ReplayableInput, seconds: number): void {
+  const index = args.indexOf("-i");
+  args.splice(index + (isFactory(source) ? 2 : 0), 0, "-ss", String(seconds));
 }
 
 export interface PrepareAutomixOptions {
@@ -124,6 +151,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
   };
   private crossfadeInProgress = false;
   private automixCancellation?: () => void;
+  private pendingDecoder?: AbortController;
   private lastRunOptions: Partial<ProcessorOptions> = {};
   private seekCache?: SeekSourceCache;
   private seekCacheUrl?: string;
@@ -224,6 +252,33 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       return { ...HUMANITY_HEADERS };
     }
     return { ...this.headers };
+  }
+
+  private replayableInput(): ReplayableInput {
+    const factory = this.inputSources.find((source) => source.type === "factory");
+    if (factory?.type === "factory") return factory.source;
+    const url = this.inputSources.find((source) => source.type === "url");
+    return url?.type === "url" ? url.url : this.args[this.args.indexOf("-i") + 1]!;
+  }
+
+  private decoderStartupSignal(): { controller: AbortController; detach: () => void } {
+    const controller = new AbortController();
+    const signal = this.lastRunOptions.abortSignal ?? this.options.abortSignal;
+    const abort = () => controller.abort(new Error("Playback stopped during decoder startup"));
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    this.pendingDecoder = controller;
+    return {
+      controller,
+      detach: () => {
+        signal?.removeEventListener("abort", abort);
+        if (this.pendingDecoder === controller) this.pendingDecoder = undefined;
+      },
+    };
+  }
+
+  private transitionSources(source: ReplayableInput): InputSource[] {
+    return isFactory(source) ? [{ type: "factory", source, index: 0 }] : [];
   }
 
   private createProcessor(extraOpts: Partial<ProcessorOptions> = {}): Processor {
@@ -342,6 +397,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
   public input(
     input:
       | string
+      | ReplayableStreamSource
       | ReadableStream<Uint8Array>
       | { on: (...args: any[]) => any; pipe: (...args: any[]) => any }
       | undefined
@@ -357,6 +413,21 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       throw new FluentStreamValidationError(
         "input(): input must be non-null string (path/URL/blob) or Readable stream",
       );
+    }
+
+    if (isFactory(input)) {
+      if (opts?.pipeIndex !== undefined && opts.pipeIndex !== 0)
+        throw new FluentStreamValidationError("input(): factory requires stdin (pipe:0)");
+      if (
+        this.inputStreams.length ||
+        this.inputSources.some((s) => s.type === "factory" || s.type === "blob")
+      )
+        throw new FluentStreamValidationError(
+          "input(): only one stdin source is supported per decoder",
+        );
+      this.inputSources.push({ type: "factory", source: input, index: 0 });
+      this.args.push("-i", "pipe:0");
+      return this;
     }
 
     if (typeof input === "string") {
@@ -467,6 +538,10 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     }
 
     if (isReadableStream) {
+      if (this.inputSources.some((s) => s.type === "factory"))
+        throw new FluentStreamValidationError(
+          "input(): only one stdin source is supported per decoder",
+        );
       let streamIdx: number;
 
       if (opts?.pipeIndex != null && Number.isFinite(opts.pipeIndex) && opts.pipeIndex >= 0) {
@@ -688,7 +763,12 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     if (firstInput === -1) {
       this.args.unshift("-ss", String(position));
     } else {
-      this.args.splice(firstInput, 0, "-ss", String(position));
+      this.args.splice(
+        firstInput + (isFactory(this.replayableInput()) ? 2 : 0),
+        0,
+        "-ss",
+        String(position),
+      );
     }
 
     return this;
@@ -713,15 +793,17 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     const urls = this.inputSources.filter((source) => source.type === "url");
     if (
       this.inputStreams.length ||
-      this.inputSources.some((source) => source.type !== "url") ||
+      this.inputSources.some((source) => source.type !== "url" && source.type !== "factory") ||
       inputs.length + urls.length !== 1 ||
-      inputs.some((input) => /^(pipe:|\/dev\/stdin|-\s*$)/.test(input)) ||
+      inputs.some(
+        (input) => /^(pipe:|\/dev\/stdin|-\s*$)/.test(input) && !isFactory(this.replayableInput()),
+      ) ||
       this.complexFilters.length ||
       this.args.includes("-filter_complex") ||
       this.args[this.args.length - 1] !== "pipe:1"
     ) {
       throw new FluentStreamValidationError(
-        "seek: requires a single replayable file/URL input and a single stdout output; stream/blob inputs and complex filters are unsupported",
+        "seek: requires a single replayable file/URL/factory input and a single stdout output; stream/blob inputs and complex filters are unsupported",
       );
     }
     const globalOptions = this.lastRunOptions.extraGlobalArgs ?? this.options.extraGlobalArgs ?? [];
@@ -780,8 +862,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       } else if (urls.length) {
         options.extraGlobalArgs = [...cleanGlobal, "-ss", String(seconds)];
       } else {
-        const index = this.args.indexOf("-i");
-        this.args.splice(index, 0, "-ss", String(seconds));
+        positionInput(this.args, this.replayableInput(), seconds);
         options.extraGlobalArgs = cleanGlobal;
       }
       abortSignal?.throwIfAborted();
@@ -808,6 +889,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     abortSignal?.throwIfAborted();
     const release = session.mixer.hold();
     this.seekInProgress = true;
+    const startupSignal = this.decoderStartupSignal();
     let next: FFmpegRunResultExtended | undefined;
     let mixerOwnsNext = false;
     let unmirrorEq: (() => void) | undefined;
@@ -839,7 +921,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         else args[args.indexOf("-i") + 1] = cachedPath;
       }
       if (!urls.length || cachedPath) {
-        args.splice(args.indexOf("-i"), 0, "-ss", String(seconds));
+        positionInput(args, this.replayableInput(), seconds);
       }
       const globalArgs = this.lastRunOptions.extraGlobalArgs ?? this.options.extraGlobalArgs ?? [];
       const cleanGlobal = globalArgs.filter(
@@ -847,6 +929,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       );
       const processor = this.createProcessor({
         ...this.lastRunOptions,
+        abortSignal: startupSignal.controller.signal,
         extraGlobalArgs: cachedPath
           ? withoutHttpInputOptions(cleanGlobal)
           : urls.length
@@ -889,8 +972,13 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         await next.stop("SIGKILL");
         await next.done.catch(() => {});
       }
+      if (startupSignal.controller.signal.aborted)
+        throw new Error("Playback stopped during decoder startup");
       throw error;
     } finally {
+      if (this.pendingDecoder === startupSignal.controller) this.pendingDecoder = undefined;
+      if (next) void next.done.then(startupSignal.detach, startupSignal.detach);
+      else startupSignal.detach();
       unmirrorEq?.();
       release();
       this.seekInProgress = false;
@@ -967,7 +1055,11 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
   }
 
   /** Transition immediately to another file/URL without replacing the PCM output. */
-  public async crossfade(url: string, time = 3, options: LiveCrossfadeOptions = {}): Promise<void> {
+  public async crossfade(
+    url: ReplayableInput,
+    time = 3,
+    options: LiveCrossfadeOptions = {},
+  ): Promise<void> {
     const session = this.playback;
     if (!session)
       throw new FluentStreamValidationError("crossfade: run with enableCrossfade: true first");
@@ -975,8 +1067,8 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       throw new FluentStreamValidationError("crossfade: seek is in progress");
     if (this.crossfadeInProgress)
       throw new FluentStreamValidationError("crossfade: transition already active");
-    if (typeof url !== "string" || !url.trim() || /^(pipe:|blob:)/.test(url) || url === "-")
-      throw new FluentStreamValidationError("crossfade: expected a replayable file/URL");
+    if (!isReplayable(url))
+      throw new FluentStreamValidationError("crossfade: expected a replayable file/URL/factory");
     if (!Number.isFinite(time) || time < 0 || time > 3600)
       throw new FluentStreamValidationError("crossfade: time must be 0..3600 seconds");
     validateLiveCrossfadeOptions(options);
@@ -984,6 +1076,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     const release = session.mixer.hold();
     this.crossfadeInProgress = true;
     const started = performance.now();
+    const startupSignal = this.decoderStartupSignal();
     let next: FFmpegRunResultExtended | undefined;
     let mixerOwnsNext = false;
     let unmirrorEq: (() => void) | undefined;
@@ -1000,19 +1093,21 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       }
       const args = [...this.args];
       const index = args.indexOf("-i");
-      args[index + 1] = url;
+      args[index + 1] = isFactory(url) ? "pipe:0" : url;
       const clean = args.filter((arg, i) => arg !== "-ss" && args[i - 1] !== "-ss");
-      if (options.startTime !== undefined)
-        clean.splice(clean.indexOf("-i"), 0, "-ss", String(options.startTime));
+      if (options.startTime !== undefined) positionInput(clean, url, options.startTime);
       const globalArgs = this.lastRunOptions.extraGlobalArgs ?? this.options.extraGlobalArgs ?? [];
       const processor = this.createProcessor({
         ...this.lastRunOptions,
+        abortSignal: startupSignal.controller.signal,
         extraGlobalArgs: globalArgs.filter(
           (arg, i) => arg !== "-ss" && globalArgs[i - 1] !== "-ss",
         ),
         autoDrainOutput: false,
         audioProcessorOptions: { ...this.audio.buildOptions(), normalize: ap?.normalize ?? false },
       });
+      processor.setInputStreams([]);
+      processor.setInputSources(this.transitionSources(url));
       processor.setArgs(clean);
       next = await processor.run();
       const incoming = next;
@@ -1039,6 +1134,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         session.active = incoming;
         this.audio.attachResult(incoming);
         this.args = clean;
+        this.inputSources = this.transitionSources(url);
         session.originMs = (options.startTime ?? 0) * 1000;
         session.tempoTimeline = undefined;
         this.logCrossfade("completed", time, started);
@@ -1049,8 +1145,13 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         await next.stop("SIGKILL");
         await next.done.catch(() => {});
       }
+      if (startupSignal.controller.signal.aborted)
+        throw new Error("Playback stopped during decoder startup");
       throw error;
     } finally {
+      if (this.pendingDecoder === startupSignal.controller) this.pendingDecoder = undefined;
+      if (next) void next.done.then(startupSignal.detach, startupSignal.detach);
+      else startupSignal.detach();
       unmirrorEq?.();
       release();
       this.crossfadeInProgress = false;
@@ -1079,7 +1180,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
   }
 
   public async prepareAutomix(
-    url: string,
+    url: ReplayableInput,
     options: PrepareAutomixOptions,
   ): Promise<PreparedAutomix> {
     const session = this.playback;
@@ -1087,14 +1188,10 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       throw new FluentStreamValidationError("prepareAutomix: run with enableCrossfade: true first");
     if (this.seekInProgress || this.crossfadeInProgress)
       throw new FluentStreamValidationError("prepareAutomix: seek or transition already active");
-    if (
-      typeof url !== "string" ||
-      !url.trim() ||
-      /^(pipe:|blob:)/.test(url) ||
-      url === "-" ||
-      url === "/dev/stdin"
-    )
-      throw new FluentStreamValidationError("prepareAutomix: expected a replayable file/URL");
+    if (!isReplayable(url))
+      throw new FluentStreamValidationError(
+        "prepareAutomix: expected a replayable file/URL/factory",
+      );
     options = { ...options };
     if (
       options.transitionMode !== undefined &&
@@ -1208,7 +1305,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         this.audio.setKaraoke(ap.karaoke);
       }
       const clean = args.filter((arg, i) => arg !== "-ss" && args[i - 1] !== "-ss");
-      clean[clean.indexOf("-i") + 1] = url;
+      clean[clean.indexOf("-i") + 1] = isFactory(url) ? "pipe:0" : url;
       const processor = this.createProcessor({
         ...this.lastRunOptions,
         extraGlobalArgs: globalArgs.filter(
@@ -1218,6 +1315,9 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         abortSignal: controller.signal,
         audioProcessorOptions: { ...this.audio.buildOptions(), normalize: ap?.normalize ?? false },
       });
+      processor.setInputStreams([]);
+      processor.setInputSources(this.transitionSources(url));
+      const outgoingSource = this.replayableInput();
       prepareOutputCancellation = (reason) => processor.prepareOutputCancellation(reason);
       const analysisOptions = {
         ffmpegPath: this.lastRunOptions.ffmpegPath ?? this.options.ffmpegPath,
@@ -1239,8 +1339,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
           ? [options.outgoingAnalysis ?? emptyAnalysis, options.incomingAnalysis ?? emptyAnalysis]
           : await Promise.race([
               Promise.all([
-                options.outgoingAnalysis ??
-                  analyzeTrack(args[args.indexOf("-i") + 1]!, analysisOptions),
+                options.outgoingAnalysis ?? analyzeTrack(outgoingSource, analysisOptions),
                 options.incomingAnalysis ?? analyzeTrack(url, analysisOptions),
               ]),
               aborted,
@@ -1273,7 +1372,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         lateWindowStartMs = windowStartMs;
         if (windowStartMs + 8000 < outgoingDurationMs) {
           try {
-            lateAnalysis = await analyzeTrack(args[args.indexOf("-i") + 1]!, {
+            lateAnalysis = await analyzeTrack(outgoingSource, {
               ...analysisOptions,
               startSeconds: windowStartMs / 1000,
             });
@@ -1430,7 +1529,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       const frozenPlan = Object.freeze({ ...plan });
       // A zero seek can discard probed HTTP audio when the server ignores ranges.
       // Reopening the input already starts at cue zero; only seek for a nonzero cue.
-      if (plan.cueMs > 0) clean.splice(clean.indexOf("-i"), 0, "-ss", String(plan.cueMs / 1000));
+      if (plan.cueMs > 0) positionInput(clean, url, plan.cueMs / 1000);
       if (options.enableTempoMatch && Math.abs(tempoFactor - 1) > 1e-12) {
         const tempoFilter = buildReturningAtempo(tempoFactor, plan.seconds);
         const filterIndex = clean.lastIndexOf("-af");
@@ -1547,8 +1646,9 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
             // Tempo commands belong only to this decoder. Future seeks/replays
             // use the original filter chain at native speed, not a second ramp.
             this.args = args.filter((arg, i) => arg !== "-ss" && args[i - 1] !== "-ss");
-            this.args[this.args.indexOf("-i") + 1] = url;
-            this.args.splice(this.args.indexOf("-i"), 0, "-ss", String(plan.cueMs / 1000));
+            this.args[this.args.indexOf("-i") + 1] = isFactory(url) ? "pipe:0" : url;
+            this.inputSources = this.transitionSources(url);
+            positionInput(this.args, url, plan.cueMs / 1000);
             session.originMs = plan.cueMs;
             session.tempoTimeline =
               options.enableTempoMatch && Math.abs(tempoFactor - 1) > 1e-12
@@ -1577,7 +1677,7 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
   private validateMixedPlayback(): void {
     const value = (flag: string) => this.args[this.args.lastIndexOf(flag) + 1];
     if (
-      this.inputSources.length ||
+      this.inputSources.some((s) => s.type !== "factory") ||
       this.inputStreams.length ||
       this.complexFilters.length ||
       this.args.includes("-filter_complex") ||
@@ -1589,10 +1689,13 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       (value("-c:a") !== "pcm_s16le" && value("-acodec") !== "pcm_s16le")
     )
       throw new FluentStreamValidationError(
-        "enableCrossfade requires one .input(file/URL), pcm_s16le, -f s16le and one stdout output; no complex filters",
+        "enableCrossfade requires one .input(file/URL/factory), pcm_s16le, -f s16le and one stdout output; no complex filters",
       );
     const source = this.args[this.args.indexOf("-i") + 1]!;
-    if (/^(pipe:|blob:)/.test(source) || source === "-" || source === "/dev/stdin")
+    if (
+      !isFactory(this.replayableInput()) &&
+      (/^(pipe:|blob:)/.test(source) || source === "-" || source === "/dev/stdin")
+    )
       throw new FluentStreamValidationError("enableCrossfade: input must be a replayable file/URL");
     const ap = this.options.audioProcessorOptions;
     if (
@@ -1669,6 +1772,10 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
       throw new FluentStreamValidationError("inputBlob(): blobUrl must be a non-empty string");
     }
 
+    if (this.inputSources.some((source) => source.type === "factory"))
+      throw new FluentStreamValidationError(
+        "input(): only one stdin source is supported per decoder",
+      );
     const inputIndex = index ?? this.inputSources.length;
     this.inputSources.push({ type: "blob", blobUrl, index: inputIndex });
     this.args.push("-i", `pipe:${inputIndex}`);
@@ -1793,7 +1900,16 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
     }
     this.lastRunOptions = { ...extraOpts };
     const mixed = extraOpts.enableCrossfade ?? this.options.enableCrossfade ?? false;
-    if (mixed) this.validateMixedPlayback();
+    if (mixed) {
+      // Mixed sessions retain their replayable input in args for future seeks
+      // and transitions. URL descriptors otherwise inject a second -i upstream.
+      const urls = this.inputSources.filter((source) => source.type === "url");
+      if (urls.length === 1 && this.inputSources.length === 1 && !this.args.includes("-i")) {
+        this.args.unshift("-i", urls[0]!.url);
+        this.inputSources = [];
+      }
+      this.validateMixedPlayback();
+    }
     const processor = this.createProcessor(
       mixed ? { ...extraOpts, autoDrainOutput: false } : extraOpts,
     );
@@ -1840,11 +1956,17 @@ export default class FluentStream extends MiniEmitter<FluentStreamEvents> {
         passthrough: mixer.output,
         done: mixer.done,
         stop: () => {
-          if (this.playback?.mixer === mixer) this.automixCancellation?.();
+          if (this.playback?.mixer === mixer) {
+            this.pendingDecoder?.abort();
+            this.automixCancellation?.();
+          }
           return mixer.stop();
         },
         close: () => {
-          if (this.playback?.mixer === mixer) this.automixCancellation?.();
+          if (this.playback?.mixer === mixer) {
+            this.pendingDecoder?.abort();
+            this.automixCancellation?.();
+          }
           return mixer.stop();
         },
         seek: (position) => {

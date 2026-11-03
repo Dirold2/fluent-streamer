@@ -1,5 +1,5 @@
 import { spawn } from "child_process";
-import { Readable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import type { FFmpegRunner, FFmpegProcess } from "../../Types/core.js";
 
 class NodeFFmpegProcess implements FFmpegProcess {
@@ -25,25 +25,9 @@ class NodeFFmpegProcess implements FFmpegProcess {
     this.process = process;
     this.pid = process.pid ?? null;
 
-    this.stdin = new WritableStream({
-      write: (chunk) => {
-        return new Promise<void>((resolve, reject) => {
-          const canContinue = process.stdin!.write(chunk, (err) => {
-            if (err) reject(err);
-            else resolve();
-          });
-          if (!canContinue) {
-            process.stdin!.once("drain", () => resolve());
-          }
-        });
-      },
-      close: () => {
-        return new Promise<void>((resolve) => process.stdin!.end(resolve));
-      },
-      abort: (reason) => {
-        process.stdin!.destroy(reason as Error | undefined);
-      },
-    });
+    // The native adapter observes error/close as well as write callbacks. A
+    // callback alone does not consume Node's separately emitted EPIPE event.
+    this.stdin = Writable.toWeb(process.stdin!) as unknown as WritableStream<Uint8Array>;
 
     const strategy = {
       highWaterMark: 64 * 1024,

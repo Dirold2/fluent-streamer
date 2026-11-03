@@ -120,21 +120,34 @@ for (const Effect of [BassEffect, MidsEffect, TrebleEffect]) {
       "stays bounded during rapid boost/cut automation at %i Hz",
       (rate) => {
         const effect = new Effect();
+        let allFinite = true;
+        let peak = 0;
+        let symmetryError = 0;
+        let maxPoleProduct = 0;
+        let minPositiveMargin = Infinity;
+        let minNegativeMargin = Infinity;
         for (let i = 0; i < rate / 2; i++) {
           if (i % 173 === 0) effect.set(i % 346 === 0 ? 20 : -20, 50);
           const input = Math.sin(i * 0.13) * 0.05;
           const [l, r] = effect.processStereo(input, -input, 2, rate);
-          expect(Number.isFinite(l)).toBe(true);
-          expect(Math.abs(l)).toBeLessThan(2);
-          expect(r + l).toBe(0);
+          allFinite &&= Number.isFinite(l);
+          peak = Math.max(peak, Math.abs(l));
+          symmetryError = Math.max(symmetryError, Math.abs(r + l));
           const coeffs = effect.coeffs!;
           const sections = "shelf" in coeffs ? [coeffs.shelf, coeffs.peak!] : [coeffs];
           for (const c of sections) {
-            expect(Math.abs(c.a2)).toBeLessThan(1);
-            expect(1 + c.a1 + c.a2).toBeGreaterThan(0);
-            expect(1 - c.a1 + c.a2).toBeGreaterThan(0);
+            maxPoleProduct = Math.max(maxPoleProduct, Math.abs(c.a2));
+            minPositiveMargin = Math.min(minPositiveMargin, 1 + c.a1 + c.a2);
+            minNegativeMargin = Math.min(minNegativeMargin, 1 - c.a1 + c.a2);
           }
         }
+        // Inspect every frame and section, but avoid constructing matchers in the DSP loop.
+        expect(allFinite).toBe(true);
+        expect(peak).toBeLessThan(2);
+        expect(symmetryError).toBe(0);
+        expect(maxPoleProduct).toBeLessThan(1);
+        expect(minPositiveMargin).toBeGreaterThan(0);
+        expect(minNegativeMargin).toBeGreaterThan(0);
       },
     );
   });

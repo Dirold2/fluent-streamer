@@ -24,14 +24,19 @@ export class SeekSourceCache {
   ) {}
 
   start(): void {
-    this.pending = this.files.getOrSet(this.url, () => this.download())
-      .catch(() => { this.failed = true; });
+    this.pending = this.files
+      .getOrSet(this.url, () => this.download())
+      .catch(() => {
+        this.failed = true;
+      });
   }
 
   private async download(): Promise<string> {
     try {
       const response = await this.client.stream(
-        this.url, { headers: this.headers }, this.abort.signal,
+        this.url,
+        { headers: this.headers },
+        this.abort.signal,
       );
       if (response.status !== 200 || !response.data) {
         throw new Error(`seek cache: HTTP ${response.status}`);

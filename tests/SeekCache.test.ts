@@ -40,7 +40,14 @@ async function scenario(mixed: boolean, maxBytes: number) {
   async function mixedSeek(result: FFmpegRunResultExtended, position: number) {
     const pending = result.seek!(position);
     let settled = false;
-    void pending.then(() => { settled = true; }, () => { settled = true; });
+    void pending.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
     for (let i = 0; i < 1000 && !settled; i++) {
       if ((await reader!.read()).done) break;
     }
@@ -97,7 +104,9 @@ it("does not block seek while download is pending; removes private file on dispo
   const bytes = Buffer.from("compressed source bytes");
   let finish!: () => void;
   let requested!: () => void;
-  const seen = new Promise<void>((resolve) => { requested = resolve; });
+  const seen = new Promise<void>((resolve) => {
+    requested = resolve;
+  });
   const server = createServer((_req, response) => {
     response.writeHead(200, { "Content-Length": bytes.length });
     finish = () => response.end(bytes);
@@ -149,7 +158,9 @@ it("rejects an oversized chunked response without making a partial file seekable
 
 it("cancels a stalled transfer and removes the partial file", async () => {
   let responseStarted!: () => void;
-  const seen = new Promise<void>((resolve) => { responseStarted = resolve; });
+  const seen = new Promise<void>((resolve) => {
+    responseStarted = resolve;
+  });
   const server = createServer((_req, response) => {
     response.writeHead(200, { "Content-Type": "audio/mpeg" });
     response.write(Buffer.alloc(128));
@@ -175,14 +186,26 @@ it("cancels a stalled transfer and removes the partial file", async () => {
   }
 });
 
-it.skipIf(!hasFFmpeg)("caches compressed HTTP input for ordinary repeated seek", async () => {
-  await scenario(false, 1024 * 1024);
-}, 15000);
+it.skipIf(!hasFFmpeg)(
+  "caches compressed HTTP input for ordinary repeated seek",
+  async () => {
+    await scenario(false, 1024 * 1024);
+  },
+  15000,
+);
 
-it.skipIf(!hasFFmpeg)("keeps mixed PCM output stable when seeking cached HTTP input", async () => {
-  await scenario(true, 1024 * 1024);
-}, 15000);
+it.skipIf(!hasFFmpeg)(
+  "keeps mixed PCM output stable when seeking cached HTTP input",
+  async () => {
+    await scenario(true, 1024 * 1024);
+  },
+  15000,
+);
 
-it.skipIf(!hasFFmpeg)("falls back to HTTP on a cache size-limit miss", async () => {
-  await scenario(false, 1024);
-}, 15000);
+it.skipIf(!hasFFmpeg)(
+  "falls back to HTTP on a cache size-limit miss",
+  async () => {
+    await scenario(false, 1024);
+  },
+  15000,
+);

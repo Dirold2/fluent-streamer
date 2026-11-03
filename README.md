@@ -137,6 +137,110 @@ await done;
 
 ---
 
+### Replayable factory inputs
+
+For a source that must be reopened for seeking, analysis, or live transitions, pass a public `ReplayableStreamSource` instead of a one-shot stream. `ReplayableInput` is `string | ReplayableStreamSource`. Each `open(signal)` must return a **fresh, independent** `ReadableStream<Uint8Array>` starting at byte zero, with the same encoded media content. It may return a promise. Do not reuse a generator, reader, or stream between opens; open calls can overlap.
+
+```ts
+import { FluentStream, analyzeTrack, type ReplayableStreamSource } from "fluent-streamer";
+
+const track: ReplayableStreamSource = {
+  async open(signal) {
+    const response = await fetch("https://media.example/track.mp3", { signal });
+    if (!response.ok || !response.body) throw new Error(`Download failed: ${response.status}`);
+    return response.body;
+  },
+};
+
+const streamer = new FluentStream({ enableCrossfade: true, autoDrainOutput: false });
+const result = await streamer
+  .input(track)
+  .audioCodec("pcm_s16le")
+  .outputOptions("-vn", "-f", "s16le", "-ar", "48000", "-ac", "2")
+  .output("pipe:1")
+  .run();
+// Connect result.output to a clocked PCM consumer immediately, as below.
+// While that consumer continues reading:
+// await streamer.crossfade(nextTrack, 3);
+const analysis = await analyzeTrack(track, { timeout: 25_000 }); // independent open
+```
+
+For an async-generator downloader, use a lazy, cancellation-aware adapter. The producer must honor the supplied signal in its pending I/O; `iterator.return()` alone queues behind a pending `next()` and cannot unblock it.
+
+```ts
+import { type ReplayableStreamSource } from "fluent-streamer";
+
+function fromGenerator(
+  create: (signal: AbortSignal) => AsyncGenerator<Uint8Array, void, unknown>,
+): ReplayableStreamSource {
+  return {
+    open(signal) {
+      signal.throwIfAborted();
+      const abort = new AbortController();
+      const forwardAbort = () => abort.abort(signal.reason);
+      signal.addEventListener("abort", forwardAbort, { once: true });
+      let iterator: AsyncGenerator<Uint8Array, void, unknown> | undefined;
+      let cancelled = false;
+      const detach = () => signal.removeEventListener("abort", forwardAbort);
+      return new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          try {
+            abort.signal.throwIfAborted();
+            iterator ??= create(abort.signal);
+            const item = await iterator.next();
+            if (cancelled) return;
+            abort.signal.throwIfAborted();
+            if (item.done) {
+              detach();
+              controller.close();
+            } else {
+              controller.enqueue(item.value);
+            }
+          } catch (error) {
+            detach();
+            abort.abort(error);
+            if (!cancelled) controller.error(error);
+            await iterator?.return().catch(() => {});
+          }
+        },
+        async cancel(reason) {
+          cancelled = true;
+          abort.abort(reason); // BEFORE return(): wake any pending next()/I/O
+          detach();
+          await iterator?.return();
+        },
+      }, { highWaterMark: 0 }); // no speculative next(): pull only on demand
+    },
+  };
+}
+
+const nextTrack = fromGenerator(async function* (signal) {
+  const response = await fetch("https://media.example/next.mp3", { signal });
+  if (!response.ok || !response.body) throw new Error(`Download failed: ${response.status}`);
+  const reader = response.body.getReader();
+  try {
+    while (true) {
+      signal.throwIfAborted();
+      const chunk = await reader.read();
+      if (chunk.done) return;
+      yield chunk.value;
+    }
+  } finally {
+    // This generator owns the lock; cancel through the reader, not body.cancel().
+    try { await reader.cancel(signal.reason); }
+    finally { reader.releaseLock(); }
+  }
+});
+```
+
+The generator must release resources in `finally`, including when cancelled while suspended at `yield`. Abort-aware I/O lets an in-flight `next()` settle before queued `return()` runs. Never release a reader lock while reads are pending, or call `stream.cancel()` on a locked stream: use its owning reader's `cancel()` and release the lock after pending operations settle. Do not concurrently consume that reader elsewhere. This adapter adds no downloader dependency.
+
+**Limits and costs:**
+- One stdin input per decoder: do not combine multiple factory/raw-stream stdin inputs in one FFmpeg invocation. Live mixed playback accepts one replayable input per decoder; overlapping decoders may each have their own factory stream.
+- Seeking a factory reopens it from the beginning and uses decode/discard (`-ss` after `-i pipe:0`), rather than HTTP range seeking. Large seeks and late analysis windows reread earlier bytes and can be much slower or hit the analysis deadline.
+- Playback, analyses, preparation, and transitions can open independent downloads in parallel. Honor each open's signal and allow concurrent opens; factory requests use the factory's own headers/authentication, not automatic FFmpeg URL headers.
+- One-shot Web/Node streams are not automatically replayed. There is no automatic disk buffering or full-track replay cache for factories; a factory must genuinely reopen its media. Analysis still limits decoded PCM to 90 seconds, not downloaded bytes.
+
 ### Offline Crossfade Example
 
 ```ts
@@ -154,7 +258,7 @@ await new FluentStream()
 
 Crossfade prebuffers approximately 20 ms (at most 1024 frames) of the next source while continuing to output the old source at full gain. The fade frame counter starts only after this buffer is ready (or the next source reaches EOF). Old-decoder retirement runs in the background: transition completion means PCM generation has completed, not decoder cleanup. Session `done` and `stop()` still await every pending retirement and report cleanup failures. This removes cleanup waits from the audio path, but cannot eliminate later network underruns or gaps after the old source runs out.
 
-`await streamer.crossfade(url, time = 3)` requests an immediate transition to another file/URL in an active mixed playback session; it does not wait for the current track's end. The duration is in **seconds** (finite `0…3600`); `0` switches without a fade. The promise resolves after PCM transition generation, not after decoder retirement or the incoming track finishes. You can request another transition after awaiting the previous one; concurrent transitions reject. `result.crossfade?.(url, time)` exposes the same control in an opted-in session.
+`await streamer.crossfade(source, time = 3)` requests an immediate transition to another file/URL or replayable factory in an active mixed playback session; it does not wait for the current track's end. The duration is in **seconds** (finite `0…3600`); `0` switches without a fade. The promise resolves after PCM transition generation, not after decoder retirement or the incoming track finishes. You can request another transition after awaiting the previous one; concurrent transitions reject. `result.crossfade?.(source, time)` exposes the same control in an opted-in session.
 
 The optional third argument is `LiveCrossfadeOptions`: `bassHandoff?: boolean` defaults to `false`. Enable it manually with `await streamer.crossfade(url, seconds, { bassHandoff: true, curve: 'equalPower', headroomDb: 3 })`. It uses independent per-channel outgoing/incoming low-band histories to smoothly close the outgoing low band and open the incoming low band over **35–65%** of the fade. The single-pole split (default `bassCutoffHz: 180`) has leakage, not a brick-wall cutoff: the rest of the spectrum still overlaps, and drums/percussive material can still clash. This does not guarantee a clean drum handoff or adjust pitch/playback speed.
 
@@ -171,7 +275,7 @@ const streamer = new FluentStream({
   disableThrottling: true, // a clocked player supplies pacing/backpressure
 });
 const result = await streamer
-  .input("first.mp3") // exactly one file/URL input, passed as an FFmpeg argument
+  .input("first.mp3") // exactly one file/URL or replayable factory input
   .audioCodec("pcm_s16le")
   .outputOptions("-vn", "-f", "s16le", "-ar", "48000", "-ac", "2")
   .output("pipe:1")
@@ -197,7 +301,7 @@ try {
 ```
 
 **Requirements and limits:**
-- Use exactly one `.input(fileOrURL)` represented by `-i` in the FFmpeg arguments, one stdout output `pipe:1`, and no complex filters or extra inputs. Raw stream, pipe, and blob inputs are unsupported.
+- Use exactly one `.input(fileOrURLOrFactory)` represented by `-i` in the FFmpeg arguments, one stdout output `pipe:1`, and no complex filters or extra inputs. Replayable factories use `-i pipe:0`; one-shot raw stream, explicit pipe, and blob inputs are unsupported for live mixed playback.
 - Explicitly configure `pcm_s16le`, `-f s16le`, `-ar 48000`, and `-ac 2` as above. If overriding `audioProcessorOptions.sampleRate`/`channels`, explicitly match `-ar`/`-ac` and the consumer format. Built-in DSP is optional; enable `useAudioProcessor: true` for karaoke/EQ and other effects.
 - Keep the consumer pipeline flowing **before and throughout `await crossfade()` and `await seek()`**. Without consumption, backpressure stalls the fade and its promise (even a zero-duration switch needs output demand). Auto-drain is disabled in this mode. Do **not** wait for `result.done` before requesting the next track: by then the session has ended.
 - Trigger transitions before EOF yourself. This is not an automatic track queue, DJ beat matching, or end-of-track scheduler. An input reaching EOF during a fade contributes silence for the remaining fade frames.
@@ -206,7 +310,7 @@ try {
 
 ### Prepared automix
 
-Prepare the next queue entry **early**, while the live-crossfade consumer above keeps reading the same `result.output`. `prepareAutomix()` is an instance method on `FluentStream`, not a run-result method; it requires the same opted-in PCM session and replayable file/URL inputs.
+Prepare the next queue entry **early**, while the live-crossfade consumer above keeps reading the same `result.output`. `prepareAutomix()` is an instance method on `FluentStream`, not a run-result method; it requires the same opted-in PCM session and replayable file/URL or factory inputs.
 
 ```ts
 import {
@@ -244,6 +348,23 @@ if (nextUrl !== queue.nextUrl) {
 // preparationAbort.abort(), handle its rejection, then prepare the new entry.
 ```
 
+Factories work with the same public controls. With `track` / `nextTrack` from the factory examples and an active `streamer` whose PCM consumer is already flowing:
+
+```ts
+await streamer.crossfade(nextTrack, 3); // opens an independent incoming stream
+// For a subsequent queue entry, sample the CURRENT track's actual remaining time:
+const prepared = await streamer.prepareAutomix(track, {
+  outgoingRemainingMs: currentDurationMs - currentPositionMs(),
+  fallbackSeconds: 8,
+});
+try {
+  await prepared.start(); // keep consuming result.output throughout
+} catch (error) {
+  await prepared.cancel().catch(() => {});
+  throw error;
+}
+```
+
 - `outgoingRemainingMs` is the **actual remaining duration sampled at the call**, not the full track duration or a future timer delay. Preparation subtracts PCM progress during analysis. Keep consuming output throughout preparation and `start()`; do not await session `done` first.
 - Preparation analyzes both sources (unless supplied as `outgoingAnalysis` / `incomingAnalysis`), plans a cue, and prebuffers the incoming decoder without fading. It reserves the transition: seek, crossfade, and another preparation reject while preparing/ready and through the started transition. Start or cancel promptly. `cancel()` is idempotent before start; after start it rejects and cannot undo the transition.
 - There is **no automatic start at EOF**, and preparation does not hold EOF open. Call `start()` while playback is still active; no `setTimeout` is needed. It schedules against consumed/generated PCM frames, not audible device time. Late arming can move a quantized start to a later beat; if the overlap no longer fits with the reserved one-second tail, `start()` cancels and rejects as stale rather than silently changing the decoded cue. Handle preparation/start rejection and reassess remaining time before retrying.
@@ -251,7 +372,7 @@ if (nextUrl !== queue.nextUrl) {
 
 **Analysis and planning.** Use `await analyzePcmAsync(pcm: Int16Array, sampleRate, options?: PcmAnalysisOptions)` for CPU analysis during playback. It runs the shared analyzer in a dedicated worker and copies the analyzed input rather than transferring/detaching the caller's buffer. `PcmAnalysisOptions` has `signal?: AbortSignal` and `timeout?: number`: the default 25,000 ms deadline includes worker startup and the whole worker job. Timeout must be finite and positive. Abort/timeout rejects and terminates the worker; each job also terminates its worker before settling normally. `analyzePcm(pcm, sampleRate)` remains explicitly synchronous for deliberate offline use: it blocks the calling/main thread and is not a playback-safe substitute. Both APIs require a finite positive sample rate.
 
-`await analyzeTrack(fileOrURL, { ffmpegPath?, headers?, timeout?, signal?, startSeconds? })` decodes through the runtime-selected `Processor`/runner, then automatically runs CPU analysis in a worker. `prepareAutomix()` automatically uses this path for each uncached source; callers do not need to opt in. Worker startup/execution errors reject: there is **no synchronous fallback**. Track analysis requires available FFmpeg (or the runner's FFmpeg backend), uses analysis runner defaults rather than all playback/run options, and does not apply playback effects. Its default 25-second **total deadline covers decoder startup, decoding, worker startup, and analysis**, not separate 25-second budgets per phase. Abort/timeout stops decoding and terminates an active analysis worker. Decoded output is capped at 720,000 bytes: 90 seconds of 4 kHz mono s16le. This is not a network download-size guarantee.
+`await analyzeTrack(fileOrURLOrFactory, { ffmpegPath?, headers?, timeout?, signal?, startSeconds? })` decodes through the runtime-selected `Processor`/runner, then automatically runs CPU analysis in a worker. `prepareAutomix()` automatically uses this path for each uncached source; callers do not need to opt in. Worker startup/execution errors reject: there is **no synchronous fallback**. Track analysis requires available FFmpeg (or the runner's FFmpeg backend), uses analysis runner defaults rather than all playback/run options, and does not apply playback effects. Its default 25-second **total deadline covers decoder startup, decoding, worker startup, and analysis**, not separate 25-second budgets per phase. Abort/timeout stops decoding and terminates an active analysis worker. Decoded output is capped at 720,000 bytes: 90 seconds of 4 kHz mono s16le. This is not a network download-size guarantee.
 
 **Worker deployment.** Node uses `node:worker_threads`; compiled packages resolve the separate `dist/Audio/analysis/DjAnalysisWorker.js` entry and its `DjAnalysisCore.js` dependency. Bundlers/deployments must preserve these worker/core assets and their relative URLs beside the compiled client, or explicitly arrange equivalent worker asset resolution; bundling only the main entry is insufficient. Running the TypeScript source directly requires **Node ≥22.18**; older Node versions must use a compiled build (subject to the package's normal runtime requirements). The non-Node branch uses a module Web Worker, but Bun, Deno, and browser/Web Worker execution remain **unverified**, not a compatibility promise. Missing Worker support or unavailable worker assets cause rejection, never main-thread analysis.
 
@@ -487,7 +608,7 @@ await new FluentStream()
 ```
 
 Main methods:
-- `.input(src)` — add file/URL/stream input (`string`, `ReadableStream<Uint8Array>`, or Node.js Readable)
+- `.input(src)` — add file/URL/factory/stream input (`string`, `ReplayableStreamSource`, `ReadableStream<Uint8Array>`, or Node.js Readable)
 - `.output(dst)` — set the output (file path, pipe object, or fd)
 - `.audioCodec(codec)` / `.videoCodec(codec)` — set codecs
 - `.audioBitrate(bps)` / `.videoBitrate(bps)`
@@ -526,14 +647,17 @@ Creates a new FluentStream instance with optional processor options.
 
 ### Input/Output Methods
 
-#### `.input(source: string | ReadableStream<Uint8Array> | NodeJS.Readable, options?: InputOptions)`
-Add file, URL, blob URL, or stream input.
+#### `.input(source: string | ReplayableStreamSource | ReadableStream<Uint8Array> | NodeJS.Readable, options?: InputOptions)`
+Add file, URL, blob URL, replayable factory, or one-shot stream input.
 ```ts
 // File input
 .input('/path/to/audio.mp3')
 
 // HTTP URL with custom headers
 .input('https://cdn.com/track.mp3')
+
+// Replayable factory (fresh stream per decoder/seek/analysis)
+.input(track) // ReplayableStreamSource from the factory example above
 
 // Web Stream input
 .input(readableStream)
@@ -763,8 +887,8 @@ The library does **not flush PCM already queued by an external player**. Old fra
 A seek during an active fade rejects. While a seek is in progress, crossfade and a second seek reject. These operations do **not** cancel or supersede an in-progress transition; await completion before requesting another operation.
 
 **Limits and errors:**
-- Only an **active** run with a **single replayable file/URL input**, stdout output (`pipe:1`), and **no complex filters** supports live seek.
-- Raw stream and blob inputs are unsupported. A live/non-seekable URL server may fail even though the input is a URL.
+- Only an **active** run with a **single replayable file/URL or factory input**, stdout output (`pipe:1`), and **no complex filters** supports live seek.
+- One-shot raw stream and blob inputs are unsupported for live seek. Factories reopen from byte zero and decode/discard to the target, which is slower than range seeking. A live/non-seekable URL server may fail even though the input is a URL.
 - The position must be a finite number of seconds `>= 0`, or a time string such as `'00:01:30'`; it is not a relative offset.
 - Concurrent seeks reject. For ordinary seek, seeking through a stale result (one superseded by a seek) rejects; always retain the new result. Mixed seek retains the existing public result instead.
 - `.seekInput()` remains pre-run configuration; it does not replace this live-seek API.
