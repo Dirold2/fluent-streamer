@@ -16,7 +16,7 @@
   "author": "dirold2",
   "license": "MIT",
   "scripts": {
-    "build": "tsc && esbuild 'dist/**/*.js' --outdir=dist --allow-overwrite --minify --sourcemap && d-build",
+    "build": "tsc && esbuild \"dist/**/*.js\" --outdir=dist --allow-overwrite --minify --sourcemap && d-build",
     "dist": "d-dist",
     "deploy": "npm run build && npm run dist",
     "pub": "d-publish",
