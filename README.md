@@ -17,6 +17,12 @@ Offers a fluent, chainable API for media/audio/video processing with FFmpeg, sup
 
 ---
 
+## Testing
+
+Run the full Vitest suite in each runtime with `bun run test:node`, `bun run test:bun`, or `bun run test:deno`. Bun and Deno runs use a single test worker; the full Bun run currently exposes compatibility failures rather than suppressing them. Deno's `-A` grants the test process all permissions, so run it only with trusted code. FFmpeg must be available for integration tests.
+
+For the focused real DJ-worker scenarios, use `bun run test:runtime:node`, `bun run test:runtime:bun`, or `bun run test:runtime:deno`. Additional Vitest arguments and test paths can be passed to the full-suite commands, for example `bun run test:bun tests/PlaybackMixer.test.ts`.
+
 ## Installation
 
 ```bash

@@ -1,6 +1,6 @@
 {
   "name": "fluent-streamer",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Fluent FFmpeg wrapper with real-time audio effects, timeout and progress tracking.",
   "type": "module",
   "main": "dist/index.js",
@@ -17,6 +17,11 @@
   "license": "MIT",
   "scripts": {
     "build": "tsc && esbuild \"dist/**/*.js\" --outdir=dist --allow-overwrite --minify --sourcemap && d-build",
+    "typecheck": "bun run typecheck:shared && bun run typecheck:node && bun run typecheck:bun && bun run typecheck:deno",
+    "typecheck:shared": "tsc -p tsconfig.check.shared.json",
+    "typecheck:node": "tsc -p tsconfig.check.node.json",
+    "typecheck:bun": "tsc -p tsconfig.check.bun.json",
+    "typecheck:deno": "tsc -p tsconfig.check.deno.json",
     "dist": "d-dist",
     "deploy": "npm run build && npm run dist",
     "pub": "d-publish",
@@ -25,6 +30,12 @@
     "format": "oxfmt src tests",
     "format:check": "oxfmt src tests --check",
     "test": "vitest run",
+    "test:node": "node node_modules/vitest/vitest.mjs run",
+    "test:bun": "bun --bun node_modules/vitest/vitest.mjs run --no-file-parallelism --maxWorkers=1 --cache=false",
+    "test:deno": "deno run --no-prompt -A node_modules/vitest/vitest.mjs run --no-file-parallelism --maxWorkers=1 --cache=false",
+    "test:runtime:node": "bun run test:node tests/RuntimeWorker.test.ts",
+    "test:runtime:bun": "bun run test:bun tests/RuntimeWorker.test.ts",
+    "test:runtime:deno": "bun run test:deno tests/RuntimeWorker.test.ts",
     "test:watch": "vitest"
   },
   "dependencies": {

@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.3] – 2026-11-06
+
+### Added
+- **Runtime-specific test commands:** Run the Vitest suite separately under Node.js, Bun and Deno, with focused DJ worker commands for each runtime. Add worker tests for analysis results, parallel jobs, cancellation, deadlines and error propagation.
+- **Isolated type checks:** Add separate TypeScript checks for the Node, Bun and Deno runners and selected runtime-neutral modules.
+
+### Changed
+- **DJ worker transport:** Move Node-specific worker creation and lifecycle handling into a dedicated adapter while preserving the existing analysis API.
+- **Testing documentation:** Document runtime-specific commands, the FFmpeg requirement and Deno's full-permission setting. The full Bun suite still exposes runtime compatibility failures.
+
 ## [0.8.2] – 2026-11-05
 
 ### Fixed

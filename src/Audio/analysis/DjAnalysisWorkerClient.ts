@@ -1,5 +1,6 @@
 import type { DjAnalysis } from "./DjAnalysisCore.js";
 import type { AnalysisRequest, AnalysisResponse } from "./DjAnalysisWorkerProtocol.js";
+import { isNodeAnalysisRuntime, startNodeAnalysisWorker } from "./DjAnalysisNodeWorkerAdapter.js";
 
 export interface PcmAnalysisOptions {
   signal?: AbortSignal;
@@ -65,39 +66,21 @@ export function runAnalysisWorker(
         source ? "./DjAnalysisWorker.ts" : "./DjAnalysisWorker.js",
         import.meta.url,
       );
-      const node =
-        typeof process !== "undefined" && process.versions?.node && !process.versions?.bun;
-      if (node) {
-        const { Worker } = await import("node:worker_threads");
-        if (settled) return;
-        if (source) {
-          const [major, minor] = process.versions.node.split(".").map(Number);
-          if (major! < 22 || (major === 22 && minor! < 18))
-            throw new Error("Source DJ workers require Node >=22.18; build the package first");
-        }
-        const worker = new Worker(url, { execArgv: [] });
-        terminate = () => worker.terminate();
-        const error = (cause: Error) => {
-          void finish(false, cause);
-        };
-        const exit = (code: number) => {
-          void finish(
-            false,
-            new Error(`DJ analysis worker exited before responding (code ${code})`),
-          );
-        };
-        worker.on("message", onMessage);
-        worker.on("error", error);
-        worker.on("messageerror", error);
-        worker.on("exit", exit);
-        removeListeners = () => {
-          worker.off("message", onMessage);
-          worker.off("error", error);
-          worker.off("messageerror", error);
-          worker.off("exit", exit);
-        };
-        const message = request();
-        worker.postMessage(message, [message.buffer]);
+      if (isNodeAnalysisRuntime()) {
+        await startNodeAnalysisWorker(
+          url,
+          source,
+          () => settled,
+          (stop, remove) => {
+            terminate = stop;
+            removeListeners = remove;
+          },
+          onMessage,
+          (error) => {
+            void finish(false, error);
+          },
+          request,
+        );
       } else {
         if (typeof globalThis.Worker !== "function")
           throw new Error("Off-thread DJ analysis is unsupported: no Worker implementation");
