@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["DjAnalysisWorkerProtocol.js"],
+  "sourcesContent": ["export {};\n//# sourceMappingURL=DjAnalysisWorkerProtocol.js.map"],
+  "mappings": "aAAA",
+  "names": []
+}

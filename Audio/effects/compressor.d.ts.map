@@ -1,0 +1,1 @@
+{"version":3,"file":"compressor.d.ts","sourceRoot":"","sources":["../../../src/Audio/effects/compressor.ts"],"names":[],"mappings":"AAAA,wBAAgB,cAAc,CAAC,KAAK,EAAE,MAAM,EAAE,SAAS,SAAM,EAAE,KAAK,SAAI,GAAG,MAAM,CAMhF;AAED,qBAAa,gBAAgB;IACpB,OAAO,EAAE,OAAO,CAAC;IAExB,YAAY,OAAO,EAAE,OAAO,EAE3B;IAEM,GAAG,CAAC,OAAO,EAAE,OAAO,GAAG,IAAI,CAEjC;CACF"}

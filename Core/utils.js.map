@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/Core/utils.ts"],
+  "sourcesContent": ["export function getTimeString(): string {\n  return new Date().toLocaleTimeString(\"en-US\", { hour12: false });\n}\n"],
+  "mappings": "aAAM,gBAAU,eAAa,CAC3B,OAAO,IAAI,KAAI,EAAG,mBAAmB,QAAS,CAAE,OAAQ,EAAK,CAAE,CACjE",
+  "names": []
+}
