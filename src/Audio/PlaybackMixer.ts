@@ -134,7 +134,10 @@ class Input {
       this.disposal = Promise.resolve().then(async () => {
         this.retire.prepare?.(reason);
         // Detach and finish cancellation before retirement can error upstream output.
-        const results = await Promise.allSettled([this.reader.cancel(reason), this.warmup]);
+        const results = await Promise.allSettled([
+          this.reader.cancel(reason),
+          this.warmup?.catch(() => {}),
+        ]);
         results.push(...(await Promise.allSettled([Promise.resolve().then(() => this.retire())])));
         this.prebuffer = [];
         this.chunk = new Uint8Array(0);
@@ -339,7 +342,7 @@ export class PlaybackMixer {
     );
   }
 
-  /** Prebuffer at most 20 ms / 1024 frames without changing the current source. */
+  /** Prebuffer at most 20 ms / 1024 frames; reject input with no complete PCM frame. */
   async prepare(next: ReadableStream<Uint8Array>, onRetire: Retire): Promise<PreparedMixerInput> {
     if (this.closed) throw new Error("PlaybackMixer is stopped");
     if (this.transition || this.prepared) throw new Error("A replacement is already active");
@@ -354,6 +357,7 @@ export class PlaybackMixer {
       );
       if (this.closed || this.prepared !== prepared)
         throw new Error("Prepared input was discarded or playback stopped");
+      if (!input.prebufferedFrames) throw new Error("Incoming decoder produced no complete PCM frames");
       prepared.ready = true;
       return prepared.token;
     } catch (error) {

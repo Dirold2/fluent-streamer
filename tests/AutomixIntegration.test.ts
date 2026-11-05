@@ -391,6 +391,7 @@ describe.skipIf(!hasFFmpeg)("automix preparation integration", () => {
     const started = prepared.start().then(() => {
       complete = true;
     });
+    void started.catch(() => { complete = true; });
     while (!complete) {
       expect((await reader.read()).done).toBe(false);
       await delay(1);
@@ -413,6 +414,7 @@ describe.skipIf(!hasFFmpeg)("automix preparation integration", () => {
     const nextStarted = next.start().then(() => {
       complete = true;
     });
+    void nextStarted.catch(() => { complete = true; });
     while (!complete) {
       expect((await reader.read()).done).toBe(false);
       await delay(1);
@@ -424,7 +426,7 @@ describe.skipIf(!hasFFmpeg)("automix preparation integration", () => {
       .mockReturnValue(48000);
     expect(fluent.getPlaybackPositionMs()).toBe(1000);
     nativeFrame.mockRestore();
-  });
+  }, 30000);
 
   it("preserves explicit mid-track start rather than replacing it with the tail", async () => {
     const fluent = track();
@@ -543,6 +545,7 @@ describe.skipIf(!hasFFmpeg)("automix preparation integration", () => {
     const transition = prepared.start().then(() => {
       complete = true;
     });
+    void transition.catch(() => { complete = true; });
     while (!complete) {
       expect((await reader.read()).done).toBe(false);
       await delay(1);
@@ -554,7 +557,7 @@ describe.skipIf(!hasFFmpeg)("automix preparation integration", () => {
     });
     expect(fluent.getArgs()).toContain("1");
     expect(planAutomix).toBeTypeOf("function");
-  });
+  }, 30000);
 
   it("aborts pending dual analysis on stop and releases the reservation", async () => {
     const fluent = track();

@@ -490,6 +490,33 @@ describe("PlaybackMixer", () => {
       expect(next.stream.locked).toBe(false);
     });
 
+    it("rejects empty incoming PCM and leaves the current track usable", async () => {
+      const oldRetired = retire();
+      const nextRetired = retire();
+      const next = source([]);
+      const mixer = new PlaybackMixer(source([100, 200]), 1000, 1, oldRetired);
+      await expect(mixer.prepare(next, nextRetired)).rejects.toThrow("no complete PCM frames");
+      expect(next.locked).toBe(false);
+      expect(nextRetired).toHaveBeenCalledTimes(1);
+      expect(oldRetired).not.toHaveBeenCalled();
+      expect(mixer.stats.preparing).toBe(false);
+      expect(await drain(mixer.output)).toEqual([100, 200]);
+      await mixer.done;
+      expect(oldRetired).toHaveBeenCalledTimes(1);
+    });
+
+    it("accepts a short complete incoming PCM stream and permits cancellation", async () => {
+      const nextRetired = retire();
+      const next = source([900]);
+      const mixer = new PlaybackMixer(source([100, 200]), 1000, 1, retire());
+      const token = await mixer.prepare(next, nextRetired);
+      await mixer.discardPrepared(token);
+      expect(next.locked).toBe(false);
+      expect(nextRetired).toHaveBeenCalledTimes(1);
+      expect(await drain(mixer.output)).toEqual([100, 200]);
+      await mixer.done;
+    });
+
     it("cleans up failed preparation without replacing the outgoing input", async () => {
       const next = source([1], [1]);
       const retired = retire();
@@ -500,8 +527,7 @@ describe("PlaybackMixer", () => {
       expect(next.locked).toBe(false);
       expect(await drain(mixer.output)).toEqual([100, 200]);
       expect(mixer.sourceFrame).toBe(1);
-      // Failed warmup remains owned so session completion reports its failure.
-      await expect(mixer.done).rejects.toThrow("Truncated PCM16");
+      await mixer.done;
     });
 
     it("publishes PCM then fails output, transition and done when EOF precedes the schedule", async () => {

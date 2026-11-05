@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { analyzePcm, analyzeTrack } from "../src/Audio/analysis/DjAnalysis.js";
 import { Processor } from "../src/Core/Processor.js";
@@ -247,7 +248,7 @@ describe("analyzePcm", () => {
 
 describe("analyzeTrack", () => {
   it("decodes the existing audio fixture with the real Processor", async () => {
-    const result = await analyzeTrack(new URL("./320.mp3", import.meta.url).pathname);
+    const result = await analyzeTrack(fileURLToPath(new URL("./320.mp3", import.meta.url)));
     expect(result.analyzedDurationMs).toBeGreaterThan(0);
     expect(result.analyzedDurationMs).toBeLessThanOrEqual(90000);
     expect(result.bpmConfidence).toBeGreaterThanOrEqual(0);

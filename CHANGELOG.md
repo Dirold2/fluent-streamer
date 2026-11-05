@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.2] – 2026-11-05
+
+### Fixed
+- **Automix preparation:** Reject incoming streams that end without a complete PCM frame instead of reporting them as ready. Clean up failed preparation without interrupting the current track or causing the mixer session to fail.
+
+### Added
+- **Mixer regression coverage:** Verify that empty incoming audio is rejected while the current track remains playable and that short streams with a complete PCM frame are accepted.
+- **Tempo scaling diagnostics:** Add tempo and beat matching metrics with regression tests for scaling, octave ambiguity and one-to-one beat matching.
+
+### Changed
+- **Windows test compatibility:** Correct the FFmpeg fixture path and stream validation expectation. Allow more time for two real-FFmpeg Automix tests and handle transition rejection during cleanup.
+
 ## [0.8.1] – 2026-11-03
 
 ### Fixed

@@ -160,7 +160,7 @@ describe("FluentStream Unit Tests", () => {
       } catch (err: unknown) {
         didThrow = true;
         expect(String(err)).toMatch(
-          /(multiple stream|already has a stream|duplicate pipe index|Multiple stream \(Readable\) inputs are not supported)/i,
+          /(only one stdin source|multiple stream|already has a stream|duplicate pipe index)/i,
         );
       }
       if (!didThrow) {

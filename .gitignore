@@ -20,6 +20,7 @@ tests/.tmp/
 scripts/*
 !scripts/render-drop-candidate.mjs
 !scripts/render-live-handoff.mjs
+!scripts/tempo-scaling-metrics.mjs
 
 # TypeScript
 *.tsbuildinfo

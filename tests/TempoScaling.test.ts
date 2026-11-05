@@ -74,6 +74,26 @@ describe("tempo scaling metrics", () => {
     expect(r.recall).toBe(2 / 3);
     expect(r.meanMatchedErrorMs).toBe(0);
   });
+  it("matches globally rather than consuming the nearest beat too early", () => {
+    const result = compareScaledBeats([0, 10], [6, 11], 1, 6);
+    expect(result).toEqual({ matched: 2, precision: 1, recall: 1, meanMatchedErrorMs: 3.5 });
+    expect(compareScaledBeats([10, 0], [11, 6], 1, 6)).toEqual(result);
+  });
+  it("minimizes error among maximum-cardinality beat matchings", () => {
+    expect(compareScaledBeats([0], [3, 1], 1, 4).meanMatchedErrorMs).toBe(1);
+    expect(compareScaledBeats([], [], 1)).toEqual({
+      matched: 0, precision: 0, recall: 0, meanMatchedErrorMs: null,
+    });
+  });
+  it("handles half-time, invalid tempos and invalid beat inputs", () => {
+    expect(compareScaledTempo(100, 50, 1)).toEqual({
+      relativeError: 0.5, octaveShift: -1, familyErrorOctaves: 0, octaveCorrectedRelativeError: 0,
+    });
+    expect(() => compareScaledTempo(0, 100, 1)).toThrow(RangeError);
+    expect(() => compareScaledTempo(100, Infinity, 1)).toThrow(RangeError);
+    expect(() => compareScaledBeats([NaN], [], 1)).toThrow(RangeError);
+    expect(() => compareScaledBeats([], [], 1, -1)).toThrow(RangeError);
+  });
   it.each([0, -1, NaN, Infinity])("rejects invalid speed %s", (speed) => {
     expect(() => compareScaledTempo(100, 100, speed)).toThrow(RangeError);
     expect(() => compareScaledBeats([], [], speed)).toThrow(RangeError);
