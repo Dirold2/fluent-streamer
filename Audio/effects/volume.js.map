@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../src/Audio/effects/volume.ts"],
+  "sourcesContent": ["import { VOLUME_MIN, VOLUME_MAX } from \"../../Types/audio.js\";\n\nexport function clampVolume(volume: number): number {\n  return Math.max(VOLUME_MIN, Math.min(VOLUME_MAX, volume));\n}\n\nexport class VolumeEffect {\n  public value: number;\n\n  constructor(initialVolume: number) {\n    this.value = clampVolume(initialVolume);\n  }\n\n  public set(volume: number): void {\n    this.value = clampVolume(volume);\n  }\n}\n"],
+  "mappings": "aAAA,OAAS,cAAAA,EAAY,cAAAC,MAAkB,uBAEjC,gBAAU,YAAYC,EAAc,CACxC,OAAO,KAAK,IAAIF,EAAY,KAAK,IAAIC,EAAYC,CAAM,CAAC,CAC1D,CAEM,aAAO,YAAY,CAChB,MAEP,YAAYC,EAAqB,CAC/B,KAAK,MAAQ,YAAYA,CAAa,CACxC,CAEO,IAAID,EAAc,CACvB,KAAK,MAAQ,YAAYA,CAAM,CACjC",
+  "names": ["VOLUME_MIN", "VOLUME_MAX", "volume", "initialVolume"]
+}

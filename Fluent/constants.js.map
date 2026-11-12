@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/Fluent/constants.ts"],
+  "sourcesContent": ["export const HUMANITY_HEADERS = Object.freeze({\n  \"X-Human-Intent\": \"true\",\n  \"X-Request-Attention\": \"just-want-to-do-my-best\",\n  \"User-Agent\": \"FluentStream/1.0 (friendly bot)\",\n});\n"],
+  "mappings": "aAAO,aAAM,iBAAmB,OAAO,OAAO,CAC5C,iBAAkB,OAClB,sBAAuB,0BACvB,aAAc,kCACf",
+  "names": []
+}

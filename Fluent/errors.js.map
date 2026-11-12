@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/Fluent/errors.ts"],
+  "sourcesContent": ["export class FluentStreamValidationError extends Error {\n  constructor(message: string) {\n    super(message);\n    this.name = \"FluentStreamValidationError\";\n    Object.setPrototypeOf(this, FluentStreamValidationError.prototype);\n  }\n}\n"],
+  "mappings": "aAAM,aAAO,oCAAoC,KAAK,CACpD,YAAYA,EAAe,CACzB,MAAMA,CAAO,EACb,KAAK,KAAO,8BACZ,OAAO,eAAe,KAAM,4BAA4B,SAAS,CACnE",
+  "names": ["message"]
+}
