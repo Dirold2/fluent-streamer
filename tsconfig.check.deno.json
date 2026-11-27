@@ -1,9 +1,0 @@
-{
-  "extends": "./tsconfig.json",
-  "compilerOptions": {
-    "noEmit": true,
-    "types": ["deno"]
-  },
-  "files": ["src/Runner/runners/deno.ts"],
-  "include": []
-}
